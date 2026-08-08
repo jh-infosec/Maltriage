@@ -6,11 +6,19 @@ samples/
 *.sys
 *.vir
 
+# Python
 __pycache__/
 *.py[cod]
-venv/
-.venv/
 .pytest_cache/
 .ruff_cache/
 .coverage
+
+# Virtual environments
+venv/
+.venv/
+
+# Generated output
+demo/
 reports/
+report.json
+*.jsonl
