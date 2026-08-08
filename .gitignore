@@ -1,0 +1,16 @@
+# NEVER commit samples. This line is load-bearing.
+samples/
+*.bin
+*.exe
+*.dll
+*.sys
+*.vir
+
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+reports/

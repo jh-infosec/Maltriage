@@ -1,0 +1,19 @@
+# Core has no runtime dependencies. Everything below is optional and
+# enables a specific extractor or roadmap feature.
+
+# testing
+pytest>=7.4
+
+# v0.2 -- PE parsing
+# pefile>=2023.2.7
+
+# v0.3 -- YARA matching
+# yara-python>=4.3
+
+# fuzzy hashing (needs libfuzzy installed)
+# ssdeep>=3.4
+
+# v0.6 -- classifier
+# scikit-learn>=1.3
+# lightgbm>=4.0
+# numpy>=1.24
