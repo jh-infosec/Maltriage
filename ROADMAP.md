@@ -13,6 +13,17 @@
 
 ---
 
+## Version 0.1.1
+
+- [x] Windowed entropy on small files
+- [x] Size-aware entropy thresholds
+- [x] Config validation with reported fallbacks
+- [x] Consistent JSON array output
+- [x] Distinct exit codes for findings and failures
+- [x] Regression test per defect
+
+---
+
 ## Version 0.2
 
 - [ ] PE parsing

@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 SEVERITIES = ("info", "low", "medium", "high")
 SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}

@@ -75,9 +75,32 @@ Adding a detection heuristic means changing `findings()`, never `extract()`.
 
 ### Thresholds live in config, not code
 
-Every tunable value is read with `config.get(key, default)` from
-`DEFAULT_CONFIG`. The config is JSON-serialisable so it can later be loaded
-from a file or an API without restructuring.
+Every tunable value is read from `DEFAULT_CONFIG`. The config is
+JSON-serialisable so it can later be loaded from a file or an API without
+restructuring.
+
+### Config is validated, never trusted
+
+Config is read through the accessors in `sample_data.py`, never with a bare
+`config.get`. Each accessor validates, falls back to a stated default and
+never raises.
+
+v0.1.0 read config directly, which let `hash_chunk_bytes: 0` through and made
+every digest the hash of an empty file with nothing raised anywhere. A triage
+tool returning a confident wrong hash is worse than one that crashes.
+
+A rejected value is recorded under `config` in `report.errors`, so a report
+never looks clean while quietly ignoring what the caller asked for.
+
+### Entropy is scored against what random data of that length reaches
+
+The plug-in entropy estimator is biased low on short samples: 375 random bytes
+cannot fill 256 buckets evenly and measure about 7.42 rather than 8.0.
+
+Thresholds are therefore ratios of `expected_random_entropy(n)`, not absolute
+bits per byte. One threshold then holds at every window size. An absolute 7.5
+was unreachable below about 512 bytes, which is why v0.1.0 could not see a
+packed payload in a dropper-sized file even in principle.
 
 ### Findings are advisory
 
@@ -113,6 +136,11 @@ Current extractors: `filetype`, `hashes`, `entropy`.
 Finding keys: `unrecognised_format`, `extension_mismatch`,
 `high_file_entropy`, `entropy_hotspot`.
 
+`expected_random_entropy` is the reference the entropy ratios are measured
+against. It is the Miller bias correction, floored by log2(n), and it tracks
+measured randomness within 3% from 128 bytes upward. There is a test for
+that, because if the reference drifts the thresholds stop meaning anything.
+
 Severity levels are `high`, `medium`, `low` and `info`.
 
 ### models.py
@@ -125,8 +153,8 @@ fail loudly rather than mis-parse.
 
 ### sample_data.py
 
-Bundled synthetic fixtures and the default config, used during development
-and by the test suite.
+Bundled synthetic fixtures, the default config, and the validated accessors
+every other module uses to read it.
 
 Every fixture is generated in-process. No malicious samples are required to
 develop or test this tool.
@@ -140,13 +168,15 @@ schema and the error-isolation guarantee. Run with `pytest`.
 
 1. File path received by the CLI
 2. Pipeline builds an empty report from the file's name and size
-3. File type extracted first, publishing `family` to the shared context
-4. Remaining extractors run in order, each reading config and context
-5. Each extractor's data is merged into `report.data`
-6. Each extractor's findings are appended to `report.findings`
-7. An extractor that raises is recorded in `report.errors` and skipped
-8. Report severity is the maximum severity across all findings
-9. Report rendered to stdout, JSON or JSON Lines
+3. Config validated once, any problems recorded under `config` in
+   `report.errors`
+4. File type extracted first, publishing `family` to the shared context
+5. Remaining extractors run in order, each reading config and context
+6. Each extractor's data is merged into `report.data`
+7. Each extractor's findings are appended to `report.findings`
+8. An extractor that raises is recorded in `report.errors` and skipped
+9. Report severity is the maximum severity across all findings
+10. Report rendered to stdout, JSON array or JSON Lines
 
 ## Known Constraints
 
@@ -167,9 +197,17 @@ be reported as `unknown`.
 
 ### Entropy thresholds are heuristics
 
-7.2 whole-file and 7.5 per window are tuned for recall over precision. A
-legitimate compressed installer will trip `high_file_entropy`. This is
-intended: triage decides what deserves a human, not what is malicious.
+0.90 whole-file and 0.94 per window, as ratios of random, are tuned for recall
+over precision. A legitimate compressed installer will trip
+`high_file_entropy`, and a PNG will trip `entropy_hotspot` because it is
+deflate-compressed data inside a low-entropy container. This is intended:
+triage decides what deserves a human, not what is malicious.
+
+### Entropy is not reported below roughly 128 bytes
+
+A sample that short has too few observations to say anything about 256
+possible byte values. `window_count` is 0 and no hotspot finding is produced.
+Reporting nothing is correct; a score would be noise.
 
 ### No enrichment or reputation data
 

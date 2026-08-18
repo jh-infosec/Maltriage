@@ -36,8 +36,9 @@ It never claims a file is malicious. It ranks a queue.
 - Command line interface with human and JSON output
 - Cryptographic hashing with streaming reads
 - Format identification from magic bytes, no external dependencies
-- Whole-file and windowed Shannon entropy
+- Whole-file and windowed Shannon entropy, scaled to the size of the sample
 - Extension mismatch detection
+- Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
 - Synthetic sample generation
 - Automated test suite
@@ -183,8 +184,11 @@ Scan a directory into JSON Lines, one object per file
 python cli.py scan ./samples --recursive --json-lines out.jsonl
 ```
 
-The exit code is non-zero when anything scores medium or above, so the tool
-drops into a shell pipeline or a CI gate.
+`--json` always writes an array, one object per file, whatever the file count.
+
+Exit codes are 0 for clean, 1 when something scores medium or above, and 2
+when the scan could not run at all, so the tool drops into a shell pipeline
+or a CI gate without conflating a finding with a failure.
 
 ---
 
@@ -207,6 +211,12 @@ Extraction is deterministic and configuration-driven.
 Thresholds are heuristics tuned for recall over precision. A legitimate
 compressed installer will trip the entropy check, and that is the correct
 trade for a triage tool.
+
+Entropy is scored against what random data of the same length actually
+reaches, not against a fixed bits-per-byte number. A short sample cannot
+score 8.0 no matter how random it is, so a fixed threshold silently stops
+working on small files. Where a sample is too short to say anything at all,
+nothing is reported rather than a number that looks like a measurement.
 
 Machine learning is planned for a later version. When it arrives it will
 score and rank, and it will never be the only thing standing between a sample
