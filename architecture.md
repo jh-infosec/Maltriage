@@ -52,19 +52,45 @@ outside a sandbox and safe for anyone to clone and try.
 ### Extractors are independent
 
 Each extractor is a self-contained capability with no knowledge of the others.
-The only coupling is the shared `ctx` dict, which is written by earlier
-extractors and read by later ones.
+The only coupling is the shared `ctx` dict, which is written by the header
+phase and read by the stream phase.
 
 This is what makes per-extractor error isolation possible.
+
+### One open, one read, bounded memory
+
+The pipeline opens the sample once and reads it once. The first `header_bytes`
+serve the header phase and are then fed into the stream phase rather than
+re-read, so no byte is read twice and nothing seeks backwards.
+
+Nothing holds the sample whole. Peak memory is governed by `read_chunk_bytes`,
+not by sample size, which is what makes corpus-scale work possible in v0.6.
+
+A stream extractor must therefore keep its own memory bounded. Buffering the
+chunks it is handed would reintroduce exactly the problem this design removes.
+
+### Two phases, so gating still works
+
+Header extractors run first and publish to `ctx`. Stream extractors are then
+selected with `applies_to` using what the header phase learned.
+
+A single undivided pass would be simpler and would leave the PE parser
+arriving in v0.2 unable to know it is looking at a PE before it starts. The
+split exists for that reason and for no other.
 
 ### One failure never loses a run
 
 Malformed headers are an anti-analysis technique, not an accident. An
 extractor that raises has its exception captured into `report.errors` and the
-run continues with the remaining extractors.
+run continues with the remaining extractors. One that raises mid-stream is
+dropped for the rest of the pass while the others keep receiving chunks.
 
-There is a test for this. Any change that lets one extractor abort the run
-breaks the invariant.
+`findings` is isolated from extraction separately and recorded under
+`<name>.findings`, so a broken heuristic costs its own observations and not
+the data that produced them.
+
+There are tests for all of this. Any change that lets one extractor abort the
+run breaks the invariant.
 
 ### Data and findings are separate
 
@@ -128,8 +154,17 @@ order against a file, merges results into a report and isolates failures.
 
 The extraction engine. All extractors live here.
 
-Each subclasses `Extractor` and implements `extract`, optionally `findings`
-and `applies_to`.
+A `HeaderExtractor` implements `read_header` and is handed the bytes the
+pipeline already read. A `StreamExtractor` implements `begin`, `feed` and
+`finish` and is fed every chunk in order. Both may implement `findings` and
+`applies_to`.
+
+`begin` must reset everything `feed` accumulates. Reusing one instance across
+a directory scan is the normal case, not the exception.
+
+`byte_counts` uses numpy when installed and the standard library otherwise.
+Both paths are asserted to agree, because entropy silently changing with the
+environment would be worse than being slow.
 
 Current extractors: `filetype`, `hashes`, `entropy`.
 
@@ -170,24 +205,27 @@ schema and the error-isolation guarantee. Run with `pytest`.
 2. Pipeline builds an empty report from the file's name and size
 3. Config validated once, any problems recorded under `config` in
    `report.errors`
-4. File type extracted first, publishing `family` to the shared context
-5. Remaining extractors run in order, each reading config and context
-6. Each extractor's data is merged into `report.data`
-7. Each extractor's findings are appended to `report.findings`
-8. An extractor that raises is recorded in `report.errors` and skipped
-9. Report severity is the maximum severity across all findings
-10. Report rendered to stdout, JSON array or JSON Lines
+4. File opened once and the first `header_bytes` read
+5. Header extractors run in order, file type publishing `family` to `ctx`
+6. Stream extractors selected with `applies_to`, now able to see `family`
+7. The header bytes, then the rest of the file, fed to every stream extractor
+   in chunks of `read_chunk_bytes`
+8. Each extractor's data is merged into `report.data`
+9. Each extractor's findings are appended to `report.findings`
+10. An extractor that raises is recorded in `report.errors` and skipped
+11. Report severity is the maximum severity across all findings
+12. Report rendered to stdout, JSON array or JSON Lines
 
 ## Known Constraints
 
 These are accepted limitations of the current design, recorded so they are
 not rediscovered as bugs.
 
-### Entropy loads the whole file
+### ssdeep reads the file a second time
 
-`EntropyExtractor` calls `read_bytes()`, so peak memory is the size of the
-sample. Hashing streams in chunks and does not have this problem. A very
-large sample will be limited by the entropy pass.
+Every other extractor works from the shared pass. ssdeep's API takes a path
+rather than bytes, so when the optional library is installed it opens and
+reads the sample again. This is one reason it stays optional.
 
 ### Format identification is header-only
 

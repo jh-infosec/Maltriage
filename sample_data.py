@@ -39,7 +39,11 @@ DEFAULT_CONFIG = {
     "executable_families": ["pe", "elf", "macho"],
     "document_extensions": [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt",
                             ".jpg", ".png", ".rtf"],
-    "hash_chunk_bytes": 1048576,
+    # Read sizing. The pipeline opens the file once and drives every
+    # extractor from that handle, so these bound peak memory for the whole
+    # run regardless of how large the sample is.
+    "header_bytes": 4096,
+    "read_chunk_bytes": 1048576,
 
     # Entropy is scored as a ratio of what uniformly random data of the same
     # length actually reaches, not as an absolute bits-per-byte figure. See
@@ -115,7 +119,8 @@ def validate_config(config):
             problems.append(
                 f"{key}={value!r} is not a ratio between 0 and {RATIO_MAX}, default used")
 
-    check_int("hash_chunk_bytes")
+    check_int("header_bytes")
+    check_int("read_chunk_bytes")
     check_int("entropy_window_bytes")
     check_int("entropy_min_window_bytes")
     check_int("entropy_target_windows")

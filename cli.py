@@ -25,7 +25,7 @@ from pipeline import analyse, analyse_directory
 from sample_data import write_samples
 
 APP_NAME = "maltriage"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 SEVERITY_MARK = {"info": "  ", "low": " ~", "medium": " !", "high": "!!"}
 

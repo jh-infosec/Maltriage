@@ -4,9 +4,25 @@ maltriage extraction engine.
 Evaluates one file against the active config and returns the data extracted
 plus any findings that should be raised.
 
-Every extractor implements the same interface: take a path, a shared context
-and the config, return a dict of data. Findings are derived from that data in
-a separate step, so adding a heuristic never changes what gets extracted.
+Extractors come in two kinds, and the difference is where their bytes come
+from rather than what they do:
+
+  Header extractors implement `read_header` and are handed the first few
+  kilobytes, which the pipeline has already read. They run first and publish
+  to `ctx`, so anything after them can gate on what they found.
+
+  Stream extractors implement `begin`, `feed` and `finish`. The pipeline reads
+  the file once and hands every chunk to all of them, including the bytes that
+  were used as the header, so a 400 MB sample is read one time and never held
+  whole in memory.
+
+v0.1.1 gave every extractor the path and let it read for itself. That cost
+three opens and two full reads of every sample, and made peak memory track
+sample size because entropy called `read_bytes()`. The single pass exists to
+make corpus-scale work possible in v0.6.
+
+A stream extractor must keep its own memory bounded. Buffering the chunks it
+is handed would reintroduce exactly the problem this design removes.
 
 Config is read through the validated accessors in sample_data, never with a
 bare `.get`, so a bad value falls back to a default instead of silently
@@ -24,52 +40,108 @@ from typing import Any
 from models import mk_finding
 from sample_data import config_int, config_list, config_ratio
 
-HASH_CHUNK_BYTES = 1024 * 1024
 BYTE_VALUES = 256
 
 
 class Extractor(ABC):
-    """One analysis capability.
+    """Base for every analysis capability.
 
     Unlike the Shadowfax detectors, which share a single ordered pass over an
-    actor's history, extractors are independent of each other. That is what
-    lets the pipeline isolate a failure in one without losing the rest.
+    actor's history, extractors do not see each other's work except through
+    `ctx`. That is what lets the pipeline isolate a failure in one without
+    losing the rest.
     """
 
+    #: Key this extractor's output is filed under in `report.data`.
     name: str = "unnamed"
 
     def applies_to(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> bool:
         """Return False to skip this extractor for this file."""
         return True
 
-    @abstractmethod
-    def extract(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        """Return raw analysis data. Prefer partial data over raising."""
-
     def findings(self, data: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
         """Turn raw data into analyst-facing observations. Optional."""
         return []
 
 
+class HeaderExtractor(Extractor):
+    """An extractor that needs only the start of the file.
+
+    Runs before the stream phase, so whatever it writes to `ctx` is available
+    to `applies_to` on every stream extractor.
+    """
+
+    @abstractmethod
+    def read_header(self, header: bytes, path: Path, ctx: dict[str, Any],
+                    config: dict[str, Any]) -> dict[str, Any]:
+        """Return raw analysis data. Prefer partial data over raising."""
+
+
+class StreamExtractor(Extractor):
+    """An extractor fed the file in chunks rather than reading it itself.
+
+    Contract: `begin` prepares per-file state, `feed` is called with every
+    chunk in order, `finish` returns the data and must not touch the disk.
+
+    `begin` must reset everything `feed` accumulates. Reusing one instance
+    across a directory scan is the normal case, not the exception.
+    """
+
+    def begin(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> None:
+        """Prepare per-file state. Called once before the first chunk."""
+
+    @abstractmethod
+    def feed(self, chunk: bytes) -> None:
+        """Accept one chunk of the file, in order."""
+
+    @abstractmethod
+    def finish(self, path: Path, ctx: dict[str, Any],
+               config: dict[str, Any]) -> dict[str, Any]:
+        """Return the accumulated data. Never reads from disk."""
+
+
+# byte counting
+
+try:  # optional accelerator, not a hard requirement
+    import numpy as _np
+
+    def byte_counts(data: bytes) -> list[int]:
+        """Histogram of the 256 byte values, as a fixed-length list."""
+        if not data:
+            return [0] * BYTE_VALUES
+        return _np.bincount(
+            _np.frombuffer(data, dtype=_np.uint8), minlength=BYTE_VALUES
+        ).tolist()
+
+    HAVE_NUMPY = True
+except ImportError:
+    def byte_counts(data: bytes) -> list[int]:
+        """Histogram of the 256 byte values, as a fixed-length list."""
+        counts = [0] * BYTE_VALUES
+        for value, count in Counter(data).items():
+            counts[value] = count
+        return counts
+
+    HAVE_NUMPY = False
+
+
 # file type
 
-class FileTypeExtractor(Extractor):
+class FileTypeExtractor(HeaderExtractor):
     """Identify the format from magic bytes.
 
     Deliberately dependency-free. `python-magic` needs libmagic installed,
     which is friction for anyone cloning the repo, and a small signature table
     covers the formats that matter for triage.
 
-    Publishes `family` to the context so format-specific extractors can gate
-    on it.
+    Costs no I/O of its own. Publishes `family` to the context, which is what
+    lets the format-specific parsers arriving in v0.2 gate themselves.
     """
 
     name = "filetype"
 
-    def extract(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        with path.open("rb") as fh:
-            header = fh.read(64)
-
+    def read_header(self, header: bytes, path: Path, ctx: dict[str, Any],
+                    config: dict[str, Any]) -> dict[str, Any]:
         label, family = "unknown", "unknown"
         for signature in config_list(config, "signatures", []):
             # A malformed entry is skipped rather than aborting the extractor,
@@ -113,28 +185,34 @@ class FileTypeExtractor(Extractor):
 
 # hashes
 
-class HashExtractor(Extractor):
+class HashExtractor(StreamExtractor):
     """Cryptographic and fuzzy hashes.
 
-    Streams the file rather than loading it whole, so this behaves the same on
-    a 400 MB installer as on a 12 KB dropper.
+    Hashing was already streaming in v0.1.1. It now streams off the shared
+    pass instead of opening the file for itself, so it costs no I/O.
+
+    ssdeep is the exception: its API takes a path, so when the optional
+    library is present it does read the file again. That is stated here rather
+    than hidden, and it is one reason ssdeep stays optional.
     """
 
     name = "hashes"
 
-    def extract(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        digests = {"md5": hashlib.md5(), "sha1": hashlib.sha1(), "sha256": hashlib.sha256()}
-        # Validated, because a chunk size of 0 makes read() return empty
-        # immediately and every digest becomes the hash of an empty file.
-        chunk_size = config_int(config, "hash_chunk_bytes", HASH_CHUNK_BYTES)
-        with path.open("rb") as fh:
-            while chunk := fh.read(chunk_size):
-                for d in digests.values():
-                    d.update(chunk)
+    def begin(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> None:
+        self._digests = {
+            "md5": hashlib.md5(),
+            "sha1": hashlib.sha1(),
+            "sha256": hashlib.sha256(),
+        }
 
-        result: dict[str, Any] = {k: v.hexdigest() for k, v in digests.items()}
+    def feed(self, chunk: bytes) -> None:
+        for digest in self._digests.values():
+            digest.update(chunk)
+
+    def finish(self, path: Path, ctx: dict[str, Any],
+               config: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {k: v.hexdigest() for k, v in self._digests.items()}
         result["ssdeep"] = _ssdeep_hash(path)
-
         # sha256 is the lookup key for enrichment in v0.5
         ctx["sha256"] = result["sha256"]
         return result
@@ -152,13 +230,21 @@ except ImportError:
 
 # entropy
 
+def entropy_from_counts(counts, total: int) -> float:
+    """Shannon entropy in bits per byte, from a byte histogram.
+
+    Taking counts rather than bytes is what makes the streaming refactor
+    possible: the histogram of a file is the sum of the histograms of its
+    parts, so the whole-file figure needs nothing held in memory.
+    """
+    if total <= 0:
+        return 0.0
+    return -sum((c / total) * math.log2(c / total) for c in counts if c)
+
+
 def shannon(data: bytes) -> float:
     """Shannon entropy in bits per byte. Range 0.0 (uniform) to 8.0 (random)."""
-    if not data:
-        return 0.0
-    counts = Counter(data)
-    n = len(data)
-    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+    return entropy_from_counts(byte_counts(data), len(data))
 
 
 def expected_random_entropy(n: int) -> float:
@@ -187,17 +273,32 @@ def _ratio(observed: float, n: int) -> float:
     return round(observed / reference, 4) if reference > 0 else 0.0
 
 
-class EntropyExtractor(Extractor):
-    """Whole-file and windowed Shannon entropy.
+def entropy_window_size(size: int, config: dict[str, Any]) -> int:
+    """Window size for a file of `size` bytes.
+
+    Aims for `entropy_target_windows`, never below `entropy_min_window_bytes`,
+    never above the configured size. At the fixed 8192 bytes of v0.1.0 a 3 KB
+    dropper produced no windows at all and was scored `info`.
+    """
+    configured = config_int(config, "entropy_window_bytes", 8192)
+    minimum = config_int(config, "entropy_min_window_bytes", 256)
+    target = config_int(config, "entropy_target_windows", 8)
+    return max(minimum, min(configured, size // target if size else configured))
+
+
+class EntropyExtractor(StreamExtractor):
+    """Whole-file and windowed Shannon entropy, computed in one pass.
 
     High entropy alone proves nothing. A ZIP scores high and so does a
     legitimate installer. The useful signal is shape: a mostly-low-entropy
     file containing one high-entropy region is the classic packed-stub layout,
     which is why `entropy_hotspot` scores higher than `high_file_entropy`.
 
-    The window shrinks for small files. At the fixed 8192 bytes of v0.1.0 a
-    3 KB dropper produced no windows at all and was scored `info`, so the
-    hotspot check was blind in the size range where it matters most.
+    Memory is bounded by one window plus one chunk, not by the sample. Windows
+    are scored as they complete and only the resulting float is kept, and the
+    whole-file histogram is a fixed 256-entry list. Read chunk boundaries and
+    window boundaries are unrelated, so windows are cut from a pending buffer
+    rather than assumed to align with the reads.
 
     Thresholds are heuristics tuned for recall over precision. Triage exists
     to decide what deserves a human, not to give verdicts.
@@ -205,41 +306,67 @@ class EntropyExtractor(Extractor):
 
     name = "entropy"
 
-    def _window_size(self, size: int, config: dict[str, Any]) -> int:
-        configured = config_int(config, "entropy_window_bytes", 8192)
-        minimum = config_int(config, "entropy_min_window_bytes", 256)
-        target = config_int(config, "entropy_target_windows", 8)
-        # Aim for `target` windows, never below `minimum`, never above the
-        # configured size.
-        return max(minimum, min(configured, size // target if size else configured))
+    def begin(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> None:
+        self._window = entropy_window_size(ctx["size"], config)
+        self._threshold = config_ratio(config, "entropy_window_ratio", 0.94)
+        self._pending = bytearray()
+        self._totals = [0] * BYTE_VALUES
+        self._entropies: list[float] = []
+        self._hot = 0
+        self._size = 0
 
-    def extract(self, path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        blob = path.read_bytes()
-        size = len(blob)
-        window = self._window_size(size, config)
+    def _add_to_totals(self, data: bytes) -> None:
+        for value, count in enumerate(byte_counts(data)):
+            if count:
+                self._totals[value] += count
 
-        windows: list[float] = []
-        for offset in range(0, size, window):
-            chunk = blob[offset : offset + window]
-            if len(chunk) < window // 2:  # ignore a stubby tail window
-                continue
-            windows.append(shannon(chunk))
+    def _score_window(self, window: bytes) -> None:
+        counts = byte_counts(window)
+        for value, count in enumerate(counts):
+            if count:
+                self._totals[value] += count
+        entropy = entropy_from_counts(counts, len(window))
+        self._entropies.append(entropy)
+        if _ratio(entropy, self._window) >= self._threshold:
+            self._hot += 1
 
-        overall = shannon(blob)
-        window_max = max(windows) if windows else None
-        window_ratio_threshold = config_ratio(config, "entropy_window_ratio", 0.94)
-        hot = sum(1 for w in windows if _ratio(w, window) >= window_ratio_threshold)
+    def feed(self, chunk: bytes) -> None:
+        self._size += len(chunk)
+        self._pending += chunk
+        while len(self._pending) >= self._window:
+            self._score_window(bytes(self._pending[: self._window]))
+            del self._pending[: self._window]
+
+    def finish(self, path: Path, ctx: dict[str, Any],
+               config: dict[str, Any]) -> dict[str, Any]:
+        tail = bytes(self._pending)
+        if tail:
+            if len(tail) >= self._window // 2:
+                self._score_window(tail)
+            else:
+                # Too short to score as a window, but its bytes still belong
+                # in the whole-file histogram.
+                self._add_to_totals(tail)
+        self._pending = bytearray()
+
+        overall = entropy_from_counts(self._totals, self._size)
+        window_max = max(self._entropies) if self._entropies else None
 
         return {
             "overall": round(overall, 4),
-            "overall_ratio": _ratio(overall, size),
-            "window_size": window,
+            "overall_ratio": _ratio(overall, self._size),
+            "window_size": self._window,
             "window_size_configured": config_int(config, "entropy_window_bytes", 8192),
-            "window_count": len(windows),
+            "window_count": len(self._entropies),
             "window_max": round(window_max, 4) if window_max is not None else None,
-            "window_max_ratio": _ratio(window_max, window) if window_max is not None else None,
-            "window_mean": round(sum(windows) / len(windows), 4) if windows else None,
-            "high_entropy_windows": hot,
+            "window_max_ratio": (
+                _ratio(window_max, self._window) if window_max is not None else None
+            ),
+            "window_mean": (
+                round(sum(self._entropies) / len(self._entropies), 4)
+                if self._entropies else None
+            ),
+            "high_entropy_windows": self._hot,
         }
 
     def findings(self, data: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -263,5 +390,6 @@ class EntropyExtractor(Extractor):
 
 
 def default_extractors() -> list[Extractor]:
-    """Order matters: file type first so later extractors can gate on it."""
+    """Order matters for the header phase: file type runs first so the stream
+    phase can gate on the family it publishes."""
     return [FileTypeExtractor(), HashExtractor(), EntropyExtractor()]

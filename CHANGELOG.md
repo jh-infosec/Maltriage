@@ -1,67 +1,62 @@
 # Changelog
 
-## Version 0.1.1
+## Version 0.1.2
 
-Defect release. No new capability, four fixes and one detection gap closed.
-
-### Fixed
-
-- Files smaller than the entropy window produced no windows at all, so a
-  packed payload in a dropper-sized file scored `info`. The window now
-  shrinks to fit, aiming for `entropy_target_windows` and never going below
-  `entropy_min_window_bytes`
-- `hash_chunk_bytes: 0` made every read return empty immediately, so all
-  three digests reported the hash of an empty file with no error anywhere.
-  Config is now validated and the substitution recorded on the report
-- A malformed row in the signature table aborted format identification for
-  the whole file. Bad rows are now skipped individually and reported
-- `--json` wrote a bare object for one file and an array for several, so a
-  consumer had to branch on the shape of its own input. It is always an array
-- A missing scan target printed a traceback. It now prints one line and exits
-  with a usage code
+Internal release. No new findings, no change to any severity. The extraction
+engine now reads a sample once instead of twice and no longer holds it in
+memory, which is what makes the corpus work planned for v0.6 possible.
 
 ### Changed
 
-- Entropy is scored as a ratio of what uniformly random data of the same
-  length actually reaches, rather than against an absolute bits-per-byte
-  figure. A fixed 7.5 threshold is unreachable in a 375-byte window, where
-  random data averages 7.42, so shrinking the window alone would not have
-  closed the gap
-- `entropy_file_threshold` and `entropy_window_threshold` are replaced by
-  `entropy_file_ratio` (0.90) and `entropy_window_ratio` (0.94). These
-  reproduce the old absolute thresholds at the default 8192-byte window
-- `entropy` data gains `overall_ratio`, `window_max_ratio` and
-  `window_size_configured`. `window_size` is now the size actually used
-- Config is read through validated accessors in `sample_data.py` instead of
-  a bare `config.get`. A rejected value falls back to its default and the
-  reason is recorded under `config` in `report.errors`
-- Exit codes are distinct: 0 clean, 1 findings at or above `GATE_SEVERITY`,
-  2 could not run. v0.1.0 conflated the last two
-- An empty directory reports that it found nothing instead of printing
-  nothing
-- An empty file is described as empty rather than reported as having no
-  signature match
-- `SCHEMA_VERSION` is 1.1
+- The file is opened once and read once. v0.1.1 opened every sample three
+  times and read it in full twice, once streamed for hashing and once whole
+  for entropy
+- Peak memory is governed by the read chunk size rather than the sample size.
+  On a 200 MB sample, peak RSS falls from 220 MB to 23 MB
+- Entropy is accumulated from a running 256-entry histogram instead of a
+  whole-file buffer. The histogram of a file is the sum of the histograms of
+  its parts, so the whole-file figure needs nothing held in memory
+- Extractors are now either header or stream extractors. Header extractors
+  implement `read_header` and are handed the bytes the pipeline already read.
+  Stream extractors implement `begin`, `feed` and `finish` and are fed every
+  chunk in order
+- The header bytes are fed into the stream phase rather than re-read, so no
+  byte is read twice and nothing seeks backwards
+- `findings` failures are isolated from extraction failures and recorded
+  under `<name>.findings`. A broken heuristic no longer costs the data that
+  produced it
+- `hash_chunk_bytes` is replaced by `read_chunk_bytes`, which now governs the
+  whole pass rather than one extractor. `header_bytes` is new
+- `SCHEMA_VERSION` is 1.2
 
 ### Added
 
-- `small_dropper.bin` fixture, the packed-stub shape at 3 KB
-- A regression test for each defect above
-- Tests asserting the entropy reference tracks measured randomness within 3%
-  from 128 bytes upward
+- `byte_counts`, which uses numpy when it is installed and falls back to the
+  standard library otherwise. Both paths are asserted to agree, because
+  entropy silently changing with the environment would be worse than being
+  slow
+- `entropy_from_counts`, entropy from a histogram rather than from bytes
+- Tests pinning the guarantees the refactor rests on: results independent of
+  chunk size and header size, streamed entropy equal to the whole-buffer
+  calculation, one open and no `read_bytes`, peak memory flat across a 100x
+  size increase, mid-stream failure dropping only its own extractor, failure
+  in `begin` never reaching `feed`, stream extractors gating on the header
+  phase, and instances remaining reusable across files
 
 ### Notes
 
-Entropy below roughly 128 bytes is not reported. A sample that short has too
-few observations to say anything about 256 possible byte values, so
-`window_count` is 0 and no hotspot finding is produced. Reporting nothing is
-correct here; a score would be noise.
+Runtime on a 200 MB sample falls from 14.4s to 7.5s on the standard library
+alone, and to 2.2s with numpy installed. numpy is optional and listed
+commented out in `requirements.txt`. Hashes and entropy are identical across
+all three configurations.
 
-A ratio can slightly exceed 1.0, since the reference is a statistical
-estimate rather than a hard ceiling. Thresholds accept values up to 2.0, and
-anything above about 1.01 effectively disables its check.
+`begin` must reset everything `feed` accumulates. Reusing one extractor
+instance across a directory scan is the normal case, not the exception, and
+there is a test for it.
 
-On 400 real files between 128 bytes and 20 KB, the widened hotspot check
-fired 4 times, all on PNGs. A PNG is deflate-compressed data inside a
-low-entropy container, which is the shape the check looks for, so these are
-correct observations rather than misfires.
+A stream extractor must keep its own memory bounded. Buffering the chunks it
+is handed would reintroduce exactly the problem this release removes.
+
+ssdeep remains the one component that reads the file a second time, because
+its API takes a path rather than bytes. This is stated rather than hidden,
+and it is one reason ssdeep stays optional.

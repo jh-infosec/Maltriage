@@ -24,13 +24,28 @@
 
 ---
 
+## Version 0.1.2
+
+- [x] Single open, single pass over the sample
+- [x] Streaming entropy accumulator
+- [x] Header and stream extractor phases
+- [x] Error isolation at begin, feed and finish
+- [x] Optional numpy accelerator for byte counting
+- [x] Incremental fuzzy hashing
+
+---
+
 ## Version 0.2
+
+Executable structure. The first extractor to gate on the header phase, and
+the milestone that produces the fields the classifier will eventually consume.
 
 - [ ] PE parsing
 - [ ] Import table and imphash
-- [ ] Section characteristics
+- [ ] Section characteristics and per-section entropy
 - [ ] Compile timestamp
 - [ ] Overlay detection
+- [ ] Authenticode presence, signer and validity
 - [ ] ELF parsing
 
 ---
@@ -46,29 +61,78 @@
 
 ## Version 0.4
 
+Reputation enrichment lives here rather than owning a version. It is an API
+call and a cache, and it makes the tool depend on a network and a key, so it
+stays optional and off by default.
+
 - [ ] ASCII and Unicode string extraction
 - [ ] URL and IP extraction
 - [ ] Registry path and mutex extraction
 - [ ] Suspicious API name detection
+- [ ] ATT&CK technique mapping on findings
+- [ ] Optional reputation enrichment by hash, cached and rate limited
+- [ ] Offline mode
 
 ---
 
 ## Version 0.5
 
-- [ ] Reputation enrichment by hash
-- [ ] Local result cache
-- [ ] Rate limiting
-- [ ] Offline mode
+Archive recursion. The safety work is the point: a triage tool that unpacks
+untrusted containers has an attack surface of its own, and decompression
+bombs, path traversal in entry names and symlink entries all have to be
+handled before the feature is safe to run.
+
+- [ ] Recurse into ZIP, GZIP, TAR and RAR
+- [ ] Depth limit and total expansion ratio cap
+- [ ] Entry name and symlink handling
+- [ ] Password-protected archive detection
+- [ ] Nested reports linked to their parent
 
 ---
 
 ## Version 0.6
 
-- [ ] Feature vector construction
-- [ ] Corpus labelling workflow
+- [ ] OLE2 structured storage parsing
+- [ ] OOXML part extraction
+- [ ] VBA macro extraction and stream listing
+- [ ] Auto-execute trigger detection
+- [ ] DDE and external relationship detection
+
+---
+
+## Version 0.7
+
+The measurement release. Everything after this depends on being able to state
+precision and recall, so it comes before the classifier rather than after.
+
+- [ ] Corpus harness with labelled directories
+- [ ] Precision, recall and per-finding false positive rates
+- [ ] Known-good hash filtering
+- [ ] Report diff between two runs
+- [ ] Throughput benchmarking
+
+---
+
+## Version 0.8
+
+- [ ] Feature vector construction from the report schema
 - [ ] Gradient boosting classifier
-- [ ] Calibration and false positive analysis
-- [ ] Adversarial evaluation
+- [ ] Probability calibration
+- [ ] False positive analysis against the corpus harness
+- [ ] Per-sample feature attribution, so a score comes with its reasons
+
+---
+
+## Version 0.9
+
+The adversarial release. Attack the classifier from v0.8, measure what the
+attacks cost it, harden it, and measure the recovery.
+
+- [ ] Feature-space evasion
+- [ ] Appended bytes and padding attacks
+- [ ] Section and import perturbation
+- [ ] Adversarial retraining
+- [ ] Before and after evaluation written up with the numbers
 
 ---
 
