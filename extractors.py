@@ -4,7 +4,7 @@ maltriage extraction engine.
 Evaluates one file against the active config and returns the data extracted
 plus any findings that should be raised.
 
-Extractors come in two kinds, and the difference is where their bytes come
+Extractors come in three kinds, and the difference is where their bytes come
 from rather than what they do:
 
   Header extractors implement `read_header` and are handed the first few
@@ -15,6 +15,11 @@ from rather than what they do:
   the file once and hands every chunk to all of them, including the bytes that
   were used as the header, so a 400 MB sample is read one time and never held
   whole in memory.
+
+  Random-access extractors implement `parse` and open the sample themselves.
+  They exist because structure like a PE import table sits at an offset that
+  is not known until earlier structure has been read, which no forward pass
+  can reach. They still may not hold the sample whole.
 
 v0.1.1 gave every extractor the path and let it read for itself. That cost
 three opens and two full reads of every sample, and made peak memory track
@@ -98,6 +103,39 @@ class StreamExtractor(Extractor):
     def finish(self, path: Path, ctx: dict[str, Any],
                config: dict[str, Any]) -> dict[str, Any]:
         """Return the accumulated data. Never reads from disk."""
+
+
+class RandomAccessExtractor(Extractor):
+    """An extractor that addresses the file rather than streaming it.
+
+    Some structure cannot be reached in one forward pass. A PE import table
+    lives at a relative virtual address that resolves, through the section
+    table, to a file offset that is not known until the section table has been
+    read. Neither a fixed-size header nor a stream that may not buffer can get
+    there.
+
+    So this kind may open the sample for itself, read-only, and seek within
+    it. What it may not do is read it whole: memory must stay bounded by what
+    is actually parsed, either by mapping the file or by bounded reads.
+    Bounded memory is the invariant v0.1.2 established. Reading the sample
+    exactly once was only ever a proxy for it, and this is where the proxy
+    stops being useful and the real rule is stated instead.
+
+    Runs in the third phase, after the stream phase has finished, so `ctx`
+    carries `family` from the header phase and `sha256` and `size` from the
+    stream phase. Gate with `applies_to` as usual: a PE parser returns False
+    for anything that is not a PE rather than discovering that for itself.
+
+    The pipeline declines to run this phase on a sample larger than
+    `max_parse_bytes` and records the refusal, because a parser handed hostile
+    input is the one place in this tool where work is not bounded by the
+    configured read sizes.
+    """
+
+    @abstractmethod
+    def parse(self, path: Path, ctx: dict[str, Any],
+              config: dict[str, Any]) -> dict[str, Any]:
+        """Return raw analysis data. Prefer partial data over raising."""
 
 
 # byte counting

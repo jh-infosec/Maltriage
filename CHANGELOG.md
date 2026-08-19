@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased -- v0.2 groundwork
+
+No new findings and no change to any severity. This is the foundation the PE
+and ELF work sits on: a third extractor kind, for structure that cannot be
+reached in one forward pass, and a synthetic executable to test a parser
+against.
+
+### Added
+
+- `RandomAccessExtractor`, a third extractor kind. It implements `parse`,
+  runs in a third phase after the stream phase closes, and may open the
+  sample for itself. It exists because a PE import table lives at an RVA that
+  resolves through the section table to an offset no forward pass can reach
+- `build_pe` in `sample_data.py`, which constructs a structurally valid PE32
+  byte by byte: DOS header, PE signature, COFF and optional headers, section
+  table, section bodies, an import directory whose thunks are real RVAs, and
+  an optional overlay. Variants come from its arguments, so a fixture that
+  drifts from the format drifts for every test at once
+- `max_parse_bytes`, a ceiling on the random-access phase. A parser decides
+  for itself how much structure to walk, so its cost is the one thing not
+  bounded by the configured read sizes. A sample above the ceiling is
+  declined and the refusal recorded, because a report that silently skipped
+  an analysis looks identical to one that found nothing
+
+### Changed
+
+- "One open, one read" is restated rather than quietly broken. The pipeline
+  still performs exactly one sequential read; a random-access extractor may
+  additionally map the file and touch bounded regions of it. Bounded memory
+  was always the invariant that mattered, and reading once was its proxy
+- The phase-1 dispatch no longer calls `extract()` on anything that is not a
+  header or stream extractor. No class has ever defined that method, so the
+  branch produced an `AttributeError` that read as though the extractor had
+  failed at its job rather than as though it had no contract. An object of no
+  known kind now raises a `TypeError` naming the three that exist
+
+### Notes
+
+`pefile` maps the sample with `mmap` and never reads it into the process,
+which is why the random-access phase opens the file rather than being handed
+a capped buffer. Any cap chosen in advance is wrong in one of two directions:
+too small and imports past the cutoff vanish silently, too large and peak
+memory is back in proportion to sample size.
+
+Neither existing memory test would have caught the second open, and both
+looked like they guarded it. `test_the_file_is_opened_once_and_read_once`
+patches `Path.open` while pefile calls the builtin, and `tracemalloc` does
+not account for mapped pages. The new contract is pinned by tests written for
+it rather than inherited from tests that would have stayed green either way.
+
+ssdeep is still the exception it always was. Under the new kind it is simply
+the first member of a documented category, and it should move into the
+random-access phase when the PE extractor lands.
+
 ## Version 0.1.2
 
 Internal release. No new findings, no change to any severity. The extraction

@@ -1,24 +1,70 @@
-# NEVER commit samples. This line is load-bearing.
+# NEVER commit samples. These lines are load-bearing.
+#
+# Extension rules alone cannot do this job. The bundled fixture `invoice.pdf`
+# is a PE wearing a document extension, which is the exact case this tool
+# exists to detect, so a rule keyed on the extension waves it straight
+# through. The magic-byte check in .githooks/pre-commit is the real defence.
+# The lists below are the cheap first pass.
+
+# Sample and output directories. `cli.py samples` writes fixtures wherever it
+# is pointed, and the README points it at ./demo, so the conventional names
+# are ignored wholesale rather than file by file.
 samples/
+demo/
+corpus/
+scratch/
+out/
+output/
+reports/
+
+# Backstop for samples written outside those directories.
 *.bin
 *.exe
 *.dll
 *.sys
 *.vir
+*.elf
+*.so
+*.dylib
+*.o
+*.obj
+*.com
+*.scr
+*.msi
+*.cab
+*.iso
+*.img
+*.dmp
+*.zip
+*.7z
+*.rar
+*.gz
+*.tar
+
+# Scan output. Reports embed the absolute path of every file scanned, so they
+# carry the directory layout and the username of the machine that produced
+# them. Working files, not artefacts to publish.
+report.json
+*.jsonl
+maltriage-*.json
 
 # Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.ruff_cache/
-.coverage
-
-# Virtual environments
 venv/
 .venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
 
-# Generated output
-demo/
-reports/
-report.json
-*.jsonl
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

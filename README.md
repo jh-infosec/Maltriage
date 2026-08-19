@@ -84,8 +84,28 @@ executes, launches or modifies a sample.
 The entire test suite runs on synthetic fixtures. You can develop and test
 this tool without touching a live sample.
 
-`samples/` and common executable extensions are gitignored. Do not commit
-malware, to a public repository or a private one.
+`samples/`, `demo/` and common executable extensions are gitignored. Do not
+commit malware, to a public repository or a private one.
+
+Extension rules are not enough on their own. This project's own fixture
+`invoice.pdf` is a PE, which is precisely the case the tool exists to detect,
+and any ignore rule that trusts a filename waves exactly that file through.
+So there is a pre-commit hook that checks magic bytes on staged content and
+refuses anything that is an executable or a container, whatever it is named.
+
+Git hooks are not installed by cloning. Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It is dependency-free and project-agnostic, so it can be copied into any
+repository that must never receive a sample. `ALLOW_BINARY=1 git commit`
+overrides it when you genuinely mean to.
+
+Scan output is gitignored too. A report records the absolute path of every
+file scanned, so it carries the directory layout and the username of the
+machine that produced it.
 
 If you do work with real samples, use an isolated virtual machine with
 snapshots and no host networking, and source them from a reputable feed.

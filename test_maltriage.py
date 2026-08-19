@@ -26,8 +26,10 @@ import pytest
 import cli
 from extractors import (
     EntropyExtractor,
+    Extractor,
     FileTypeExtractor,
     HashExtractor,
+    RandomAccessExtractor,
     StreamExtractor,
     byte_counts,
     entropy_from_counts,
@@ -38,11 +40,22 @@ from models import SEVERITIES, mk_finding
 from pipeline import analyse, analyse_directory
 from sample_data import (
     DEFAULT_CONFIG,
+    SECTION_CODE,
+    SECTION_RWX,
+    build_pe,
     config_int,
     config_ratio,
     validate_config,
     write_samples,
 )
+
+try:  # only the fixture-verification tests need it
+    import pefile
+except ImportError:
+    pefile = None
+
+needs_pefile = pytest.mark.skipif(
+    pefile is None, reason="verifying the PE fixture requires pefile")
 
 
 def _run_one(extractor, path, ctx=None, config=None):
@@ -576,3 +589,255 @@ def test_byte_counts_agrees_with_the_stdlib(write):
 def test_entropy_from_counts_handles_degenerate_input():
     assert entropy_from_counts([0] * 256, 0) == 0.0
     assert entropy_from_counts([10] + [0] * 255, 10) == 0.0
+
+
+# the synthetic PE fixture
+#
+# v0.2 parses executables, and this project does not use real samples, so the
+# executable is built. These tests verify the builder against pefile, which is
+# the thing v0.2 will parse with: a fixture that does not contain what it was
+# built to contain makes every test above it a test of the fixture.
+
+DEMO_IMPORTS = {
+    "KERNEL32.dll": ["CreateFileA", "WriteFile", "VirtualAlloc"],
+    "USER32.dll": ["MessageBoxA"],
+}
+
+
+def _expected_imphash(imports):
+    """imphash independently of pefile: lowercased `lib.func` pairs, comma
+    joined, md5. Computing it here rather than asking pefile means the test
+    can disagree with pefile instead of agreeing with it by construction."""
+    import hashlib
+    parts = []
+    for dll, funcs in imports.items():
+        lib = dll.lower()
+        for extension in (".dll", ".ocx", ".sys"):
+            if lib.endswith(extension):
+                lib = lib[: -len(extension)]
+        parts.extend(f"{lib}.{func.lower()}" for func in funcs)
+    return hashlib.md5(",".join(parts).encode()).hexdigest()
+
+
+def test_the_fixture_is_identified_as_a_pe(write):
+    """The cheapest possible check, and the one everything else assumes."""
+    report = analyse(write("a.exe", build_pe()))
+    assert report.data["filetype"]["family"] == "pe"
+
+
+@needs_pefile
+def test_pefile_parses_the_fixture_without_structural_warnings(write):
+    pe = pefile.PE(name=str(write("a.exe", build_pe(imports=DEMO_IMPORTS))))
+    structural = [w for w in pe.get_warnings() if "makes up" not in w]
+    assert structural == [], structural
+
+
+@needs_pefile
+def test_fixture_sections_are_where_the_section_table_says(write):
+    sections = [
+        (".text", SECTION_CODE, b"\x90" * 0x180),
+        (".evil", SECTION_RWX, os.urandom(0x400)),
+    ]
+    pe = pefile.PE(name=str(write("a.exe", build_pe(sections=sections))))
+    names = [s.Name.rstrip(b"\x00").decode() for s in pe.sections]
+    assert names == [".text", ".evil"]
+    for section, (_, characteristics, body) in zip(pe.sections, sections):
+        assert section.Characteristics == characteristics
+        assert section.get_data()[: len(body)] == body
+
+
+@needs_pefile
+def test_fixture_imports_resolve_and_the_imphash_is_right(write):
+    """The import table is the reason the random-access phase exists: its
+    thunks are RVAs that only resolve once the section table has been read.
+    If the fixture's are wrong, nothing built on it means anything."""
+    pe = pefile.PE(name=str(write("a.exe", build_pe(imports=DEMO_IMPORTS))))
+    parsed = {
+        entry.dll.decode(): [imp.name.decode() for imp in entry.imports]
+        for entry in pe.DIRECTORY_ENTRY_IMPORT
+    }
+    assert parsed == DEMO_IMPORTS
+    assert pe.get_imphash() == _expected_imphash(DEMO_IMPORTS)
+
+
+@needs_pefile
+def test_fixture_overlay_starts_exactly_after_the_last_section(write):
+    """Overlay detection in v0.2 is this subtraction, so the fixture has to
+    put the boundary exactly where it claims."""
+    body = build_pe(imports=DEMO_IMPORTS)
+    overlay = b"appended" * 64
+    pe = pefile.PE(name=str(write("a.exe", body + overlay)))
+    last = max(pe.sections, key=lambda s: s.PointerToRawData + s.SizeOfRawData)
+    assert last.PointerToRawData + last.SizeOfRawData == len(body)
+    assert pe.get_overlay() == overlay
+
+
+@needs_pefile
+def test_fixture_without_imports_has_no_import_directory(write):
+    """A stripped import table is a packer tell, so it has to be buildable."""
+    pe = pefile.PE(name=str(write("a.exe", build_pe())))
+    assert not hasattr(pe, "DIRECTORY_ENTRY_IMPORT")
+
+
+def test_fixture_section_entropy_is_measurable(write):
+    """Per-section entropy is a v0.2 finding, so the builder has to be able to
+    produce a section that would trip it and one that would not."""
+    packed = os.urandom(0x400)
+    sections = [(".text", SECTION_CODE, b"\x90" * 0x400),
+                (".packed", SECTION_RWX, packed)]
+    build_pe(sections=sections)  # the builder must accept the shape
+    assert shannon(packed) > 7.5
+    assert shannon(b"\x90" * 0x400) < 1.0
+
+
+# the random-access phase
+#
+# v0.2 adds a third extractor kind, for structure that cannot be reached in
+# one forward pass. These tests pin its contract before anything uses it.
+
+class _Probe(RandomAccessExtractor):
+    """A random-access extractor that records what it was given."""
+
+    name = "probe"
+
+    def __init__(self, gate=None):
+        self.seen = []
+        self._gate = gate
+
+    def applies_to(self, path, ctx, config):
+        return self._gate(ctx) if self._gate else True
+
+    def parse(self, path, ctx, config):
+        self.seen.append(dict(ctx))
+        with path.open("rb") as fh:
+            fh.seek(-4, os.SEEK_END)
+            tail = fh.read(4)
+        return {"tail": tail.hex(), "size": ctx["size"]}
+
+
+def test_random_access_extractor_runs_and_files_its_data(write):
+    probe = _Probe()
+    report = analyse(write("a.bin", b"hello world!"), extractors=[probe])
+    assert report.data["probe"]["tail"] == b"rld!".hex()
+    assert not report.errors
+
+
+def test_random_access_phase_sees_what_both_earlier_phases_published(write):
+    """The whole point of running last: `family` comes from the header phase
+    and `sha256` from the stream phase, and a parser needs both."""
+    import hashlib
+    content = b"MZ" + b"\x00" * 200
+    probe = _Probe()
+    analyse(write("a.exe", content),
+            extractors=[FileTypeExtractor(), HashExtractor(), probe])
+    ctx = probe.seen[0]
+    assert ctx["family"] == "pe"
+    assert ctx["sha256"] == hashlib.sha256(content).hexdigest()
+
+
+def test_random_access_extractor_gates_on_family(write):
+    """How the v0.2 PE parser avoids opening every file it is handed."""
+    probe = _Probe(gate=lambda ctx: ctx.get("family") == "pe")
+    extractors = [FileTypeExtractor(), probe]
+
+    analyse(write("a.txt", b"just text"), extractors=extractors)
+    assert probe.seen == []
+
+    analyse(write("b.exe", build_pe()), extractors=extractors)
+    assert len(probe.seen) == 1
+
+
+def test_a_failing_parse_does_not_lose_the_other_phases(write):
+    """The isolation guarantee, restated for the third phase."""
+    import hashlib
+
+    class Exploding(RandomAccessExtractor):
+        name = "exploding"
+
+        def parse(self, path, ctx, config):
+            raise ValueError("malformed section table")
+
+    content = b"MZ" + b"\x00" * 500
+    report = analyse(write("a.exe", content),
+                     extractors=[Exploding(), HashExtractor(), EntropyExtractor()])
+    assert "ValueError" in report.errors["exploding"]
+    assert "exploding" not in report.data
+    assert report.data["hashes"]["sha256"] == hashlib.sha256(content).hexdigest()
+    assert report.data["entropy"]["overall"] >= 0.0
+
+
+def test_a_broken_parse_heuristic_does_not_lose_the_parsed_data(write):
+    class BadFindings(_Probe):
+        def findings(self, data, config):
+            raise ZeroDivisionError("oops")
+
+    report = analyse(write("a.bin", b"hello world!"), extractors=[BadFindings()])
+    assert report.data["probe"]["tail"] == b"rld!".hex()
+    assert "ZeroDivisionError" in report.errors["probe.findings"]
+
+
+def test_an_oversized_sample_is_declined_out_loud(write):
+    """A parser's cost is not bounded by the read sizes, so the ceiling is
+    enforced by the pipeline. The refusal must be recorded: a report that
+    silently skipped the analysis looks identical to one that found nothing."""
+    probe = _Probe()
+    report = analyse(write("big.bin", b"x" * 5000),
+                     config={**DEFAULT_CONFIG, "max_parse_bytes": 1000},
+                     extractors=[probe])
+    assert probe.seen == []
+    assert "probe" not in report.data
+    assert "max_parse_bytes" in report.errors["probe"]
+
+
+def test_the_ceiling_does_not_stop_the_earlier_phases(write):
+    """Declining to parse is not declining to triage."""
+    report = analyse(write("a.exe", build_pe()),
+                     config={**DEFAULT_CONFIG, "max_parse_bytes": 10},
+                     extractors=[FileTypeExtractor(), HashExtractor(), _Probe()])
+    assert report.data["filetype"]["family"] == "pe"
+    assert report.data["hashes"]["sha256"]
+    assert "probe" in report.errors
+
+
+def test_the_pipeline_still_reads_the_sample_once_itself(write, monkeypatch):
+    """The v0.1.2 guarantee, restated now that a later phase may open the file
+    again. The pipeline's own sequential pass is still exactly one read, and
+    nothing anywhere calls read_bytes."""
+    path = write("counted.bin", os.urandom(300_000))
+
+    opens = []
+    original = Path.open
+
+    def counting_open(self, *args, **kwargs):
+        if self == path:
+            opens.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    monkeypatch.setattr(
+        Path, "read_bytes",
+        lambda self: pytest.fail("read_bytes loads the whole sample into memory"))
+
+    analyse(path, extractors=[HashExtractor(), EntropyExtractor()])
+    assert len(opens) == 1
+
+    # The probe opens the file for itself, which is exactly what the third
+    # kind is permitted to do. One pipeline read, one deliberate parse open.
+    opens.clear()
+    analyse(path, extractors=[HashExtractor(), _Probe()])
+    assert len(opens) == 2
+
+
+def test_an_extractor_of_no_known_kind_is_reported_not_crashed(write):
+    """v0.1.2 called `extract()` on anything that was not a header or stream
+    extractor, and no class has ever defined it. The resulting AttributeError
+    read as though the extractor had failed at its job rather than as though
+    it had no contract."""
+    class Neither(Extractor):
+        name = "neither"
+
+    report = analyse(write("a.bin", b"hello"),
+                     extractors=[Neither(), HashExtractor()])
+    assert "TypeError" in report.errors["neither"]
+    assert "RandomAccessExtractor" in report.errors["neither"]
+    assert report.data["hashes"]["sha256"]

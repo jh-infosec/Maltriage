@@ -11,6 +11,7 @@ report the digest of an empty file with no error raised anywhere.
 """
 
 import os
+import struct
 from pathlib import Path
 
 # Default configuration
@@ -44,6 +45,12 @@ DEFAULT_CONFIG = {
     # run regardless of how large the sample is.
     "header_bytes": 4096,
     "read_chunk_bytes": 1048576,
+
+    # Ceiling for the random-access phase. A parser handed a hostile file is
+    # the one place in this tool where work is not bounded by the read sizes
+    # above, so a sample larger than this is declined and the refusal is
+    # recorded. 512 MiB is far above any plausible triage subject.
+    "max_parse_bytes": 536870912,
 
     # Entropy is scored as a ratio of what uniformly random data of the same
     # length actually reaches, not as an absolute bits-per-byte figure. See
@@ -121,6 +128,7 @@ def validate_config(config):
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")
+    check_int("max_parse_bytes")
     check_int("entropy_window_bytes")
     check_int("entropy_min_window_bytes")
     check_int("entropy_target_windows")
@@ -147,6 +155,203 @@ def validate_config(config):
                 f"signatures[{index}] magic {magic_hex!r} is not valid hex, skipped")
 
     return problems
+
+
+# Synthetic PE construction
+#
+# v0.2 needs a valid PE to test a PE parser against, and this project does not
+# use real samples. So one is built here, byte by byte, out of the structures
+# the format defines.
+#
+# What is produced is structurally valid and contains no code. Section bodies
+# are padding, the entry point addresses a byte that does nothing, and there
+# is no import thunk that resolves to anything at runtime. It is a file shaped
+# like an executable, which is all a static parser needs and all this project
+# is willing to ship.
+#
+# `build_pe` is the single source of every PE fixture. Variants come from its
+# arguments rather than from separate builders, so a fixture that drifts from
+# the format drifts for every test at once and is caught immediately.
+
+FILE_ALIGNMENT = 0x200
+SECTION_ALIGNMENT = 0x1000
+PE_HEADER_OFFSET = 0x80
+
+MACHINE_I386 = 0x014C
+MACHINE_AMD64 = 0x8664
+
+# Section characteristics, as the format defines them.
+SECTION_CODE = 0x60000020    # code, executable, readable
+SECTION_RDATA = 0x40000040   # initialised data, readable
+SECTION_DATA = 0xC0000040    # initialised data, readable, writable
+SECTION_RWX = 0xE0000020     # code, executable, readable AND writable
+
+
+def _align(value, alignment):
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _import_blob(base_rva, imports):
+    """Build a complete import directory destined for `base_rva`.
+
+    Returns the blob and the size of its descriptor array, which is what the
+    data directory entry records.
+
+    Layout is the descriptor array, then an import name table and an import
+    address table per DLL, then the DLL name strings, then the hint/name
+    entries. Every internal pointer is an RVA, which is why the blob has to
+    know where it will be placed before it can be built.
+    """
+    dlls = list(imports.items())
+    descriptor_size = (len(dlls) + 1) * 20  # null-terminated array
+
+    cursor = descriptor_size
+    int_offset, iat_offset, name_offset = {}, {}, {}
+    for dll, funcs in dlls:
+        int_offset[dll] = cursor
+        cursor += (len(funcs) + 1) * 4
+    for dll, funcs in dlls:
+        iat_offset[dll] = cursor
+        cursor += (len(funcs) + 1) * 4
+    for dll, _ in dlls:
+        name_offset[dll] = cursor
+        cursor += len(dll) + 1
+        cursor += cursor % 2
+
+    hint_offset = {}
+    for dll, funcs in dlls:
+        for func in funcs:
+            hint_offset[(dll, func)] = cursor
+            cursor += 2 + len(func) + 1
+            cursor += cursor % 2
+
+    blob = bytearray(cursor)
+
+    for index, (dll, _) in enumerate(dlls):
+        struct.pack_into(
+            "<IIIII", blob, index * 20,
+            base_rva + int_offset[dll],   # OriginalFirstThunk
+            0,                            # TimeDateStamp
+            0,                            # ForwarderChain
+            base_rva + name_offset[dll],  # Name
+            base_rva + iat_offset[dll],   # FirstThunk
+        )
+
+    for dll, funcs in dlls:
+        for slot, func in enumerate(funcs):
+            thunk = base_rva + hint_offset[(dll, func)]
+            struct.pack_into("<I", blob, int_offset[dll] + slot * 4, thunk)
+            struct.pack_into("<I", blob, iat_offset[dll] + slot * 4, thunk)
+
+    for dll, _ in dlls:
+        blob[name_offset[dll]:name_offset[dll] + len(dll)] = dll.encode()
+
+    for (_, func), offset in hint_offset.items():
+        blob[offset + 2:offset + 2 + len(func)] = func.encode()
+
+    return bytes(blob), descriptor_size
+
+
+def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
+             timestamp=0x5D2C0000, subsystem=3, characteristics=0x0102,
+             entry_section=".text"):
+    """Build a structurally valid PE32 executable.
+
+    `sections` is a list of (name, characteristics, body). `imports` is a
+    mapping of DLL name to a list of function names, which adds an `.idata`
+    section. `overlay` is appended after the last section, which is exactly
+    what makes it an overlay.
+
+    The optional header is always PE32. `machine` sets the COFF machine field
+    only, so passing MACHINE_AMD64 produces a deliberately inconsistent file,
+    which is useful as a malformed fixture and useless as an x64 one.
+    """
+    sections = list(sections if sections is not None
+                    else [(".text", SECTION_CODE, b"\x90" * 0x180)])
+    if imports:
+        sections.append((".idata", SECTION_RDATA, b""))
+
+    count = len(sections)
+    headers_size = _align(
+        PE_HEADER_OFFSET + 4 + 20 + 224 + count * 40, FILE_ALIGNMENT)
+
+    placed = [{"name": name, "chars": chars, "body": body}
+              for name, chars, body in sections]
+
+    def lay_out():
+        rva = _align(headers_size, SECTION_ALIGNMENT)
+        raw_pointer = headers_size
+        for entry in placed:
+            entry["rva"] = rva
+            entry["raw_pointer"] = raw_pointer
+            size = max(len(entry["body"]), 1)
+            rva = _align(rva + size, SECTION_ALIGNMENT)
+            raw_pointer += _align(size, FILE_ALIGNMENT)
+        return rva, raw_pointer
+
+    lay_out()
+    import_directory = (0, 0)
+    if imports:
+        # The blob's internal pointers depend on where it lands, and its size
+        # decides where everything after it lands. Build it against the
+        # provisional address, then lay out again now that the size is known.
+        blob, descriptor_size = _import_blob(placed[-1]["rva"], imports)
+        placed[-1]["body"] = blob
+        lay_out()
+        blob, descriptor_size = _import_blob(placed[-1]["rva"], imports)
+        placed[-1]["body"] = blob
+        import_directory = (placed[-1]["rva"], descriptor_size)
+
+    image_end, total_raw = lay_out()
+    image_size = _align(image_end, SECTION_ALIGNMENT)
+
+    entry = next((e for e in placed if e["name"] == entry_section), placed[0])
+    out = bytearray(total_raw)
+
+    # DOS header, with the only field that matters: e_lfanew.
+    struct.pack_into("<2sHH", out, 0, b"MZ", 0x90, 3)
+    struct.pack_into("<I", out, 0x3C, PE_HEADER_OFFSET)
+    stub = b"This program cannot be run in DOS mode.\r\r\n$"
+    out[0x40:0x40 + len(stub)] = stub
+
+    offset = PE_HEADER_OFFSET
+    struct.pack_into("<4s", out, offset, b"PE\x00\x00")
+    offset += 4
+
+    code_size = sum(len(e["body"]) for e in placed if e["chars"] & 0x20)
+    data_size = sum(len(e["body"]) for e in placed if not e["chars"] & 0x20)
+
+    struct.pack_into("<HHIIIHH", out, offset,
+                     machine, count, timestamp, 0, 0, 224, characteristics)
+    offset += 20
+
+    struct.pack_into("<HBBIIIIII", out, offset,
+                     0x10B, 14, 0, code_size, data_size, 0,
+                     entry["rva"], placed[0]["rva"], placed[0]["rva"])
+    struct.pack_into("<IIIHHHHHHIIIIHHIIIIII", out, offset + 28,
+                     0x400000, SECTION_ALIGNMENT, FILE_ALIGNMENT,
+                     6, 0, 0, 0, 6, 0, 0,
+                     image_size, headers_size, 0, subsystem, 0x8140,
+                     0x100000, 0x1000, 0x100000, 0x1000, 0, 16)
+    offset += 96
+
+    directories = [(0, 0)] * 16
+    directories[1] = import_directory
+    for index, (dir_rva, dir_size) in enumerate(directories):
+        struct.pack_into("<II", out, offset + index * 8, dir_rva, dir_size)
+    offset += 128
+
+    for entry_ in placed:
+        body = entry_["body"]
+        struct.pack_into(
+            "<8sIIIIIIHHI", out, offset,
+            entry_["name"].encode()[:8], max(len(body), 1), entry_["rva"],
+            _align(max(len(body), 1), FILE_ALIGNMENT), entry_["raw_pointer"],
+            0, 0, 0, 0, entry_["chars"])
+        offset += 40
+        out[entry_["raw_pointer"]:entry_["raw_pointer"] + len(body)] = body
+
+    return bytes(out) + overlay
 
 
 # Sample files

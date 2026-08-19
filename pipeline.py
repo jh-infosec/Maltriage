@@ -10,13 +10,17 @@ so no byte is read twice and nothing seeks backwards.
 
 Five properties are deliberate and should survive future changes:
 
-1. One open, one read, bounded memory. Nothing holds the sample whole. This
-   is what makes corpus-scale work possible in v0.6, and it is why a stream
-   extractor must not buffer the chunks it is handed.
-2. Two phases, so gating still works. Header extractors run first and write to
-   `ctx`; stream extractors are then selected with `applies_to` using what the
-   header phase learned. A single undivided pass would leave the PE parser
-   arriving in v0.2 unable to know it is looking at a PE before it starts.
+1. One sequential read, bounded memory. The pipeline reads the sample exactly
+   once and nothing holds it whole. This is what makes the corpus harness in
+   v0.7 possible, and it is why a stream extractor must not buffer the chunks
+   it is handed. A random-access extractor in phase 3 may map the file and
+   address bounded regions of it; the memory half of this property is
+   absolute, the single-read half describes the pipeline's own pass.
+2. Three phases, so gating still works. Header extractors run first and write
+   to `ctx`; stream extractors are then selected with `applies_to` using what
+   the header phase learned; random-access extractors run last and see both.
+   A single undivided pass would leave the PE parser unable to know it is
+   looking at a PE before it starts.
 3. Per-extractor error isolation. Malformed headers are an anti-analysis
    technique, not an accident. One extractor raising must never lose the
    results of the others. An extractor that raises mid-stream is dropped for
@@ -27,7 +31,9 @@ Five properties are deliberate and should survive future changes:
 5. A bad config is reported, not absorbed. Values that fail validation fall
    back to defaults, and the substitution is recorded under `config` in
    `report.errors`, so a report never looks clean while quietly ignoring what
-   the caller asked for.
+   the caller asked for. Analysis that was declined rather than attempted,
+   such as a parse refused for exceeding `max_parse_bytes`, is recorded the
+   same way and for the same reason.
 """
 
 from __future__ import annotations
@@ -35,7 +41,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from extractors import Extractor, HeaderExtractor, StreamExtractor, default_extractors
+from extractors import (
+    Extractor,
+    HeaderExtractor,
+    RandomAccessExtractor,
+    StreamExtractor,
+    default_extractors,
+)
 from models import Report
 from sample_data import DEFAULT_CONFIG, config_int, validate_config
 
@@ -96,17 +108,27 @@ def analyse(
         # Phase 1: header extractors, in order, so each sees what the
         # previous one published.
         stream: list[StreamExtractor] = []
+        random_access: list[RandomAccessExtractor] = []
         for extractor in extractors:
             if isinstance(extractor, StreamExtractor):
                 stream.append(extractor)
                 continue
+            if isinstance(extractor, RandomAccessExtractor):
+                random_access.append(extractor)
+                continue
             try:
                 if not extractor.applies_to(path, ctx, config):
                     continue
-                if isinstance(extractor, HeaderExtractor):
-                    data = extractor.read_header(header, path, ctx, config)
-                else:
-                    data = extractor.extract(path, ctx, config)
+                if not isinstance(extractor, HeaderExtractor):
+                    # Every extractor belongs to one of the three kinds. An
+                    # object that belongs to none of them has no contract for
+                    # the pipeline to honour, so say that rather than calling
+                    # a method it may not have and reporting the AttributeError
+                    # as though the extractor had failed at its job.
+                    raise TypeError(
+                        f"{type(extractor).__name__} is not a HeaderExtractor, "
+                        "StreamExtractor or RandomAccessExtractor")
+                data = extractor.read_header(header, path, ctx, config)
             except Exception as exc:  # isolation is the point
                 log.warning("extractor %s failed on %s: %s", extractor.name, path, exc)
                 report.errors[extractor.name] = f"{type(exc).__name__}: {exc}"
@@ -153,7 +175,47 @@ def analyse(
                     continue
                 _file(report, extractor, data, config)
 
+    # Phase 3: random access. Runs after the pipeline's own handle has closed,
+    # because these extractors address the file themselves rather than being
+    # fed from the shared read. They see everything both earlier phases
+    # published to `ctx`, which is how a parser gates on `family`.
+    _parse_phase(report, random_access, path, ctx, config)
+
     return report
+
+
+def _parse_phase(report: Report, extractors: list[RandomAccessExtractor],
+                 path: Path, ctx: dict[str, Any], config: dict[str, Any]) -> None:
+    """Run the random-access extractors, subject to the size ceiling.
+
+    This is the one phase whose cost is not bounded by the configured read
+    sizes, because a parser decides for itself how much structure to walk and
+    the file it is walking is hostile by assumption. The ceiling is therefore
+    enforced here rather than trusted to each extractor, and a sample that
+    exceeds it is declined out loud: a report must not look clean while
+    quietly omitting the analysis nobody ran.
+    """
+    if not extractors:
+        return
+
+    ceiling = config_int(config, "max_parse_bytes", 536870912)
+    for extractor in extractors:
+        try:
+            if not extractor.applies_to(path, ctx, config):
+                continue
+            if ctx["size"] > ceiling:
+                log.warning("extractor %s skipped on %s: above max_parse_bytes",
+                            extractor.name, path)
+                report.errors[extractor.name] = (
+                    f"skipped: {ctx['size']} bytes is above "
+                    f"max_parse_bytes={ceiling}")
+                continue
+            data = extractor.parse(path, ctx, config)
+        except Exception as exc:
+            log.warning("extractor %s failed on %s: %s", extractor.name, path, exc)
+            report.errors[extractor.name] = f"{type(exc).__name__}: {exc}"
+            continue
+        _file(report, extractor, data, config)
 
 
 def analyse_directory(
