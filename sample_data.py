@@ -64,6 +64,80 @@ DEFAULT_CONFIG = {
     "entropy_target_windows": 8,
     "entropy_file_ratio": 0.90,
     "entropy_window_ratio": 0.94,
+
+    # PE parsing.
+    #
+    # The first two are hostile-input ceilings rather than tuning knobs.
+    # pefile's own defaults (8192 exports, 120 repeats) are generous enough
+    # that a crafted export table keeps it busy on a file that is not large,
+    # and a parser that hangs is the gap `max_parse_bytes` does not close.
+    "pe_max_symbol_exports": 4096,
+    "pe_max_repeated_symbol": 64,
+    "pe_max_tls_callbacks": 64,
+    "pe_max_debug_entries": 32,
+    "pe_max_certificate_bytes": 1048576,
+
+    # A CodeView record's PdbFileName is whatever is left after a fixed-size
+    # prefix, and its length comes from a field in the file. Uncapped, a
+    # one-DWORD edit turns a build path into a copy of the whole sample.
+    "pe_max_pdb_bytes": 1024,
+
+    # Entropy over a section or an overlay is computed from the mapping in
+    # bounded pieces, but a 400 MB overlay would still cost a full read to
+    # score. Above this, the first slice is scored and the figure is marked
+    # `entropy_sampled`, so a partial answer never passes as a whole one.
+    "pe_region_entropy_bytes": 16777216,
+
+    # And a budget shared across the whole section table, because the cap
+    # above is per region while the number of regions is a field in the file.
+    # A section table under 100 KB can otherwise ask for a cap's worth of
+    # work a thousand times over.
+    "pe_entropy_budget_bytes": 67108864,
+
+    # Longest symbol list any single directory contributes to the report.
+    # imphash is computed over everything pefile parsed, not over this slice.
+    "pe_max_listed_symbols": 256,
+
+    # Section entropy is scored against random data of the same length, the
+    # same way file entropy is, so one threshold works for a 512-byte section
+    # and a 4 MB one.
+    "pe_section_entropy_ratio": 0.94,
+
+    # Virtual size as a percentage of raw size, above which a section is
+    # reserving more memory than the file fills: the room an unpacker needs.
+    "pe_virtual_size_percent": 200,
+
+    "pe_few_imports": 6,
+    "pe_large_overlay_bytes": 1048576,
+
+    # 1993-01-01. Earlier than any genuine PE compile timestamp, so anything
+    # below it was stripped or forged rather than merely old.
+    "pe_min_timestamp": 725846400,
+
+    "pe_packer_sections": [
+        "upx0", "upx1", "upx2", "upx!", ".upx0", ".upx1", ".aspack", ".adata",
+        ".asdata", "aspack", ".boom", ".ccg", ".charmve", "bitarts", "dxpack",
+        ".ecode", ".edata", ".enigma1", ".enigma2", "fsg!", ".gentee", "kkrunchy",
+        ".mackt", ".mpress1", ".mpress2", ".neolit", ".neolite", ".nsp0", ".nsp1",
+        ".nsp2", "nsp0", "nsp1", "nsp2", "packedbyskpe", "pebundle", "pec",
+        "pec1", "pec2", "pec3", "pec4", "pec5", "pec6", "pelocknt", ".perplex",
+        "petite", ".petite", ".pinclie", "prochyde", ".rmnet", "rcryptor",
+        ".seau", ".sforce3", ".shrink1", ".shrink2", ".shrink3", ".spack",
+        ".svkp", ".taz", ".tsuarch", ".tsustub", ".packed", "themida",
+        ".themida", ".vmp0", ".vmp1", ".vmp2", ".winapi", "wwpack", ".wwp32",
+        ".y0da", ".yp", "_winzip_",
+    ],
+
+    # Names mainstream toolchains emit. Anything outside this and the packer
+    # list above is merely unusual, which is a `low`, not an accusation.
+    "pe_standard_sections": [
+        ".text", ".data", ".rdata", ".bss", ".idata", ".edata", ".rsrc",
+        ".reloc", ".tls", ".debug", ".pdata", ".xdata", ".didat", ".sdata",
+        ".srdata", ".crt", ".ctors", ".dtors", ".gfids", ".00cfg", ".textbss",
+        ".voltbl", ".init", ".fini", ".rodata", ".comment", ".detourc",
+        ".detourd", ".sxdata", ".imrsiv", ".cormeta", ".drectve", ".symtab",
+        "code", "data", "text", "init", "page", "pagedata", ".bindat",
+    ],
 }
 
 
@@ -135,7 +209,23 @@ def validate_config(config):
     check_ratio("entropy_file_ratio")
     check_ratio("entropy_window_ratio")
 
-    for key in ("executable_families", "document_extensions", "signatures"):
+    check_int("pe_max_symbol_exports")
+    check_int("pe_max_repeated_symbol")
+    check_int("pe_max_tls_callbacks")
+    check_int("pe_max_debug_entries")
+    check_int("pe_max_pdb_bytes")
+    check_int("pe_entropy_budget_bytes")
+    check_int("pe_max_certificate_bytes")
+    check_int("pe_region_entropy_bytes")
+    check_int("pe_max_listed_symbols")
+    check_int("pe_virtual_size_percent", minimum=100)
+    check_int("pe_few_imports")
+    check_int("pe_large_overlay_bytes")
+    check_int("pe_min_timestamp")
+    check_ratio("pe_section_entropy_ratio")
+
+    for key in ("executable_families", "document_extensions", "signatures",
+                "pe_packer_sections", "pe_standard_sections"):
         if key in config and not isinstance(config[key], list):
             problems.append(f"{key} is not a list, default used")
 
@@ -252,9 +342,82 @@ def _import_blob(base_rva, imports):
     return bytes(blob), descriptor_size
 
 
+IMAGE_BASE = 0x400000
+
+DIRECTORY_IMPORT = 1
+DIRECTORY_SECURITY = 4
+DIRECTORY_DEBUG = 6
+DIRECTORY_TLS = 9
+
+TLS_DIRECTORY_SIZE = 24
+DEBUG_DIRECTORY_SIZE = 28
+DEBUG_TYPE_CODEVIEW = 2
+
+
+def _tls_blob(base_rva, callbacks):
+    """IMAGE_TLS_DIRECTORY32 followed by its callback array.
+
+    The array is what the parser actually walks, and it is null-terminated
+    rather than counted, which is why a walker needs a cap: the terminator is
+    a value in the file and a hostile file can decline to supply one.
+    """
+    array = base_rva + TLS_DIRECTORY_SIZE
+    blob = bytearray(TLS_DIRECTORY_SIZE + (len(callbacks) + 1) * 4)
+    struct.pack_into("<IIIIII", blob, 0,
+                     IMAGE_BASE + base_rva,     # StartAddressOfRawData
+                     IMAGE_BASE + base_rva,     # EndAddressOfRawData
+                     IMAGE_BASE + base_rva,     # AddressOfIndex
+                     IMAGE_BASE + array,        # AddressOfCallBacks
+                     0, 0)                      # SizeOfZeroFill, Characteristics
+    for slot, callback in enumerate(callbacks):
+        struct.pack_into("<I", blob, TLS_DIRECTORY_SIZE + slot * 4, callback)
+    return bytes(blob)
+
+
+def _debug_blob(base_rva, base_pointer, pdb_path):
+    """IMAGE_DEBUG_DIRECTORY plus the CV_INFO_PDB70 record it points at.
+
+    The record carries both an RVA and a file pointer to the same bytes, and
+    a parser that trusts one without the other is a parser this fixture
+    should be able to catch out.
+    """
+    record = (b"RSDS" + bytes(16) + struct.pack("<I", 1)
+              + pdb_path.encode() + b"\x00")
+    blob = bytearray(DEBUG_DIRECTORY_SIZE + len(record))
+    struct.pack_into("<IIHHIIII", blob, 0,
+                     0, 0, 0, 0,                          # flags, stamp, version
+                     DEBUG_TYPE_CODEVIEW, len(record),
+                     base_rva + DEBUG_DIRECTORY_SIZE,     # AddressOfRawData
+                     base_pointer + DEBUG_DIRECTORY_SIZE)  # PointerToRawData
+    blob[DEBUG_DIRECTORY_SIZE:] = record
+    return bytes(blob)
+
+
+CN_OID = bytes.fromhex("0603550403")  # OBJECT IDENTIFIER 2.5.4.3, commonName
+
+
+def build_certificate(common_names=("Example Signing Ltd",), revision=0x0200,
+                      cert_type=2):
+    """A WIN_CERTIFICATE blob carrying DER commonName attributes.
+
+    Deliberately not a real PKCS#7 structure and signed by nothing. What the
+    extractor does with a certificate table is scan it for commonName strings
+    and report that it did not validate anything, so the fixture supplies
+    exactly the bytes that scan looks for. Shipping a genuine certificate to
+    test a string search would buy nothing and cost a dependency.
+    """
+    body = bytearray()
+    for name in common_names:
+        raw = name.encode("ascii")
+        body += CN_OID + bytes([0x13, len(raw)]) + raw
+    blob = struct.pack("<IHH", 8 + len(body), revision, cert_type) + bytes(body)
+    return blob + bytes(-len(blob) % 8)  # entries are 8-byte aligned
+
+
 def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
              timestamp=0x5D2C0000, subsystem=3, characteristics=0x0102,
-             entry_section=".text"):
+             entry_section=".text", tls_callbacks=None, pdb_path=None,
+             certificate=None):
     """Build a structurally valid PE32 executable.
 
     `sections` is a list of (name, characteristics, body). `imports` is a
@@ -262,21 +425,46 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     section. `overlay` is appended after the last section, which is exactly
     what makes it an overlay.
 
+    `tls_callbacks` is a list of virtual addresses and adds a `.tls` section;
+    `pdb_path` adds a `.debug` section carrying a CodeView record; and
+    `certificate` is a blob appended at the end of the file with the security
+    directory pointed at it. Each exists so the extractor's handling of that
+    directory is tested against bytes rather than against nothing: those three
+    paths are the only pointer arithmetic in the PE extractor that pefile does
+    not do on its behalf.
+
     The optional header is always PE32. `machine` sets the COFF machine field
     only, so passing MACHINE_AMD64 produces a deliberately inconsistent file,
     which is useful as a malformed fixture and useless as an x64 one.
     """
     sections = list(sections if sections is not None
                     else [(".text", SECTION_CODE, b"\x90" * 0x180)])
+    extra = {}
     if imports:
+        extra["idata"] = len(sections)
         sections.append((".idata", SECTION_RDATA, b""))
+    if tls_callbacks:
+        extra["tls"] = len(sections)
+        sections.append((".tls", SECTION_RDATA,
+                         bytes(TLS_DIRECTORY_SIZE + (len(tls_callbacks) + 1) * 4)))
+    if pdb_path:
+        extra["debug"] = len(sections)
+        sections.append((".debug", SECTION_RDATA,
+                         bytes(DEBUG_DIRECTORY_SIZE + 4 + 16 + 4 + len(pdb_path) + 1)))
 
     count = len(sections)
     headers_size = _align(
         PE_HEADER_OFFSET + 4 + 20 + 224 + count * 40, FILE_ALIGNMENT)
 
-    placed = [{"name": name, "chars": chars, "body": body}
-              for name, chars, body in sections]
+    # A section entry is (name, characteristics, body) or, when the section
+    # should claim more memory than the file provides for it,
+    # (name, characteristics, body, virtual_size). That fourth element is how
+    # the unpacker shape -- a large VirtualSize over a small SizeOfRawData --
+    # is built, and it is the only way to build it: everywhere else the two
+    # are derived from the body and therefore agree by construction.
+    placed = [{"name": entry[0], "chars": entry[1], "body": entry[2],
+               "virtual_size": entry[3] if len(entry) > 3 else None}
+              for entry in sections]
 
     def lay_out():
         rva = _align(headers_size, SECTION_ALIGNMENT)
@@ -284,9 +472,10 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
         for entry in placed:
             entry["rva"] = rva
             entry["raw_pointer"] = raw_pointer
-            size = max(len(entry["body"]), 1)
-            rva = _align(rva + size, SECTION_ALIGNMENT)
-            raw_pointer += _align(size, FILE_ALIGNMENT)
+            raw = max(len(entry["body"]), 1)
+            virtual = max(entry["virtual_size"] or 0, raw)
+            rva = _align(rva + virtual, SECTION_ALIGNMENT)
+            raw_pointer += _align(raw, FILE_ALIGNMENT)
         return rva, raw_pointer
 
     lay_out()
@@ -295,15 +484,36 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
         # The blob's internal pointers depend on where it lands, and its size
         # decides where everything after it lands. Build it against the
         # provisional address, then lay out again now that the size is known.
-        blob, descriptor_size = _import_blob(placed[-1]["rva"], imports)
-        placed[-1]["body"] = blob
+        entry_ = placed[extra["idata"]]
+        blob, descriptor_size = _import_blob(entry_["rva"], imports)
+        entry_["body"] = blob
         lay_out()
-        blob, descriptor_size = _import_blob(placed[-1]["rva"], imports)
-        placed[-1]["body"] = blob
-        import_directory = (placed[-1]["rva"], descriptor_size)
+        blob, descriptor_size = _import_blob(entry_["rva"], imports)
+        entry_["body"] = blob
+        import_directory = (entry_["rva"], descriptor_size)
 
     image_end, total_raw = lay_out()
     image_size = _align(image_end, SECTION_ALIGNMENT)
+
+    # These two have a fixed size, so unlike the import blob their placement
+    # is already final and one pass fills them.
+    tls_directory = (0, 0)
+    if tls_callbacks:
+        entry_ = placed[extra["tls"]]
+        entry_["body"] = _tls_blob(entry_["rva"], tls_callbacks)
+        tls_directory = (entry_["rva"], TLS_DIRECTORY_SIZE)
+
+    debug_directory = (0, 0)
+    if pdb_path:
+        entry_ = placed[extra["debug"]]
+        entry_["body"] = _debug_blob(entry_["rva"], entry_["raw_pointer"], pdb_path)
+        debug_directory = (entry_["rva"], DEBUG_DIRECTORY_SIZE)
+
+    # The security directory is the one entry that holds a file offset rather
+    # than an RVA, and the blob sits past the last section, after any overlay.
+    security_directory = (0, 0)
+    if certificate:
+        security_directory = (total_raw + len(overlay), len(certificate))
 
     entry = next((e for e in placed if e["name"] == entry_section), placed[0])
     out = bytearray(total_raw)
@@ -336,7 +546,10 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     offset += 96
 
     directories = [(0, 0)] * 16
-    directories[1] = import_directory
+    directories[DIRECTORY_IMPORT] = import_directory
+    directories[DIRECTORY_SECURITY] = security_directory
+    directories[DIRECTORY_DEBUG] = debug_directory
+    directories[DIRECTORY_TLS] = tls_directory
     for index, (dir_rva, dir_size) in enumerate(directories):
         struct.pack_into("<II", out, offset + index * 8, dir_rva, dir_size)
     offset += 128
@@ -345,13 +558,14 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
         body = entry_["body"]
         struct.pack_into(
             "<8sIIIIIIHHI", out, offset,
-            entry_["name"].encode()[:8], max(len(body), 1), entry_["rva"],
+            entry_["name"].encode()[:8],
+            max(entry_["virtual_size"] or 0, len(body), 1), entry_["rva"],
             _align(max(len(body), 1), FILE_ALIGNMENT), entry_["raw_pointer"],
             0, 0, 0, 0, entry_["chars"])
         offset += 40
         out[entry_["raw_pointer"]:entry_["raw_pointer"] + len(body)] = body
 
-    return bytes(out) + overlay
+    return bytes(out) + overlay + (certificate or b"")
 
 
 # Sample files
@@ -378,6 +592,17 @@ SAMPLE_FILES = {
 
     # a legitimate-looking ELF header
     "helper.elf": lambda: b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 4096,
+
+    # a structurally valid PE wearing every shape v0.2 looks for: a packed
+    # section that is writable and executable, a section reserving far more
+    # memory than the file fills, a thin import table and an appended payload.
+    # Contains no code: the section bodies are padding and random bytes.
+    "dropper.exe": lambda: build_pe(
+        sections=[(".text", SECTION_CODE, b"\x90" * 0x400, 0x20000),
+                  (".packed", SECTION_RWX, os.urandom(0x2000))],
+        imports={"KERNEL32.dll": ["VirtualAlloc", "LoadLibraryA"]},
+        overlay=os.urandom(0x8000),
+        timestamp=0),
 }
 
 

@@ -25,7 +25,7 @@ from pipeline import analyse, analyse_directory
 from sample_data import write_samples
 
 APP_NAME = "maltriage"
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 
 SEVERITY_MARK = {"info": "  ", "low": " ~", "medium": " !", "high": "!!"}
 
@@ -65,6 +65,30 @@ def render_human(report: Report) -> str:
                 f"window of {entropy['window_count']} x {entropy['window_size']}B"
             )
 
+    # Read with `.get` throughout. A renderer that raises on a thin report
+    # turns a file the parser found hard into a run that produced nothing at
+    # all, which is the opposite of what a triage tool should do with a
+    # difficult sample.
+    pe = report.data.get("pe")
+    if pe and pe.get("pe_type"):
+        lines.append(
+            f"  pe       {pe['pe_type']} {pe.get('machine_label', '?')} "
+            f"{pe.get('subsystem_label', '?')}, {len(pe.get('sections') or [])} "
+            f"section(s), built {pe.get('timestamp_iso') or 'unknown'}")
+        if pe.get("imphash"):
+            lines.append(
+                f"  imphash  {pe['imphash']} ({pe['import_count']} symbol(s))")
+        if pe.get("pdb_path"):
+            lines.append(f"  pdb      {pe['pdb_path']}")
+        overlay = pe.get("overlay")
+        if overlay:
+            lines.append(
+                f"  overlay  {overlay['size']:,} bytes at offset {overlay['offset']:,}")
+        certificate = pe.get("certificate") or {}
+        if certificate.get("present"):
+            named = ", ".join(certificate.get("common_names") or []) or "no name found"
+            lines.append(f"  signed   {named} (not validated)")
+
     if report.findings:
         lines.append("")
         lines.append(f"  findings ({report.severity} max):")
@@ -74,10 +98,26 @@ def render_human(report: Report) -> str:
         lines.append("")
         lines.append("  no findings")
 
-    if report.errors:
+    # `report.errors` is analysis that did not run at all. `parse_errors` and
+    # `warnings` are analysis that ran and came back thinner than it looks:
+    # one directory of a PE that could not be followed, or a structure the
+    # parser had to guess at. Both mean the same thing to an analyst reading
+    # an absence, so both are printed rather than left in the JSON.
+    problems = dict(report.errors)
+    for name, data in report.data.items():
+        if not isinstance(data, dict):
+            continue
+        for note in data.get("parse_errors") or []:
+            problems[f"{name}.{note.split(':')[0]}"] = note.partition(": ")[2]
+        for index, warning in enumerate(data.get("warnings") or [], start=1):
+            # Numbered, because a malformed PE routinely produces five or more
+            # distinct warnings and a fixed key would print only the first.
+            problems[f"{name}.warning {index}"] = warning
+
+    if problems:
         lines.append("")
-        lines.append("  errors:")
-        for name, err in report.errors.items():
+        lines.append("  incomplete:" if not report.errors else "  errors:")
+        for name, err in problems.items():
             lines.append(f"    {name}: {err}")
 
     return "\n".join(lines)

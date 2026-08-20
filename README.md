@@ -34,13 +34,23 @@ It never claims a file is malicious. It ranks a queue.
 ## Current Features
 
 - Command line interface with human and JSON output
-- Cryptographic hashing with streaming reads
+- One open and one sequential read of the sample, with peak memory bounded by
+  the chunk size rather than by the file
+- Three extraction phases: header, stream, and random access for structure no
+  forward pass can reach
+- Per-extractor error isolation, because a malformed header is an
+  anti-analysis technique rather than an accident
+- Cryptographic hashing off the shared pass, and optional fuzzy hashing
 - Format identification from magic bytes, no external dependencies
 - Whole-file and windowed Shannon entropy, scaled to the size of the sample
+- PE structure: sections with per-section entropy, imports and imphash,
+  exports, TLS callbacks, debug directory and PDB path, overlay, and
+  certificate presence with the names embedded in it
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
-- Synthetic sample generation
+- Synthetic sample generation, including a structurally valid PE built from
+  scratch and containing no code
 - Automated test suite
 
 ---
@@ -117,11 +127,19 @@ snapshots and no host networking, and source them from a reputable feed.
 Current stack
 
 - Python
-- Standard library only
+- Standard library only for everything the tool must be able to do
+
+Optional, each degrading rather than failing
+
+- pefile for PE parsing. Its absence is recorded in `report.errors`, because
+  it removes findings rather than only speed, and a report must never look
+  clean while quietly omitting the analysis nobody ran
+- ssdeep for fuzzy hashing, reported as `available: false` when missing
+- numpy for faster byte counting. Silently absent, because it changes nothing
+  observable
 
 Planned
 
-- pefile for PE parsing
 - yara-python for rule matching
 - scikit-learn and LightGBM for classification
 
@@ -129,46 +147,21 @@ Planned
 
 ## Roadmap
 
-### v0.1
+`ROADMAP.md` is the roadmap. This section used to restate it and had drifted
+into a second, contradictory one: it put the classifier at v0.6 and
+reputation enrichment at v0.5, and it stopped at v0.6 entirely. Rather than
+keep two lists in step, here is the shape, and the file has the detail.
 
-- Extraction Engine
-- Hashing
-- Format Identification
-- Entropy Analysis
-- CLI
-
-### v0.2
-
-- PE Parsing
-- Imphash
-- Section Analysis
-- Overlay Detection
-
-### v0.3
-
-- YARA Integration
-- Bundled Rule Set
-
-### v0.4
-
-- String Extraction
-- IOC Extraction
-
-### v0.5
-
-- Reputation Enrichment
-- Local Result Cache
-
-### v0.6
-
-- Feature Vectors
-- Machine Learning Classifier
-
-### v1.0
-
-- HTML Reports
-- Batch Corpus Analysis
-- Packaged Distribution
+- **v0.1** extraction engine, hashing, format identification, entropy, CLI
+- **v0.2** executable structure: PE now, ELF next
+- **v0.3** YARA integration and a bundled rule set
+- **v0.4** strings, IOCs, suspicious API names, optional reputation enrichment
+- **v0.5** archive recursion, with the decompression-bomb work that makes it safe
+- **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
+- **v0.7** the measurement release: corpus harness, precision and recall
+- **v0.8** feature vectors and a gradient boosting classifier
+- **v0.9** the adversarial release: attack that classifier, then harden it
+- **v1.0** HTML reports, packaged distribution, CI
 
 ---
 

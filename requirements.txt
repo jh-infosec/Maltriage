@@ -5,9 +5,11 @@
 pytest>=7.4
 
 # v0.2 -- PE parsing. Optional, and staying that way: unlike numpy, its
-# absence removes findings rather than speed, so it must be reported and never
-# degrade silently. Without it the tests that verify the synthetic PE fixture
-# against a real parser skip and the rest of the suite runs unchanged.
+# absence removes findings rather than speed, so a PE analysed without it is
+# recorded in `report.errors` and never quietly skipped. Without it the tests
+# that need a real parser skip and the rest of the suite runs unchanged.
+#
+# Uncomment to get PE analysis. The tool runs either way.
 # pefile>=2023.2.7
 
 # v0.3 -- YARA matching

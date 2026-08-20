@@ -241,16 +241,23 @@ schema and the error-isolation guarantee. Run with `pytest`.
 These are accepted limitations of the current design, recorded so they are
 not rediscovered as bugs.
 
-### ssdeep reads the file a second time
+### A parser that hangs is still unhandled
 
-Every other extractor works from the shared pass. ssdeep's API takes a path
-rather than bytes, so when the optional library is installed it opens and
-reads the sample again. This is one reason it stays optional.
+`max_parse_bytes` bounds how large a file a parser is handed, pefile's
+`max_symbol_exports` and `max_repeated_symbol` are set well below their
+defaults, and the TLS callback walk is capped because its terminator is a
+value the file supplies. None of that bounds *time*. The isolation guarantee
+covers a parser that raises; a parser that spins on a crafted file will spin.
+Closing it needs a mechanism the pipeline does not have — a subprocess, a
+watchdog, or an alarm — and that is a change to how extractors run rather
+than a threshold to add.
 
-v0.2 makes this a category rather than an exception. Under the random-access
-phase accepted below, ssdeep is simply the first extractor of a kind that is
-allowed to open the sample for itself, and it should move there when that
-phase is built.
+### Authenticode presence is not Authenticode validity
+
+The certificate table's presence and the common names inside it are free from
+the data directory. Validation is not: it needs the chain, a trust store and
+a clock, and a crafted file can put any string in that blob. The report
+carries `"validated": false` rather than leaving a consumer to assume.
 
 ### Format identification is header-only
 
@@ -292,10 +299,24 @@ this document and stops being provisional.
 
 ### v0.2: the random-access phase
 
-Status: the third kind, the phase that runs it, the `max_parse_bytes` ceiling
-and the synthetic PE builder are built and tested. No PE or ELF extractor
-exists yet, so nothing in `default_extractors()` uses the phase. Everything
-below from "What v0.2 extracts" onward is still design rather than code.
+Status: built, except for ELF. The third kind, the phase that runs it, the
+`max_parse_bytes` ceiling, the synthetic PE builder, the PE extractor and its
+findings all exist and are tested, and `default_extractors()` now carries two
+random-access extractors: `PEExtractor` and `FuzzyHashExtractor`. The ELF
+extractor described under "Dependencies" is the one part still design.
+
+Three things changed between the design below and the code, and the design
+text has been left as written so the difference is visible:
+
+- The certificate table is subtracted from the overlay. The format puts the
+  signature past the last section, so the naive subtraction reports every
+  signed binary as carrying an appended payload.
+- Section entropy is computed over the bytes the file actually holds rather
+  than over the size the section table claims, because a truncated sample
+  keeps a section table describing the file it used to be.
+- Region entropy above `pe_region_entropy_bytes` is sampled rather than
+  refused, and the report marks it. Declining outright loses a usable answer;
+  reporting it unmarked would let a partial figure pass as a whole one.
 
 v0.2 adds executable structure. It is the first release whose extractors gate
 on the header phase, which is what that phase was built for, and the first

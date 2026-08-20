@@ -31,7 +31,13 @@
 - [x] Header and stream extractor phases
 - [x] Error isolation at begin, feed and finish
 - [x] Optional numpy accelerator for byte counting
-- [x] Incremental fuzzy hashing
+- [x] Optional fuzzy hashing via ssdeep
+
+This list said "incremental fuzzy hashing" until v0.2. It was never true:
+ssdeep's API takes a path and hashes the file itself, so it read the sample a
+second time rather than consuming the shared pass. It was the only false
+claim in the repository, and v0.2 both corrects it here and moves ssdeep into
+the phase where reading the file for yourself is the declared contract.
 
 ---
 
@@ -40,13 +46,22 @@
 Executable structure. The first extractor to gate on the header phase, and
 the milestone that produces the fields the classifier will eventually consume.
 
-- [ ] PE parsing
-- [ ] Import table and imphash
-- [ ] Section characteristics and per-section entropy
-- [ ] Compile timestamp
-- [ ] Overlay detection
-- [ ] Authenticode presence, signer and validity
+- [x] A third extractor kind for structure no forward pass can reach
+- [x] Synthetic PE builder, verified against a real parser
+- [x] PE parsing, behind an optional dependency whose absence is reported
+- [x] Import table and imphash
+- [x] Section characteristics and per-section entropy
+- [x] Compile timestamp
+- [x] Exports, TLS callbacks and the debug directory with its PDB path
+- [x] Overlay detection, kept distinct from the certificate table
+- [x] Authenticode presence and signer, never validity
+- [x] Fuzzy hashing moved into the random-access phase
 - [ ] ELF parsing
+
+Authenticode said "validity" here until v0.2. Presence and the embedded
+signer name are free from the directory; validation is not, because it needs
+a certificate chain, a trust store and a clock. The report says
+`"validated": false` for the same reason this line now says what it does.
 
 ---
 
