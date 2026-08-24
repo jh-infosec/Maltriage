@@ -46,6 +46,8 @@ It never claims a file is malicious. It ranks a queue.
 - PE structure: sections with per-section entropy, imports and imphash,
   exports, TLS callbacks, debug directory and PDB path, overlay, and
   certificate presence with the names embedded in it
+- YARA matching against a bundled structural rule set and any rules you add,
+  with per-rule-file compile isolation and offsets-only match context
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
@@ -134,6 +136,7 @@ Optional, each degrading rather than failing
 - pefile for PE parsing. Its absence is recorded in `report.errors`, because
   it removes findings rather than only speed, and a report must never look
   clean while quietly omitting the analysis nobody ran
+- yara-python for rule matching, on the same terms as pefile
 - ssdeep for fuzzy hashing, reported as `available: false` when missing
 - numpy for faster byte counting. Silently absent, because it changes nothing
   observable
@@ -154,14 +157,21 @@ keep two lists in step, here is the shape, and the file has the detail.
 
 - **v0.1** extraction engine, hashing, format identification, entropy, CLI
 - **v0.2** executable structure: PE now, ELF next
-- **v0.3** YARA integration and a bundled rule set
-- **v0.4** strings, IOCs, suspicious API names, optional reputation enrichment
-- **v0.5** archive recursion, with the decompression-bomb work that makes it safe
+- **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
+- **v0.4** strings and IOCs, the shared secret engine, ATT&CK mapping, a
+  package layout, the findings envelope, optional reputation enrichment
+- **v0.5** archive recursion, with the bomb, traversal and time bounds that
+  make it safe, plus known-good filtering
 - **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
 - **v0.7** the measurement release: corpus harness, precision and recall
 - **v0.8** feature vectors and a gradient boosting classifier
 - **v0.9** the adversarial release: attack that classifier, then harden it
-- **v1.0** HTML reports, packaged distribution, CI
+- **v1.0** HTML reports, a stable envelope, packaged distribution, CI
+
+From v0.4 the roadmap stops being local. The secret engine, the ATT&CK
+registry, the archive path-locking primitive and the HTML renderer are shared
+with claude-recon-agent and Shadowfax, and the findings envelope is the wire
+format the three of them speak.
 
 ---
 

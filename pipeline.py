@@ -222,7 +222,23 @@ def analyse_directory(
     directory: Path | str,
     recursive: bool = False,
     config: dict[str, Any] | None = None,
+    extractors: list[Extractor] | None = None,
 ) -> list[Report]:
+    """Analyse every file in a directory, reusing one set of extractors.
+
+    The extractors are built once and handed to every file, which is what the
+    `StreamExtractor` contract has always described: `begin` resets whatever
+    `feed` accumulates, so reuse across a scan is the normal case rather than
+    the exception. Until v0.3 this function built a fresh set per file, so
+    that contract was pinned by a test and never exercised in the production
+    path, and it cost nothing because no extractor had setup worth keeping.
+
+    The YARA extractor is the one that makes it matter. Compiling a rule set
+    is the expensive part of a scan and matching a sample is the cheap part,
+    so rebuilding per file would recompile every rule for every sample in the
+    directory.
+    """
     directory = Path(directory)
+    extractors = extractors if extractors is not None else default_extractors()
     globber = directory.rglob("*") if recursive else directory.glob("*")
-    return [analyse(p, config) for p in sorted(globber) if p.is_file()]
+    return [analyse(p, config, extractors) for p in sorted(globber) if p.is_file()]

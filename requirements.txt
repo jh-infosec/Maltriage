@@ -12,7 +12,12 @@ pytest>=7.4
 # Uncomment to get PE analysis. The tool runs either way.
 # pefile>=2023.2.7
 
-# v0.3 -- YARA matching
+# v0.3 -- YARA matching. Optional on the same terms as pefile: its absence
+# removes findings rather than speed, so a sample scanned without it records
+# the reason in `report.errors` for every file, which is loud on purpose.
+# The bundled rules under rules/ are text and ship regardless.
+#
+# Uncomment to get rule matching. The tool runs either way.
 # yara-python>=4.3
 
 # fuzzy hashing (needs libfuzzy installed)

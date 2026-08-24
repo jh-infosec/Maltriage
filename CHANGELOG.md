@@ -1,5 +1,119 @@
 # Changelog
 
+## Version 0.3 -- pattern matching
+
+YARA. The release where the extractor set stops being fixed by the code: a
+rules directory is an extension point anybody can add to, and an extension
+point is an input.
+
+### Added
+
+- `YaraExtractor`, a random-access extractor. yara maps the file itself, which
+  is the third kind's contract exactly; `match(data=...)` needs the sample
+  whole and is therefore not available to this project
+- A bundled structural rule set under `rules/`: an executable header where one
+  does not belong, an executable encoded as base64 or hex, a PDF that runs
+  something when opened, a PDF or RTF carrying an embedded object, an OLE2
+  document with a VBA project. No family signatures, because this project has
+  no corpus to keep them honest until v0.7, and nothing that restates a
+  finding an extractor already produces
+- `rules/AUTHORING.md`, the rule authoring notes
+- Per-rule-file compile isolation. One `yara.compile` over the directory loses
+  every rule to a syntax error anywhere in it; a rule somebody is halfway
+  through writing should disable that file and nothing else
+- `carrier.pdf` among the bundled samples: a real PDF with a real executable
+  in its body. No extractor sees it, because the file is what it says it is
+  and the payload is just bytes inside it
+- `config_bool`, strict in the same way `config_int` is
+
+### Changed
+
+- `analyse_directory` builds its extractor set once and reuses it, which the
+  `StreamExtractor` contract has always described and no previous release had
+  a reason to exercise. Compiling a rule set is the first setup worth keeping
+- `SCHEMA_VERSION` to 1.4
+- The CLI renders `errors` and `incomplete` as two blocks. One heading that
+  changed wording depending on which was present made the more serious of the
+  two disappear into the other whenever both occurred
+
+### Match context
+
+Findings carry the rule, its tags and meta, the string identifier, the offset
+and the length. They never carry the matched bytes, and there is no
+configuration switch to add them: the person most likely to turn one on is the
+person debugging a rule that matches secrets. This is the v0.4 secret engine's
+rule, arriving a release early because YARA is the first thing that could
+break it.
+
+Every match files under the single finding key `yara_match`. Rules are
+user-extensible and the key set is not; the rule name is data.
+
+### Hardened
+
+Ten defects from the first fuzzing pass and six more from the second, all
+found after the code was written and each now with a regression test. The
+theme is that a rule set is an input, and half of these are about the rules
+rather than the sample.
+
+- A rule could write the sample to the terminal. YARA's `console` module goes
+  to the process's own stdout when nothing captures it, so a rule could dump
+  the file as hex under `--quiet` without a byte of it reaching the report --
+  the one channel that defeated "the extractor never reads `matched_data`".
+  A `console_callback` now takes it to the debug log
+- A four-byte string against a crafted sample produced libyara's cap of a
+  million match objects: 220 MB from a 4 MB file. Fast matching records the
+  first occurrence of each string instead. libyara ignores fast mode for any
+  string whose condition reads that string's count, offset or length -- `#a`
+  is one of the commonest idioms in public rule sets -- so `yara_max_scan_bytes`
+  bounds the one thing the extractor genuinely controls
+- Under fast matching a string reported `count: 1` and `truncated: false` for
+  seven hundred thousand hits. `truncated` is the field whose whole job is to
+  say nothing was left out. Strings now carry `complete`
+- `include` reached the whole filesystem. `include "/etc/passwd"` was opened
+  and parsed, and YARA quotes offending tokens back in its syntax errors.
+  Now off unless `yara_allow_includes` says otherwise
+- The compile cache was keyed on nothing, so a reused extractor answered with
+  whichever rule set it saw first while reporting the files it had been asked
+  for -- a stale result presented as a current one. It now keys on the rule
+  files and on `yara_allow_includes`, because both are inputs to the compile
+- An unusable `yara_rule_paths` entry vanished silently: a nonexistent path, a
+  `Path` where a string was expected, a device file, an unreadable directory.
+  The report claimed a full run while the configured rules never executed
+- A dangling symlink or a directory named `sub.yar` inside a rules directory
+  disappeared the same way
+- Naming the bundled directory in `yara_rule_paths` -- a natural thing to
+  write, since configured paths add to the bundled set -- emitted every match
+  twice, including the medium the CI gate reads
+- The timeout bounded each rule file, and the number of rule files is a
+  directory listing rather than a bound. It is now a budget spent across the
+  whole set
+- `yara_default_severity` set to a list raised `TypeError` from a membership
+  test against a dict, and the pipeline then discarded every match the
+  extractor had already found
+- Two broken rule files with the same basename rendered as one line
+- `yara_fast_matching: "false"` and `: 0` were silently ignored while the
+  report stated the setting the caller thought they had turned off
+- `embedded_elf_header` matched four magic bytes, which occur once every 4 GB
+  of random data. That is a spurious finding on packed samples and a test that
+  fails about once in 3600 runs. EI_CLASS, EI_DATA and EI_VERSION are now
+  constrained
+
+Three of the tests written for the first round did not pin what they claimed.
+The PDB-length test passed against the unfixed code because the value chosen
+broke pefile's unpack for an unrelated reason; the scan-budget test could not
+fail at four rule files; and the ELF test had a 0.1% chance of catching its
+own regression. All three are rewritten, two of them driven by fakes or by
+specific impossible values rather than by random data.
+
+### Still open
+
+A rule that reads its own match count, or that uses the `console` module, can
+allocate until the scan deadline fires. Both are bounded by
+`yara_max_scan_bytes` and `yara_timeout_seconds` rather than by a memory
+limit, and neither is reachable from the bundled set. The mitigation is rule
+discipline, which is documentation, and it lives in `AUTHORING.md`.
+
+
 ## Version 0.2 -- executable structure
 
 PE parsing. The first release whose extractors gate on the header phase,

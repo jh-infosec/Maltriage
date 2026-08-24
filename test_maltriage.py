@@ -17,8 +17,10 @@ alongside the CHANGELOG entry that describes it.
 import json
 import math
 import os
+import re
 import statistics
 import struct
+import time
 import tracemalloc
 from pathlib import Path
 
@@ -42,6 +44,7 @@ from extractors import (
     shannon,
 )
 from models import SEVERITIES, mk_finding
+from extractors import default_extractors
 from pipeline import analyse, analyse_directory
 from sample_data import (
     DEFAULT_CONFIG,
@@ -276,7 +279,7 @@ def test_failing_header_extractor_does_not_lose_other_results(write):
 def test_report_serialises_to_json(write):
     report = analyse(write("invoice.pdf", b"MZ" + b"\x00" * 100))
     parsed = json.loads(report.to_json())
-    assert parsed["schema_version"] == "1.3"
+    assert parsed["schema_version"] == "1.4"
     assert parsed["severity"] == "high"
 
 
@@ -303,7 +306,7 @@ def test_the_bundled_dropper_exercises_the_pe_extractor(tmp_path):
     has an opinion about, or a first run of the tool shows none of v0.2."""
     write_samples(tmp_path)
     report = analyse(tmp_path / "dropper.exe")
-    assert not report.errors
+    assert "pe" not in report.errors, report.errors
     keys = {f["key"] for f in report.findings if f["extractor"] == "pe"}
     assert {"section_entropy_high", "writable_executable_section",
             "virtual_size_mismatch"} <= keys
@@ -1612,3 +1615,569 @@ def test_incomplete_analysis_reaches_the_human_output(write):
     rendered = cli.render_human(report)
     assert "incomplete:" in rendered
     assert "pe.warning" in rendered
+
+
+# YARA
+#
+# v0.3 adds pattern matching. The bundled rules describe structure rather than
+# naming families, so every one of them is demonstrable against a fixture
+# `sample_data.py` can build, which is the standard the authoring notes set.
+
+try:  # only the rule tests need it
+    import yara
+except ImportError:
+    yara = None
+
+needs_yara = pytest.mark.skipif(yara is None, reason="the rule tests require yara-python")
+
+RULE_DIR = Path(extractors_module.__file__).resolve().parent / "rules"
+
+
+def _carrier(payload=b"", prefix=b"%PDF-1.7\n"):
+    """A PDF-looking file with something buried in it."""
+    return prefix + b"%" + b"filler " * 64 + b"\n" + payload + b"\n%%EOF\n"
+
+
+def _yara_data(path, config=None):
+    report = analyse(path, config=config)
+    assert "yara" not in report.errors, report.errors["yara"]
+    return report.data["yara"]
+
+
+def _rules_of(data):
+    return {m["rule"] for m in data["matches"]}
+
+
+def test_the_bundled_rules_are_text_and_carry_a_severity_each():
+    """Rules ship as source in the repository, which is only safe because they
+    describe structure rather than embedding sample bytes. And a rule that
+    declares no severity scores `info`, so the bundled set declares one
+    everywhere rather than relying on that."""
+    files = sorted(RULE_DIR.glob("*.yar"))
+    assert files, "the bundled rule set is missing"
+    declared = 0
+    for path in files:
+        # Split on declarations at column zero, so prose in the file header
+        # that happens to contain the word "rule" is not counted as one.
+        blocks = re.split(r"^rule\s+", path.read_text(), flags=re.MULTILINE)[1:]
+        assert blocks, f"{path.name} declares no rules"
+        for block in blocks:
+            name = block.split()[0]
+            severity = re.search(r'severity\s*=\s*"([^"]+)"', block)
+            assert severity, f"{name} declares no severity"
+            assert severity.group(1) in SEVERITIES, (name, severity.group(1))
+            declared += 1
+    assert declared >= 5
+
+
+@needs_yara
+def test_every_bundled_rule_compiles():
+    for path in sorted(RULE_DIR.glob("*.yar")):
+        yara.compile(filepath=str(path))
+
+
+@needs_yara
+def test_no_bundled_rule_reaches_high():
+    """The same discipline the PE extractor is held to. `high` means content
+    that lies about what it is, and a byte pattern is not in a position to
+    establish deception."""
+    for path in sorted(RULE_DIR.glob("*.yar")):
+        assert '"high"' not in path.read_text()
+
+
+@needs_yara
+def test_an_embedded_executable_is_found_in_a_document(write):
+    """The rule the bundled set exists for: no extractor sees this, because
+    the file really is a PDF and the payload is just bytes inside it."""
+    data = _yara_data(write("carrier.pdf", _carrier(build_pe())))
+    assert "embedded_pe_header" in _rules_of(data)
+    match = next(m for m in data["matches"] if m["rule"] == "embedded_pe_header")
+    assert match["severity"] == "medium"
+    assert "structural" in match["tags"]
+
+
+@needs_yara
+def test_a_clean_executable_does_not_trip_the_embedded_rule(write):
+    """A PE is not a PE carrying a PE. The rule anchors on `uint16(0)` for
+    exactly this."""
+    assert "embedded_pe_header" not in _rules_of(_yara_data(write("a.exe", build_pe())))
+
+
+@needs_yara
+def test_a_base64_encoded_executable_is_found(write):
+    """An executable encoded as text is one somebody wanted to move through
+    something that only carries text."""
+    import base64
+    body = b"var payload = '" + base64.b64encode(build_pe()) + b"';"
+    assert "base64_encoded_pe_header" in _rules_of(_yara_data(write("a.js", body)))
+
+
+@needs_yara
+def test_random_data_does_not_trip_the_bundled_rules(write):
+    """This tool is pointed at packed and encrypted files by definition, so a
+    rule set that fires on entropy is a rule set that fires constantly. The
+    DOS stub requirement in `embedded_pe_header` is what buys this."""
+    for name in ("a.bin", "b.bin", "c.bin"):
+        assert _rules_of(_yara_data(write(name, os.urandom(400_000)))) == set()
+
+
+@needs_yara
+def test_a_findings_key_is_stable_while_rule_names_are_not(write):
+    """Every match files under one key, with the rule name in the detail and
+    the data. Rules are user-extensible, and a key set that grows with
+    somebody's rules directory is not one a dashboard can count on."""
+    report = analyse(write("carrier.pdf", _carrier(build_pe())))
+    matched = [f for f in report.findings if f["extractor"] == "yara"]
+    assert matched
+    assert {f["key"] for f in matched} == {"yara_match"}
+    assert any("embedded_pe_header" in f["detail"] for f in matched)
+
+
+@needs_yara
+def test_a_finding_carries_offsets_and_never_the_matched_bytes(write):
+    """The portfolio rule: a report is stored, piped and shared, and a rule
+    that matched a credential would otherwise put the credential in it. There
+    is no switch for this, so there is nothing to leave switched on."""
+    marker = b"SECRETVALUE_DO_NOT_LEAK"
+    source = ('rule leaky { meta: severity = "low" strings: $s = "%s" condition: $s }'
+              % marker.decode())
+    rules = write("leaky.yar", source.encode())
+    path = write("a.bin", b"x" * 100 + marker + b"y" * 100)
+    report = analyse(path, config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]})
+
+    blob = json.dumps(report.to_dict())
+    assert "leaky" in blob                      # the rule fired
+    assert marker.decode() not in blob          # and the bytes are not in the report
+    match = next(m for m in report.data["yara"]["matches"] if m["rule"] == "leaky")
+    assert match["strings"][0]["offsets"] == [100]
+    assert match["strings"][0]["lengths"] == [len(marker)]
+
+
+@needs_yara
+def test_a_rule_declares_its_own_severity_and_a_silent_rule_is_only_information(write):
+    """A rule that forgot to say how much it matters must not be able to fail
+    somebody's build by forgetting. `GATE_SEVERITY` is medium."""
+    rules = write("mixed.yar", b'''
+rule loud { meta: severity = "medium" strings: $a = "alpha" condition: $a }
+rule quiet { strings: $b = "bravo" condition: $b }
+rule nonsense_severity { meta: severity = "catastrophic" strings: $c = "charlie" condition: $c }
+''')
+    config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]}
+    report = analyse(write("a.bin", b"alpha bravo charlie"), config=config)
+    by_rule = {m["rule"]: m["severity"] for m in report.data["yara"]["matches"]}
+    assert by_rule == {"loud": "medium", "quiet": "info", "nonsense_severity": "info"}
+
+
+@needs_yara
+def test_one_broken_rule_file_does_not_disable_the_others(write):
+    """Compiling every file in one call loses the whole set to a syntax error
+    anywhere in it. This is the pipeline's isolation applied to rule files: a
+    rule somebody is halfway through writing disables that file and nothing
+    else."""
+    broken = write("broken.yar", b"rule wrong { condition: nonsense }")
+    report = analyse(write("carrier.pdf", _carrier(build_pe())),
+                     config={**DEFAULT_CONFIG, "yara_rule_paths": [str(broken)]})
+    data = report.data["yara"]
+    assert "embedded_pe_header" in _rules_of(data)      # the bundled set survived
+    assert any("broken.yar" in p for p in data["parse_errors"])
+    assert "yara" not in report.errors
+    rendered = cli.render_human(report)
+    assert "incomplete:" in rendered and "broken.yar" in rendered   # and not silent
+
+
+def test_no_rules_configured_is_silence_and_no_parser_is_an_error(write, monkeypatch):
+    """Two different facts. Nothing to scan with is not a failure; a rule set
+    that exists and cannot be run is."""
+    monkeypatch.setattr(extractors_module, "BUNDLED_RULES", Path("/nonexistent"))
+    report = analyse(write("a.bin", b"hello"))
+    assert "yara" not in report.data and "yara" not in report.errors
+
+    monkeypatch.undo()
+    monkeypatch.setattr(extractors_module, "HAVE_YARA", False)
+    report = analyse(write("b.bin", b"hello"))
+    assert "yara-python" in report.errors["yara"]
+    assert report.data["hashes"]["sha256"]  # the rest of the run is untouched
+
+
+@needs_yara
+def test_a_rule_set_that_does_not_finish_is_reported_not_read_as_no_matches(write,
+                                                                           monkeypatch):
+    """maltriage's one standing gap is a parser that hangs rather than raises.
+    yara takes a timeout and raises on it, so this is the first extractor that
+    closes it for itself — and a timeout has to reach the report, because "did
+    not finish" and "found nothing" are different answers."""
+    class TimesOut:
+        def match(self, *args, **kwargs):
+            raise yara.TimeoutError("scanning timed out")
+
+    monkeypatch.setattr(extractors_module, "compile_rules",
+                        lambda paths, allow=False: ([("structural", TimesOut())], []))
+    report = analyse(write("carrier.pdf", _carrier(build_pe())))
+    data = report.data["yara"]
+    assert data["match_count"] == 0
+    assert any("timed out" in p.lower() for p in data["parse_errors"])
+    assert "incomplete" in cli.render_human(report)
+
+
+@needs_yara
+def test_a_rule_that_matches_everywhere_is_capped(write):
+    """A one-byte string matches roughly every 256 bytes, and the offsets list
+    is in the report."""
+    rules = write("noisy.yar", b'rule noisy { strings: $a = "A" condition: $a }')
+    config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)], "yara_max_matches": 10,
+              "yara_fast_matching": False}
+    data = _yara_data(write("a.bin", b"A" * 5000), config)
+    string = data["matches"][0]["strings"][0]
+    assert len(string["offsets"]) == 10
+    assert string["count"] == 5000
+    assert string["truncated"] is True
+    assert data["fast_matching"] is False
+
+
+@needs_yara
+def test_the_bundled_carrier_sample_is_caught_by_a_rule(tmp_path):
+    """The demo directory should contain something the newest release has an
+    opinion about, or a first run of the tool shows none of v0.3."""
+    write_samples(tmp_path)
+    report = analyse(tmp_path / "carrier.pdf")
+    assert "yara" not in report.errors, report.errors
+    assert "embedded_pe_header" in _rules_of(report.data["yara"])
+    assert report.severity == "medium"
+
+
+@needs_yara
+def test_rules_are_compiled_once_for_a_directory_rather_than_once_per_file(tmp_path,
+                                                                          monkeypatch):
+    """Compiling is the expensive part of a yara run and matching is the cheap
+    part. Until v0.3 `analyse_directory` built a fresh extractor set per file,
+    so the reuse the StreamExtractor contract has always described was pinned
+    by a test and never exercised in the production path."""
+    write_samples(tmp_path)
+    compiles = []
+    original = extractors_module.compile_rules
+    monkeypatch.setattr(
+        extractors_module, "compile_rules",
+        lambda paths, allow=False: (compiles.append(paths), original(paths, allow))[1])
+    reports = analyse_directory(tmp_path)
+    assert len(reports) > 3
+    assert len(compiles) == 1, f"compiled {len(compiles)} times for {len(reports)} files"
+
+
+# YARA under hostile rules and hostile samples
+#
+# One test per defect found by fuzzing the extractor after it was written.
+# Half of these are about the rules rather than the sample, which is the new
+# thing in v0.3: a rules directory is an extension point, and an extension
+# point is an input.
+
+@needs_yara
+def test_a_match_bomb_does_not_cost_memory_in_proportion_to_the_sample(write):
+    """libyara caps a string at a million matches and yara-python builds an
+    object for each, so a four-byte string against a crafted sample cost
+    220 MB on a 4 MB file. Fast matching records the first occurrence of each
+    string instead, which is the difference between bounded and merely
+    finite."""
+    bomb = write("bomb.bin", b"X" + b"\x7fELF\x02\x01\x01" * 500_000)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        data = _yara_data(bomb)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert data["fast_matching"] is True
+    assert peak < 8_000_000, peak
+    for match in data["matches"]:
+        for string in match["strings"]:
+            assert string["count"] == 1
+
+
+@needs_yara
+def test_a_rule_cannot_write_the_sample_to_stdout(write, capfd):
+    """YARA's `console` module writes to the process's own stdout when nothing
+    captures it. A rule could therefore dump the sample to the terminal, under
+    `--quiet`, without a byte of it appearing in the report — the one channel
+    that defeated "the extractor never reads matched_data"."""
+    marker = b"SECRETBYTES-do-not-print"
+    rules = write("console.yar", b'''
+import "console"
+rule dump { meta: severity = "info" condition: for all i in (0..23) : ( console.hex(uint8(i)) ) }
+''')
+    path = write("a.bin", marker + b"x" * 100)
+    capfd.readouterr()
+    report = analyse(path, config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]})
+    captured = capfd.readouterr()
+    assert "0x" not in captured.out and "0x" not in captured.err
+    assert marker.decode() not in json.dumps(report.to_dict())
+
+
+@needs_yara
+def test_a_rule_file_cannot_include_its_way_out_of_the_rules_directory(write):
+    """An include is resolved relative to the rule file and confined to
+    nothing, so `include "/etc/passwd"` was opened and parsed — and YARA
+    quotes offending tokens back in its syntax errors, which puts arbitrary
+    file content in reach of the report."""
+    rules = write("escape.yar", b'include "/etc/passwd"\nrule r { condition: true }')
+    config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]}
+    report = analyse(write("a.bin", b"hello"), config=config)
+    problems = " ".join(report.data["yara"]["parse_errors"])
+    assert "includes are disabled" in problems
+    assert "root:" not in json.dumps(report.to_dict())
+
+    # and it is a decision somebody can take deliberately
+    allowed = analyse(write("b.bin", b"hello"),
+                      config={**config, "yara_allow_includes": True})
+    assert "includes are disabled" not in " ".join(
+        allowed.data["yara"].get("parse_errors") or [])
+
+
+@needs_yara
+def test_an_unusable_rule_path_is_reported_rather_than_skipped(write, tmp_path):
+    """Every one of these produced a report claiming a full YARA run while the
+    configured rules never executed, with nothing but a log line on stderr —
+    which is not in the artefact that gets stored and piped."""
+    unreadable = tmp_path / "locked"
+    unreadable.mkdir()
+    for bad in (str(tmp_path / "nowhere.yar"), "", 42, None, str(tmp_path)):
+        report = analyse(write("a.bin", b"hello"),
+                         config={**DEFAULT_CONFIG, "yara_rule_paths": [bad]})
+        problems = report.data["yara"].get("parse_errors") or []
+        if bad == str(tmp_path):
+            continue  # a real directory with no rule files in it is not an error
+        assert problems, f"{bad!r} was skipped silently"
+        assert "incomplete:" in cli.render_human(report)
+
+
+@needs_yara
+def test_naming_the_bundled_directory_does_not_double_every_finding(write):
+    """Configured paths add to the bundled set rather than replacing it, so
+    naming it is a natural thing to write — and it emitted every match twice,
+    including the medium the CI gate reads."""
+    config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(RULE_DIR)]}
+    report = analyse(write("carrier.pdf", _carrier(build_pe())), config=config)
+    data = report.data["yara"]
+    assert data["namespaces"] == ["structural"]
+    assert len(data["matches"]) == len({m["rule"] for m in data["matches"]})
+    keys = [f["detail"] for f in report.findings if f["extractor"] == "yara"]
+    assert len(keys) == len(set(keys))
+
+
+@needs_yara
+def test_a_changed_rule_set_is_recompiled_rather_than_answered_from_cache(write):
+    """`analyse_directory` hands one extractor instance to every file, so the
+    compile cache needs a key. Without one it answered with whichever rule set
+    it saw first, while reporting the files it was asked for — a stale result
+    presented as a current one, which is worse than recompiling."""
+    first = write("first.yar", b'rule alpha { meta: severity = "low" strings: $a = "alpha" condition: $a }')
+    second = write("second.yar", b'rule bravo { meta: severity = "low" strings: $b = "bravo" condition: $b }')
+    sample = write("a.bin", b"alpha and bravo")
+    shared = default_extractors()
+
+    a = analyse(sample, {**DEFAULT_CONFIG, "yara_rule_paths": [str(first)]}, shared)
+    b = analyse(sample, {**DEFAULT_CONFIG, "yara_rule_paths": [str(second)]}, shared)
+    assert _rules_of(a.data["yara"]) & {"alpha"} == {"alpha"}
+    assert _rules_of(b.data["yara"]) & {"bravo"} == {"bravo"}
+    assert "alpha" not in _rules_of(b.data["yara"])
+    assert "second.yar" in b.data["yara"]["rule_files"]
+
+    # an edit to the same path is picked up too
+    first.write_bytes(b'rule gamma { meta: severity = "low" strings: $c = "alpha" condition: $c }')
+    c = analyse(sample, {**DEFAULT_CONFIG, "yara_rule_paths": [str(first)]}, shared)
+    assert "gamma" in _rules_of(c.data["yara"])
+
+
+@needs_yara
+def test_an_unhashable_default_severity_falls_back_instead_of_crashing(write):
+    """`config.get` followed by `x in SEVERITY_RANK` raises on an unhashable
+    value, and the pipeline then loses the whole extractor: every match
+    discarded because one config value was a list."""
+    rules = write("silent.yar", b'rule quiet { strings: $a = "alpha" condition: $a }')
+    for bad in ([], {}, set(), ["info"], 3):
+        report = analyse(write("a.bin", b"alpha"),
+                         config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)],
+                                 "yara_default_severity": bad})
+        assert "yara" not in report.errors, (bad, report.errors)
+        assert report.data["yara"]["matches"][0]["severity"] == "info"
+
+
+@needs_yara
+def test_the_scan_budget_is_spent_across_the_rule_set_not_per_file(write, monkeypatch):
+    """The timeout bounded each rule file, and the number of rule files is a
+    directory listing rather than a bound: a hundred of them at ten seconds
+    each is a thousand seconds per sample, multiplied again by every file in
+    a directory scan.
+
+    Driven by fake rule sets rather than by genuinely slow rules, because a
+    version of this test built from real ones passed against the unfixed code:
+    four files at a second each never approach any plausible wall-clock
+    assertion, and the pre-fix `TimeoutError` text satisfies a loose check on
+    the message.
+    """
+    class Slow:
+        def match(self, *args, **kwargs):
+            time.sleep(0.3)
+            return []
+
+    monkeypatch.setattr(extractors_module, "compile_rules",
+                        lambda paths, allow=False: ([(f"slow{n}", Slow()) for n in range(12)], []))
+    started = time.monotonic()
+    report = analyse(write("a.bin", b"hello"),
+                     config={**DEFAULT_CONFIG, "yara_timeout_seconds": 1})
+    elapsed = time.monotonic() - started
+
+    problems = report.data["yara"].get("parse_errors") or []
+    assert elapsed < 2.5, elapsed                       # not 12 x 0.3
+    assert sum("budget was already spent" in p for p in problems) >= 6
+
+
+@needs_yara
+def test_two_broken_rule_files_with_the_same_name_both_reach_the_output(write, tmp_path):
+    """The renderer keyed its lines on the extractor and the note's first
+    token, so two files called bad.yar collapsed to one line — understating
+    how thin the report is, which is what the block exists to prevent."""
+    for name, token in (("one", "alpha_missing"), ("two", "bravo_missing")):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "bad.yar").write_bytes(b"rule broken { condition: %s }" % token.encode())
+    config = {**DEFAULT_CONFIG,
+              "yara_rule_paths": [str(tmp_path / "one"), str(tmp_path / "two")]}
+    report = analyse(write("a.bin", b"hello"), config=config)
+    rendered = cli.render_human(report)
+    assert "alpha_missing" in rendered and "bravo_missing" in rendered
+
+
+@needs_yara
+@pytest.mark.parametrize("ident", [
+    b"\x00\x01\x01",   # EI_CLASS 0, which no ELF has
+    b"\x03\x01\x01",   # EI_CLASS 3
+    b"\x02\x00\x01",   # EI_DATA 0
+    b"\x02\x03\x01",   # EI_DATA 3
+    b"\x02\x01\x00",   # EI_VERSION 0
+    b"\x02\x01\x02",   # EI_VERSION 2
+])
+def test_the_elf_rule_ignores_magic_bytes_with_an_impossible_identifier(write, ident):
+    """The four magic bytes alone occur once every 4 GB of random data, which
+    made an existing test fail about once in 3600 runs and dirtied real
+    reports on packed samples.
+
+    Asserted against specific impossible identifiers rather than against a
+    pile of random data. A random-data version of this test has about a 0.1%
+    chance of catching the unconstrained rule, so it reproduces the flake it
+    documents instead of pinning the fix.
+    """
+    body = _carrier(b"\x7fELF" + ident + b"\x00" * 64)
+    assert "embedded_elf_header" not in _rules_of(_yara_data(write("a.pdf", body)))
+
+
+@needs_yara
+@pytest.mark.parametrize("trial", range(4))
+def test_the_bundled_rules_stay_quiet_on_random_data(write, trial):
+    """Weak on its own, kept because it is the shape the tool actually meets:
+    this thing is pointed at packed and encrypted files by definition."""
+    assert _rules_of(_yara_data(write(f"r{trial}.bin", os.urandom(400_000)))) == set()
+
+
+@needs_yara
+def test_the_elf_rule_still_fires_on_a_real_embedded_header(write):
+    """The other half: constraining it must not stop it working."""
+    body = _carrier(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64)
+    assert "embedded_elf_header" in _rules_of(_yara_data(write("a.pdf", body)))
+
+
+@needs_yara
+def test_a_rule_that_reads_its_own_match_count_is_bounded_by_the_scan_ceiling(write):
+    """Fast matching is not a bound on its own. libyara ignores it for any
+    string whose condition reads that string's count, offset or length, and
+    `#a > 5` is one of the most common idioms in public rule sets. What the
+    extractor can bound is how much file it hands over, which is the same
+    refusal `max_parse_bytes` already makes one level up."""
+    rules = write("counts.yar", b'''
+rule counts_its_matches {
+    meta: severity = "low"
+    strings: $a = "AAAAAAAAAAAAAAAA"
+    condition: #a > 5
+}
+''')
+    config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)],
+              "yara_max_scan_bytes": 65536}
+    report = analyse(write("big.bin", b"A" * 4_000_000), config=config)
+    data = report.data["yara"]
+    assert data["match_count"] == 0
+    assert any("yara_max_scan_bytes" in p for p in data["parse_errors"])
+    assert "incomplete:" in cli.render_human(report)
+    # and the rest of the run is unaffected
+    assert report.data["hashes"]["sha256"]
+
+
+@needs_yara
+def test_a_count_reported_under_fast_matching_does_not_claim_to_be_a_total(write):
+    """`truncated` is the field whose whole job is to say nothing was left
+    out, and under fast matching it said that about an enumeration cut off
+    after the first hit."""
+    bomb = write("bomb.bin", b"X" + b"\x7fELF\x02\x01\x01" * 100_000)
+    fast = _yara_data(bomb)
+    string = fast["matches"][0]["strings"][0]
+    assert string["count"] == 1
+    assert string["complete"] is False        # the count is not a total
+
+    full = _yara_data(bomb, config={**DEFAULT_CONFIG, "yara_fast_matching": False,
+                                    "yara_max_scan_bytes": 10_000_000})
+    string = full["matches"][0]["strings"][0]
+    assert string["count"] == 100_000
+    assert string["complete"] is False        # truncated by yara_max_matches instead
+
+
+@needs_yara
+def test_turning_includes_off_takes_effect_on_a_reused_extractor(write):
+    """The compile cache keyed on the rule files and not on the other input to
+    the compile, so an include-bearing set compiled permissively kept running
+    after the caller had explicitly asked for includes to be off."""
+    included = write("payload.yarinc",
+                     b'rule from_include { meta: severity = "low" strings: $a = "alpha" condition: $a }')
+    host = write("host.yar", b'include "%s"' % str(included).encode())
+    sample = write("a.bin", b"alpha")
+    shared = default_extractors()
+    config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(host)]}
+
+    permissive = analyse(sample, {**config, "yara_allow_includes": True}, shared)
+    assert "from_include" in _rules_of(permissive.data["yara"])
+
+    refused = analyse(sample, {**config, "yara_allow_includes": False}, shared)
+    assert "from_include" not in _rules_of(refused.data["yara"])
+    assert any("includes are disabled" in p
+               for p in refused.data["yara"]["parse_errors"])
+
+
+@needs_yara
+def test_a_broken_entry_inside_a_rules_directory_is_reported_not_dropped(write, tmp_path):
+    """A rules directory holding a dangling symlink, a symlink loop or a
+    directory named `sub.yar` used to lose those entries without a word, which
+    silently shortens the rule set. A moved rules repository or an
+    unchecked-out submodule is ordinary breakage."""
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    (rules / "kept.yar").write_bytes(
+        b'rule kept { meta: severity = "low" strings: $a = "alpha" condition: $a }')
+    (rules / "dangling.yar").symlink_to(tmp_path / "gone.yar")
+    (rules / "sub.yar").mkdir()
+
+    report = analyse(write("a.bin", b"alpha"),
+                     config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]})
+    data = report.data["yara"]
+    assert "kept" in _rules_of(data)                    # the good file survived
+    problems = " ".join(data["parse_errors"])
+    assert "dangling.yar" in problems and "sub.yar" in problems
+    assert "incomplete:" in cli.render_human(report)
+
+
+def test_a_switch_written_as_a_string_is_reported_rather_than_absorbed():
+    """`"yara_fast_matching": "false"` and `: 0` are what somebody reaches for
+    in a JSON config, and both left the switch on while the report stated the
+    setting they thought they had turned off."""
+    for bad in ("false", "true", 0, 1, "no", [], None):
+        problems = validate_config({"yara_fast_matching": bad})
+        assert problems, bad
+        assert "true or false" in problems[0]
+    assert validate_config({"yara_fast_matching": False}) == []
+    assert extractors_module.config_bool({"k": "false"}, "k", True) is True
+    assert extractors_module.config_bool({"k": False}, "k", True) is False

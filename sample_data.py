@@ -14,6 +14,8 @@ import os
 import struct
 from pathlib import Path
 
+from models import SEVERITIES
+
 # Default configuration
 #
 # Every threshold the extraction engine uses lives here rather than being
@@ -114,6 +116,44 @@ DEFAULT_CONFIG = {
     # below it was stripped or forged rather than merely old.
     "pe_min_timestamp": 725846400,
 
+    # YARA. Rules are text and the bundled set ships with the project, so
+    # `yara_rule_paths` adds to it rather than replacing it.
+    "yara_rule_paths": [],
+
+    # yara takes a timeout and raises on it, which makes this the one
+    # extractor that closes the hang gap for itself. Ten seconds is far above
+    # any sane rule set against a triage-sized sample.
+    "yara_timeout_seconds": 10,
+
+    "yara_max_matches": 64,
+    "yara_max_rules_reported": 64,
+
+    # Fast matching records the first occurrence of each string rather than
+    # every one. The difference is not cosmetic: a four-byte string against a
+    # crafted sample produces libyara's cap of a million match objects, which
+    # cost 220 MB on a 4 MB file, and that is bounded memory lost to a rule
+    # somebody wrote carelessly. Under fast matching `count` is 1 rather than
+    # a total, and `fast_matching` in the report says which figure it is.
+    "yara_fast_matching": True,
+
+    # A ceiling on what is handed to yara at all, lower than `max_parse_bytes`
+    # and there for a different reason: fast matching bounds the common case,
+    # but libyara ignores it for any string whose condition reads that
+    # string's count, offset or length, and a rule using the console module
+    # can allocate until the deadline fires. Neither cost is bounded by
+    # anything the extractor controls, so it bounds the input instead.
+    "yara_max_scan_bytes": 67108864,
+
+    # An `include` is resolved relative to the rule file and is confined to
+    # nothing, so `include "/etc/passwd"` is opened, parsed, and quoted back
+    # in the syntax error. Turn this on only for a rule set you wrote.
+    "yara_allow_includes": False,
+
+    # What a rule scores when it declares no severity of its own. Deliberately
+    # the quietest level: a rule that forgot to say how much it matters should
+    # not be able to fail somebody's build by forgetting.
+    "yara_default_severity": "info",
+
     "pe_packer_sections": [
         "upx0", "upx1", "upx2", "upx!", ".upx0", ".upx1", ".aspack", ".adata",
         ".asdata", "aspack", ".boom", ".ccg", ".charmve", "bitarts", "dxpack",
@@ -170,6 +210,17 @@ def config_ratio(config, key, default):
     return float(value)
 
 
+def config_bool(config, key, default):
+    """A boolean, or the default. `1` and `"true"` are not booleans here.
+
+    Deliberately strict, in the same way `config_int` rejects `True`: a switch
+    that quietly accepts a truthy value is a switch that behaves differently
+    from what the config file appears to say.
+    """
+    value = config.get(key, default)
+    return value if isinstance(value, bool) else default
+
+
 def config_list(config, key, default):
     value = config.get(key, default)
     return value if isinstance(value, list) else default
@@ -190,6 +241,17 @@ def validate_config(config):
         value = config[key]
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             problems.append(f"{key}={value!r} is not an integer >= {minimum}, default used")
+
+    def check_bool(key):
+        """A switch is the value most likely to be written as a string.
+
+        `"yara_fast_matching": "false"` and `: 0` are both what somebody
+        reaches for in a JSON or YAML config, and both used to leave the
+        switch on while the report stated the setting they thought they had
+        turned off.
+        """
+        if key in config and not isinstance(config[key], bool):
+            problems.append(f"{key}={config[key]!r} is not true or false, default used")
 
     def check_ratio(key):
         if key not in config:
@@ -224,8 +286,19 @@ def validate_config(config):
     check_int("pe_min_timestamp")
     check_ratio("pe_section_entropy_ratio")
 
+    check_int("yara_timeout_seconds")
+    check_int("yara_max_matches")
+    check_int("yara_max_rules_reported")
+    check_int("yara_max_scan_bytes")
+    check_bool("yara_fast_matching")
+    check_bool("yara_allow_includes")
+    if "yara_default_severity" in config and config["yara_default_severity"] not in SEVERITIES:
+        problems.append(
+            f"yara_default_severity={config['yara_default_severity']!r} is not one of "
+            f"{SEVERITIES}, default used")
+
     for key in ("executable_families", "document_extensions", "signatures",
-                "pe_packer_sections", "pe_standard_sections"):
+                "pe_packer_sections", "pe_standard_sections", "yara_rule_paths"):
         if key in config and not isinstance(config[key], list):
             problems.append(f"{key} is not a list, default used")
 
@@ -592,6 +665,16 @@ SAMPLE_FILES = {
 
     # a legitimate-looking ELF header
     "helper.elf": lambda: b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 4096,
+
+    # a document carrying a Windows executable in its body: the shape the
+    # bundled YARA rules exist for, and one no extractor sees, because the
+    # file really is a PDF and the payload is just bytes inside it.
+    "carrier.pdf": lambda: (
+        b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /OpenAction << /S /JavaScript "
+        b"/JS (app.alert\\(1\\)) >> >>\nendobj\n"
+        + b"%" + b"filler " * 64 + b"\n"
+        + build_pe(imports={"KERNEL32.dll": ["VirtualAlloc", "LoadLibraryA"]})
+        + b"\n%%EOF\n"),
 
     # a structurally valid PE wearing every shape v0.2 looks for: a packed
     # section that is writable and executable, a section reserving far more

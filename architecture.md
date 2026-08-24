@@ -153,7 +153,12 @@ exits non-zero so the tool can be used as a shell or CI gate.
 Orchestration. Loads the config and extractor list, runs each extractor in
 order against a file, merges results into a report and isolates failures.
 
-`analyse` handles one file. `analyse_directory` handles many.
+`analyse` handles one file. `analyse_directory` handles many, building the
+extractor set once and handing the same instances to every file. That is what
+the `StreamExtractor` contract has always described; until v0.3 it was pinned
+by a test and never exercised in the production path, and it cost nothing
+because no extractor had setup worth keeping. Compiling a YARA rule set is
+that setup.
 
 ### extractors.py
 
@@ -176,10 +181,27 @@ a directory scan is the normal case, not the exception.
 Both paths are asserted to agree, because entropy silently changing with the
 environment would be worse than being slow.
 
-Current extractors: `filetype`, `hashes`, `entropy`.
+Current extractors: `filetype` and `hashes` and `entropy` from v0.1, `pe` and
+`fuzzy` from v0.2, `yara` from v0.3.
 
-Finding keys: `unrecognised_format`, `extension_mismatch`,
-`high_file_entropy`, `entropy_hotspot`.
+Finding keys, which are a bounded and stable set on purpose — the findings
+envelope at v0.4 describes them as one, and a consumer groups, filters and
+counts on them:
+
+- filetype: `unrecognised_format`, `extension_mismatch`
+- entropy: `high_file_entropy`, `entropy_hotspot`
+- pe: `section_entropy_high`, `writable_executable_section`,
+  `virtual_size_mismatch`, `known_packer_section`, `no_imports`,
+  `entry_point_in_writable_section`, `nonstandard_section_name`,
+  `few_imports`, `implausible_timestamp`, `large_overlay`,
+  `tls_callbacks_present`, `overlay_present`, `signature_present`
+- yara: `yara_match`
+
+`yara_match` is one key rather than one per rule, with the rule name in the
+finding's detail and data. Rules are user-extensible, and a key set that grows
+with somebody's rules directory is not one a dashboard can count on, nor one
+the envelope can describe as bounded. The rule name is the envelope's
+`discriminator`.
 
 `expected_random_entropy` is the reference the entropy ratios are measured
 against. It is the Miller bias correction, floored by log2(n), and it tracks
@@ -241,7 +263,10 @@ schema and the error-isolation guarantee. Run with `pytest`.
 These are accepted limitations of the current design, recorded so they are
 not rediscovered as bugs.
 
-### A parser that hangs is still unhandled
+### A parser that hangs is still unhandled, except in yara
+
+The YARA extractor takes a timeout and libyara raises on it, so that one
+bounds its own time. Nothing else does.
 
 `max_parse_bytes` bounds how large a file a parser is handed, pefile's
 `max_symbol_exports` and `max_repeated_symbol` are set well below their
@@ -251,6 +276,19 @@ covers a parser that raises; a parser that spins on a crafted file will spin.
 Closing it needs a mechanism the pipeline does not have — a subprocess, a
 watchdog, or an alarm — and that is a change to how extractors run rather
 than a threshold to add.
+
+### A rule set is not bounded by anything this project controls
+
+v0.3 makes the extractor list user-extensible, and an extension point is an
+input. `yara_max_scan_bytes` caps what is handed over, `yara_timeout_seconds`
+is spent across the whole rule set rather than per file, `include` is off and
+the `console` module is captured. What remains uncapped is memory: libyara
+ignores fast matching for a string whose condition reads its own count,
+offset or length, and a rule using `console` can allocate until the deadline
+fires. Both are bounded by the scan ceiling and the deadline rather than by a
+memory limit, and neither is reachable from the bundled set. Recorded here
+because the mitigation is rule discipline, which is documentation rather than
+code, and documentation is where it has to live.
 
 ### Authenticode presence is not Authenticode validity
 

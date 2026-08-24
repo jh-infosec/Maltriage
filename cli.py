@@ -25,7 +25,7 @@ from pipeline import analyse, analyse_directory
 from sample_data import write_samples
 
 APP_NAME = "maltriage"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 SEVERITY_MARK = {"info": "  ", "low": " ~", "medium": " !", "high": "!!"}
 
@@ -89,6 +89,12 @@ def render_human(report: Report) -> str:
             named = ", ".join(certificate.get("common_names") or []) or "no name found"
             lines.append(f"  signed   {named} (not validated)")
 
+    yara = report.data.get("yara")
+    if yara and yara.get("match_count"):
+        shown = ", ".join(m["rule"] for m in yara.get("matches", [])[:5])
+        more = "" if len(yara.get("matches", [])) <= 5 else ", ..."
+        lines.append(f"  yara     {yara['match_count']} match(es): {shown}{more}")
+
     if report.findings:
         lines.append("")
         lines.append(f"  findings ({report.severity} max):")
@@ -103,21 +109,34 @@ def render_human(report: Report) -> str:
     # one directory of a PE that could not be followed, or a structure the
     # parser had to guess at. Both mean the same thing to an analyst reading
     # an absence, so both are printed rather than left in the JSON.
-    problems = dict(report.errors)
+    # Two blocks rather than one, because they are two different facts and a
+    # single heading that changed wording depending on which was present made
+    # the more serious one disappear into the other whenever both occurred.
+    thin: dict[str, str] = {}
     for name, data in report.data.items():
         if not isinstance(data, dict):
             continue
         for note in data.get("parse_errors") or []:
-            problems[f"{name}.{note.split(':')[0]}"] = note.partition(": ")[2]
+            # Two rule files with the same basename, or two directories that
+            # both fail, produce the same label. A plain assignment rendered
+            # them as one line, which understates how thin the report is --
+            # the exact failure this block was split out to prevent.
+            label = f"{name}.{note.split(':')[0]}"
+            suffix, index = "", 2
+            while label + suffix in thin:
+                suffix, index = f" ({index})", index + 1
+            thin[label + suffix] = note.partition(": ")[2]
         for index, warning in enumerate(data.get("warnings") or [], start=1):
             # Numbered, because a malformed PE routinely produces five or more
             # distinct warnings and a fixed key would print only the first.
-            problems[f"{name}.warning {index}"] = warning
+            thin[f"{name}.warning {index}"] = warning
 
-    if problems:
+    for heading, entries in (("errors", report.errors), ("incomplete", thin)):
+        if not entries:
+            continue
         lines.append("")
-        lines.append("  incomplete:" if not report.errors else "  errors:")
-        for name, err in problems.items():
+        lines.append(f"  {heading}:")
+        for name, err in entries.items():
             lines.append(f"    {name}: {err}")
 
     return "\n".join(lines)
