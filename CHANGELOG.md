@@ -1,5 +1,117 @@
 # Changelog
 
+## Version 0.3.1 -- ELF
+
+The last unshipped piece of v0.2's design, arriving after v0.3 because that is
+when it was built rather than because it belongs there.
+
+No dependency. The header, program header table and section header table are
+fixed-layout records that `struct` reads, and there is no equivalent of
+pefile's accumulated knowledge of malformed real-world files to buy. The rule
+`architecture.md` states is to pay a dependency where the format is genuinely
+hostile, not where it is merely binary. So there is no optional import, no
+missing-parser error, and it works on a bare checkout -- and every bound is
+this module's own.
+
+### Added
+
+- `ElfExtractor`: class, byte order, ABI, type, machine and entry point; the
+  program header table with per-segment permissions; the section header table
+  with per-section entropy; dynamic linkage with DT_NEEDED, DT_SONAME,
+  DT_RPATH and DT_RUNPATH; the interpreter; the GNU build id; and trailing
+  data past everything the headers account for
+- Findings at medium: `writable_executable_segment`, `section_entropy_high`,
+  `no_section_headers`, `entry_point_outside_segments`,
+  `entry_point_not_executable`, `packer_section_name`. At low:
+  `executable_stack`, `runpath_set`, `rpath_set`, `nonstandard_section_name`,
+  `large_trailing_data`. At info: `trailing_data_present`, `stripped_symbols`,
+  `statically_linked`, `build_id_present`
+- `build_elf` in `sample_data.py`, building a structurally valid ELF for both
+  classes and both byte orders, with segments, dynamic linkage, an
+  interpreter, trailing data and an optionally absent section header table.
+  Verified against pyelftools, which is a test-only dependency
+- `safe_text`, applied to every string either extractor takes from a sample
+- A `helper.elf` bundled sample that is a real ELF, replacing the eight
+  plausible bytes it used to be
+- An ELF summary block in the human CLI output
+
+### Fixed
+
+- `stripped` and `statically_linked` are `None` rather than `False` when the
+  table that would answer them was never read
+
+### Hardened
+
+Eight defects from the fuzzing pass, each now with a regression test. Two are
+worth reading even if the others are not.
+
+**Section names were wrong on 3181 of 3185 real binaries.** GNU ld tail-merges
+`.shstrtab`, so most names are interior offsets -- `.rela.plt\0` also serves
+`.plt` at +5. Resolving only the offsets that follow a NUL meant
+`nonstandard_section_name` fired on essentially every ELF in existence, which
+is a finding carrying no information, and a crafted `sh_name` pointing into
+the middle of a string evaded `packer_section_name` entirely. Names are now
+read from each offset to the next NUL. Measured after the fix: names match
+pyelftools on 400 of 400 files, and the finding fires on 16 of 1201 rather
+than on all of them.
+
+**A string from the sample could unprint a finding.** DT_RUNPATH, DT_SONAME,
+section names and the PE PDB path are attacker-chosen text that lands in a
+terminal. A RUNPATH of `\x1b[6A\x1b[0J` plus a fake findings block moved the
+cursor up six lines, cleared to the end of the screen, and replaced three
+medium findings with a clean-looking one. `safe_text` now strips C0, DEL and
+C1 control characters and caps length, and it covers the PE strings for the
+same reason. C1 matters as much as C0: 0x9B is the single-byte CSI introducer
+that `ESC [` spells in two, and it survived the one path that decodes to `str`
+before sanitising.
+
+The rest:
+
+- `e_shentsize = 0` -- one two-byte field -- made the section table read as
+  empty with nothing recorded. The file still runs, because the kernel never
+  reads section headers, so the report said `stripped: true` about a binary
+  with a full symbol table while the entropy and packer-name findings vanished
+  without a word. A claimed table that cannot be read is now reported
+- `writable_executable_segment` counted PT_GNU_STACK, which is a flags-only
+  marker rather than a mapping and which `gcc -z execstack` sets on request.
+  An ordinary build earned a medium whose text was untrue in both halves. The
+  finding is now PT_LOAD only, and an executable stack is its own `low`
+- `section_entropy_high` fired on 8.5% of real binaries, 548 of them from
+  `.debug_*` alone because DWARF is dense, and the rest from read-only tables:
+  a 256-byte byte-permutation table scores above 1.0 of random while being the
+  most ordered data there is, since the reference is an estimate of what a
+  random *sample* reaches. The finding now requires a section the loader maps
+  writable or executable, because a payload has to be mapped to run
+- Every cap truncated silently. `sections_truncated`, `segments_truncated`,
+  `names_truncated`, `dynamic_truncated` and `needed_truncated` now exist and
+  reach `parse_errors`
+- Then `dynamic_truncated` fired on every ordinary binary, because stopping at
+  DT_NULL and stopping at the cap were the same test. The first is the table
+  ending and the second is the extractor giving up
+- `build_elf` measured a segment's file size and memory size in the same
+  space, so a file containing an SHT_NOBITS section got a `p_memsz` that
+  stopped short of its own contents and an entry point outside every loadable
+  segment -- a false medium from a builder whose docstring calls its output
+  structurally valid
+- `e_shstrndx` pointing at a NOBITS section decoded names out of whatever sat
+  at offset zero, which is the ELF header, and reported `\x7fELF\x02\x01\x01`
+  as a section name
+- SHN_XINDEX -- the legal way to have more sections than `e_shnum` can express
+  -- was read literally as no section table at all, which is a medium
+
+### Notes
+
+Before this release no ELF test fed the extractor a malformed file, and
+fourteen of its seventeen bounds could be deleted with the suite still green.
+There is now a hostile-input section modelled on the PE one.
+
+The finding set was measured against 1201 real binaries from `/usr/bin`,
+`/usr/sbin` and `/usr/lib`: **zero mediums**, `runpath_set` on 50 and
+`nonstandard_section_name` on 16. `GATE_SEVERITY` is medium, so a false
+medium is a false CI failure, and a finding set nobody has pointed at real
+software is a finding set nobody has tested.
+
+
 ## Version 0.3 -- pattern matching
 
 YARA. The release where the extractor set stops being fixed by the code: a

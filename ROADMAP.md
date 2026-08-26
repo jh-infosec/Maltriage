@@ -56,7 +56,14 @@ the milestone that produces the fields the classifier will eventually consume.
 - [x] Overlay detection, kept distinct from the certificate table
 - [x] Authenticode presence and signer, never validity
 - [x] Fuzzy hashing moved into the random-access phase
-- [ ] ELF parsing
+- [x] ELF parsing (shipped in v0.3.1)
+
+ELF landed after v0.3 rather than with the rest of v0.2, and is ticked here
+because it is v0.2's design rather than v0.3's. It takes no dependency: the
+header, program header table and section header table are fixed-layout
+records that `struct` reads, and there is no equivalent of pefile's
+accumulated knowledge of malformed real-world files to buy. Pay a dependency
+where the format is genuinely hostile, not where it is merely binary.
 
 Authenticode said "validity" here until v0.2. Presence and the embedded
 signer name are free from the directory; validation is not, because it needs

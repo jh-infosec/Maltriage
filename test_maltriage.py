@@ -14,12 +14,14 @@ alongside the CHANGELOG entry that describes it.
     pytest
 """
 
+import io
 import json
 import math
 import os
 import re
 import statistics
 import struct
+import sys
 import time
 import tracemalloc
 from pathlib import Path
@@ -48,7 +50,21 @@ from extractors import default_extractors
 from pipeline import analyse, analyse_directory
 from sample_data import (
     DEFAULT_CONFIG,
+    EM_AARCH64,
+    ET_DYN,
     PE_HEADER_OFFSET,
+    PF_R,
+    PF_W,
+    PF_X,
+    PT_LOAD,
+    SECTION_DATA_ELF,
+    SECTION_RODATA,
+    SECTION_TEXT,
+    SECTION_WX,
+    SHT_NOBITS,
+    SHT_PROGBITS,
+    SHT_SYMTAB,
+    build_elf,
     SECTION_CODE,
     SECTION_DATA,
     SECTION_RDATA,
@@ -2181,3 +2197,519 @@ def test_a_switch_written_as_a_string_is_reported_rather_than_absorbed():
     assert validate_config({"yara_fast_matching": False}) == []
     assert extractors_module.config_bool({"k": "false"}, "k", True) is True
     assert extractors_module.config_bool({"k": False}, "k", True) is False
+
+
+# the synthetic ELF fixture
+#
+# The counterpart to the PE fixture tests, and verified the same way: against
+# an independent parser, so that a fixture which does not contain what it was
+# built to contain cannot make every test above it pass.
+#
+# pyelftools is a test-only dependency. The extractor itself uses `struct` and
+# nothing else, which is why there is no ElfExtractor equivalent of
+# `test_a_pe_without_pefile_is_reported`: there is no parser to be missing.
+
+try:
+    from elftools.elf.elffile import ELFFile
+    from elftools.elf.dynamic import DynamicSection
+except ImportError:
+    ELFFile = DynamicSection = None
+
+needs_pyelftools = pytest.mark.skipif(
+    ELFFile is None, reason="verifying the ELF fixture requires pyelftools")
+
+
+def _elf_data(path, config=None):
+    report = analyse(path, config=config)
+    assert "elf" not in report.errors, report.errors["elf"]
+    return report.data["elf"]
+
+
+def _sections_of(data):
+    return {s["name"]: s for s in data["sections"]}
+
+
+@pytest.mark.parametrize("bitness", [32, 64])
+def test_the_fixture_is_identified_as_an_elf(write, bitness):
+    report = analyse(write("a.elf", build_elf(bitness=bitness)))
+    assert report.data["filetype"]["family"] == "elf"
+
+
+@needs_pyelftools
+@pytest.mark.parametrize("bitness", [32, 64])
+@pytest.mark.parametrize("endian", ["<", ">"])
+def test_pyelftools_agrees_with_the_fixture(write, bitness, endian):
+    """Both classes and both byte orders, because the 32-bit program header
+    puts `p_flags` after `p_memsz` rather than after `p_type`. Reading it as a
+    narrow copy of the 64-bit record produces a file that parses and lies
+    about which segments are executable, which is the single most useful
+    thing this extractor reports."""
+    body = build_elf(bitness=bitness, endian=endian,
+                     sections=[(".text", SHT_PROGBITS, SECTION_WX, b"\x90" * 0x200)],
+                     segments=[(PT_LOAD, PF_R | PF_W | PF_X, [".text"])])
+    parsed = ELFFile(io.BytesIO(body))
+    assert parsed.elfclass == bitness
+    assert parsed.little_endian is (endian == "<")
+    assert [s.name for s in parsed.iter_sections()][:2] == ["", ".text"]
+    segment = next(p for p in parsed.iter_segments() if p.header.p_type == "PT_LOAD")
+    assert segment.header.p_flags == PF_R | PF_W | PF_X
+
+
+@needs_pyelftools
+def test_the_fixture_dynamic_table_resolves_its_own_names(write):
+    """`.dynamic` reaches its string table through `sh_link`, and without it
+    the tags carry offsets into a table nobody can find: the fixture parsed
+    happily and produced no library names at all. This is exactly what
+    verifying against an independent parser is for."""
+    body = build_elf(needed=["libc.so.6", "libssl.so.3"], soname="libevil.so.1",
+                     runpath="/opt/evil/lib")
+    parsed = ELFFile(io.BytesIO(body))
+    section = next(s for s in parsed.iter_sections() if isinstance(s, DynamicSection))
+    needed = [t.needed for t in section.iter_tags() if t.entry.d_tag == "DT_NEEDED"]
+    assert needed == ["libc.so.6", "libssl.so.3"]
+
+
+# the ELF extractor
+
+@pytest.mark.parametrize("bitness,endian", [(64, "<"), (32, "<"), (64, ">"), (32, ">")])
+def test_elf_headers_reach_the_report(write, bitness, endian):
+    data = _elf_data(write("a.elf", build_elf(bitness=bitness, endian=endian,
+                                              machine=EM_AARCH64, elf_type=ET_DYN)))
+    assert data["elf_class"] == f"ELF{bitness}"
+    assert data["endianness"] == ("little" if endian == "<" else "big")
+    assert data["type_label"] == "DYN"
+    assert data["machine_label"] == "AARCH64"
+    assert data["section_headers_present"] is True
+
+
+def test_the_elf_extractor_declines_anything_that_is_not_an_elf(write):
+    report = analyse(write("a.exe", build_pe()))
+    assert "elf" not in report.data and "elf" not in report.errors
+
+
+@pytest.mark.parametrize("bitness", [32, 64])
+def test_segment_permissions_are_read_from_the_right_field(write, bitness):
+    """The 32-bit and 64-bit program headers order their fields differently.
+    Getting it wrong reports a read-only segment as executable and vice
+    versa, silently."""
+    body = build_elf(bitness=bitness,
+                     sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x200),
+                               (".data", SHT_PROGBITS, SECTION_DATA_ELF, b"\x00" * 0x200)],
+                     segments=[(PT_LOAD, PF_R | PF_X, [".text"]),
+                               (PT_LOAD, PF_R | PF_W, [".data"])])
+    loadable = [s for s in _elf_data(write("a.elf", body))["segments"]
+                if s["type_label"] == "LOAD"]
+    assert [(s["readable"], s["writable"], s["executable"]) for s in loadable] == [
+        (True, False, True), (True, True, False)]
+
+
+def test_dynamic_linkage_reaches_the_report(write):
+    data = _elf_data(write("a.elf", build_elf(
+        interpreter="/lib64/ld-linux-x86-64.so.2",
+        needed=["libc.so.6", "libssl.so.3"], soname="libevil.so.1",
+        runpath="/opt/evil/lib")))
+    assert data["interpreter"] == "/lib64/ld-linux-x86-64.so.2"
+    assert data["needed"] == ["libc.so.6", "libssl.so.3"]
+    assert data["soname"] == "libevil.so.1"
+    assert data["runpath"] == "/opt/evil/lib"
+    assert data["statically_linked"] is False
+
+
+def test_a_static_binary_says_so(write):
+    data = _elf_data(write("a.elf", build_elf()))
+    assert data["statically_linked"] is True
+    assert data["interpreter"] is None
+
+
+def test_per_section_entropy_separates_a_packed_section_from_a_padded_one(write):
+    sections = [(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x800),
+                (".packed", SHT_PROGBITS, SECTION_WX, os.urandom(0x800))]
+    by_name = _sections_of(_elf_data(write("a.elf", build_elf(sections=sections))))
+    assert by_name[".packed"]["entropy_ratio"] > 0.98
+    assert by_name[".text"]["entropy"] == 0.0
+
+
+def test_a_nobits_section_is_not_scored_on_bytes_it_does_not_have(write):
+    """SHT_NOBITS occupies address space and no file space, so its offset and
+    size do not describe a region of the file. Scoring it would measure
+    whatever happens to follow it."""
+    sections = [(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x400),
+                (".bss", SHT_NOBITS, SECTION_DATA_ELF, b"\x00" * 0x4000)]
+    section = _sections_of(_elf_data(write("a.elf", build_elf(sections=sections))))[".bss"]
+    assert section["entropy"] is None
+    assert section["entropy_skipped"] == "no_file_bytes"
+    assert section["scored_bytes"] == 0
+
+
+def test_trailing_data_is_measured_from_the_end_of_what_the_headers_describe(write):
+    payload = os.urandom(20_000)
+    data = _elf_data(write("a.elf", build_elf(trailing=payload)))
+    assert data["trailing"]["size"] == len(payload)
+    assert data["trailing"]["entropy_ratio"] > 0.98
+
+
+def test_a_file_with_nothing_appended_reports_no_trailing_data(write):
+    assert _elf_data(write("a.elf", build_elf()))["trailing"] is None
+
+
+# ELF findings
+
+@pytest.mark.parametrize("bitness", [32, 64])
+def test_a_writable_executable_segment_is_medium(write, bitness):
+    report = analyse(write("a.elf", build_elf(
+        bitness=bitness,
+        sections=[(".text", SHT_PROGBITS, SECTION_WX, b"\x90" * 0x200)],
+        segments=[(PT_LOAD, PF_R | PF_W | PF_X, [".text"])])))
+    assert "writable_executable_segment" in _keys(report, "medium")
+
+
+def test_a_missing_section_header_table_is_medium(write):
+    """Every mainstream toolchain emits one. UPX removes it."""
+    report = analyse(write("a.elf", build_elf(strip_sections=True)))
+    assert "no_section_headers" in _keys(report, "medium")
+    assert report.data["elf"]["section_headers_present"] is False
+    # and the segments are still read, because they are what the loader uses
+    assert report.data["elf"]["segments"]
+
+
+def test_an_entry_point_outside_every_loadable_segment_is_medium(write):
+    report = analyse(write("a.elf", build_elf(entry=0xDEAD0000)))
+    assert "entry_point_outside_segments" in _keys(report, "medium")
+
+
+def test_an_entry_point_in_a_non_executable_segment_is_medium(write):
+    body = build_elf(sections=[(".data", SHT_PROGBITS, SECTION_DATA_ELF, b"\x00" * 0x200)],
+                     segments=[(PT_LOAD, PF_R | PF_W, [".data"])],
+                     entry_section=".data")
+    report = analyse(write("a.elf", body))
+    assert "entry_point_not_executable" in _keys(report, "medium")
+
+
+def test_a_runpath_is_low(write):
+    report = analyse(write("a.elf", build_elf(needed=["libc.so.6"],
+                                              runpath="/tmp/.hidden/lib")))
+    assert "runpath_set" in _keys(report, "low")
+
+
+def test_being_stripped_or_static_is_only_information(write):
+    """Release builds are stripped and Go binaries are static. A level that
+    fires on most of a distribution tells an analyst nothing, and
+    `GATE_SEVERITY` is medium."""
+    report = analyse(write("a.elf", build_elf()))
+    assert "stripped_symbols" in _keys(report, "info")
+    assert "statically_linked" in _keys(report, "info")
+    assert _keys(report, "medium") == set()
+
+
+def test_nothing_the_elf_extractor_raises_is_high(write):
+    """The same discipline the PE extractor is held to: `high` means content
+    that lies about what it is, and packing is not deception."""
+    worst = build_elf(
+        sections=[("UPX0", SHT_PROGBITS, SECTION_WX, os.urandom(0x800)),
+                  ("UPX1", SHT_PROGBITS, SECTION_WX, os.urandom(0x800))],
+        segments=[(PT_LOAD, PF_R | PF_W | PF_X, ["UPX0", "UPX1"])],
+        needed=["libc.so.6"], runpath="/tmp/lib", trailing=os.urandom(2_000_000))
+    report = analyse(write("worst.elf", worst))
+    elf_findings = [f for f in report.findings if f["extractor"] == "elf"]
+    assert elf_findings
+    assert not [f for f in elf_findings if f["severity"] == "high"]
+    assert report.severity == "medium"
+
+
+def test_an_ordinary_elf_raises_nothing_alarming(write):
+    body = build_elf(
+        sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x800),
+                  (".rodata", SHT_PROGBITS, SECTION_RODATA, b"string data " * 100),
+                  (".data", SHT_PROGBITS, SECTION_DATA_ELF, b"\x00" * 0x200)],
+        segments=[(PT_LOAD, PF_R | PF_X, [".text"]),
+                  (PT_LOAD, PF_R | PF_W, [".rodata", ".data"])],
+        interpreter="/lib64/ld-linux-x86-64.so.2", needed=["libc.so.6"])
+    report = analyse(write("benign.elf", body))
+    assert _keys(report, "medium") == set()
+    assert _keys(report, "high") == set()
+
+
+def test_the_bundled_elf_sample_exercises_the_extractor(tmp_path):
+    """`helper.elf` used to be eight plausible bytes, which the extractor
+    could say nothing about."""
+    write_samples(tmp_path)
+    report = analyse(tmp_path / "helper.elf")
+    assert "elf" not in report.errors, report.errors
+    assert {"writable_executable_segment", "section_entropy_high"} <= _keys(report)
+    assert report.severity == "medium"
+
+
+# ELF under hostile input
+#
+# One test per defect found by fuzzing the extractor after it was written,
+# plus one per bound that had no coverage. Before this section no ELF test fed
+# the extractor a malformed file at all, and fourteen of the seventeen bounds
+# could be deleted with the suite still green.
+
+ELF64_PHENTSIZE, ELF64_PHNUM = 54, 56
+ELF64_SHENTSIZE, ELF64_SHNUM, ELF64_SHSTRNDX = 58, 60, 62
+ELF64_SHOFF = 40
+
+
+def _elf_patch(body, offset, value, fmt="<H"):
+    out = bytearray(body)
+    struct.pack_into(fmt, out, offset, value)
+    return bytes(out)
+
+
+def test_tail_merged_section_names_resolve_the_way_a_real_linker_writes_them(write):
+    """GNU ld tail-merges `.shstrtab`, so most names are interior offsets:
+    `.rela.plt\\0` also serves `.plt` at +5. Indexing only the offsets that
+    follow a NUL mis-resolved at least one name in 3181 of 3185 real binaries
+    on this machine, which made `nonstandard_section_name` fire on almost
+    every ELF in existence and let a crafted `sh_name` pointing into the
+    middle of a string evade `packer_section_name` entirely."""
+    table = extractors_module._name_at
+    blob = b"\x00.rela.plt\x00.plt.got\x00"
+    assert table(blob, 1) == ".rela.plt"
+    assert table(blob, 6) == ".plt"          # the interior offset
+    assert table(blob, 11) == ".plt.got"
+    assert table(blob, 15) == ".got"         # and another
+    assert table(blob, 999).startswith("<name+")
+
+
+@needs_pyelftools
+def test_section_names_agree_with_an_independent_parser_on_a_real_binary(write):
+    """The fixture cannot exercise tail merging, because the builder does not
+    tail-merge. A binary built by a real linker can."""
+    candidates = [Path(sys.executable), Path("/bin/sh"), Path("/bin/ls")]
+    real = next((p for p in candidates if p.is_file() and not p.is_symlink()
+                 and p.open("rb").read(4) == b"\x7fELF"), None)
+    if real is None:
+        pytest.skip("no real ELF binary available to compare against")
+    with real.open("rb") as handle:
+        truth = [s.name for s in ELFFile(handle).iter_sections()]
+    ours = [s["name"] for s in analyse(real).data["elf"]["sections"]]
+    assert ours == truth
+
+
+def test_a_section_table_that_cannot_be_read_is_reported_not_assumed_absent(write):
+    """`e_shentsize = 0` -- one two-byte field -- made `_sections` return an
+    empty list without raising, so nothing was recorded. The file still runs,
+    because the kernel never reads section headers, and the report said
+    `stripped: true` about a binary with a full symbol table while the entropy
+    and packer-name findings vanished without a word."""
+    body = build_elf(sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x200),
+                               (".symtab", SHT_SYMTAB, 0, b"\x00" * 0x40)])
+    report = analyse(write("a.elf", _elf_patch(body, ELF64_SHENTSIZE, 0)))
+    data = report.data["elf"]
+    assert data["sections"] == []
+    assert data["stripped"] is None                    # not False, and not True
+    assert any("could not be read" in p for p in data["parse_errors"])
+    assert "incomplete:" in cli.render_human(report)
+
+
+def test_a_program_header_table_that_cannot_be_read_is_reported(write):
+    """The same field one table over. It used to report `statically_linked:
+    true` and `interpreter: null` while listing the libraries the same file
+    needs."""
+    body = build_elf(interpreter="/lib64/ld.so", needed=["libc.so.6"])
+    data = _elf_data(write("a.elf", _elf_patch(body, ELF64_PHENTSIZE, 0)))
+    assert data["segments"] == []
+    assert data["statically_linked"] is None
+    assert any("could not be read" in p for p in data["parse_errors"])
+
+
+def test_extended_section_numbering_is_not_reported_as_a_missing_table(write):
+    """A file with more sections than `e_shnum` can express sets it to zero
+    and puts the real count in the first section header. Reading the field
+    literally reported a legal binary as having no section table, which is a
+    medium."""
+    body = build_elf(sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x100)])
+    count = struct.unpack("<H", body[ELF64_SHNUM:ELF64_SHNUM + 2])[0]
+    shoff = struct.unpack("<Q", body[ELF64_SHOFF:ELF64_SHOFF + 8])[0]
+    strndx = struct.unpack("<H", body[ELF64_SHSTRNDX:ELF64_SHSTRNDX + 2])[0]
+
+    hostile = bytearray(_elf_patch(body, ELF64_SHNUM, 0))
+    struct.pack_into("<H", hostile, ELF64_SHSTRNDX, 0xFFFF)
+    struct.pack_into("<Q", hostile, shoff + 32, count)     # shdr[0].sh_size
+    struct.pack_into("<I", hostile, shoff + 40, strndx)    # shdr[0].sh_link
+
+    report = analyse(write("a.elf", bytes(hostile)))
+    assert [s["name"] for s in report.data["elf"]["sections"]][:2] == ["", ".text"]
+    assert "no_section_headers" not in _keys(report)
+
+
+def test_a_section_count_beyond_the_cap_says_it_was_truncated(write):
+    """Every cap this extractor applies now says so. `e_shnum` is a sixteen
+    bit field, so a header under a hundred bytes can ask for 65535 entries."""
+    body = build_elf()
+    data = _elf_data(write("a.elf", _elf_patch(body, ELF64_SHNUM, 0xFFFF)),
+                     config={**DEFAULT_CONFIG, "elf_max_sections": 8})
+    assert data["sections_truncated"] is True
+    assert any("elf_max_sections" in p for p in data["parse_errors"])
+
+
+def test_a_segment_count_beyond_the_cap_says_it_was_truncated(write):
+    data = _elf_data(write("a.elf", _elf_patch(build_elf(), ELF64_PHNUM, 0xFFFF)),
+                     config={**DEFAULT_CONFIG, "elf_max_segments": 2})
+    assert data["segments_truncated"] is True
+
+
+def test_a_long_dynamic_table_says_it_was_truncated(write):
+    body = build_elf(needed=[f"lib{n:04d}.so" for n in range(300)])
+    data = _elf_data(write("a.elf", body),
+                     config={**DEFAULT_CONFIG, "elf_max_listed_names": 10})
+    assert len(data["needed"]) == 10
+    assert data["needed_truncated"] is True
+    assert any("elf_max_listed_names" in p for p in data["parse_errors"])
+
+
+def test_an_enormous_string_table_is_capped_and_says_so(write):
+    """The one bound with zero coverage, and the one that actually holds
+    memory: uncapped, a crafted name table took 51 seconds and 690 MB."""
+    body = build_elf(sections=[(f".s{n:05d}", SHT_PROGBITS, SECTION_RODATA, b"x" * 16)
+                               for n in range(400)])
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        data = _elf_data(write("a.elf", body),
+                         config={**DEFAULT_CONFIG, "elf_max_string_table_bytes": 256})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert data["names_truncated"] is True
+    assert peak < 4_000_000, peak
+
+
+def test_a_name_table_pointed_at_a_section_with_no_file_bytes_is_refused(write):
+    """`e_shstrndx` pointed at a NOBITS section decoded section names out of
+    whatever happened to sit at offset zero, which is the ELF header, and
+    reported `'\\x7fELF\\x02\\x01\\x01'` as a section name."""
+    body = build_elf(sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x100),
+                               (".bss", SHT_NOBITS, SECTION_DATA_ELF, b"\x00" * 0x100)])
+    index = [s["name"] for s in _elf_data(write("a.elf", body))["sections"]].index(".bss")
+    data = _elf_data(write("b.elf", _elf_patch(body, ELF64_SHSTRNDX, index)))
+    assert not any("ELF" in s["name"] for s in data["sections"])
+
+
+def test_strings_the_sample_supplies_cannot_repaint_the_terminal(write):
+    """A RUNPATH of ANSI escapes moved the cursor up six lines and cleared to
+    the end of the screen, erasing the medium findings printed above it and
+    leaving a clean-looking block in their place. Not evading a finding:
+    unprinting one."""
+    attack = "\x1b[6A\x1b[0J  findings (info max):\n      [clean] nothing here\n"
+    body = build_elf(needed=["libc.so.6"], runpath=attack)
+    report = analyse(write("a.elf", body))
+    assert "\x1b" not in report.data["elf"]["runpath"]
+    rendered = cli.render_human(report)
+    assert "\x1b" not in rendered and "\n      [clean]" not in rendered
+    assert "\x1b" not in json.dumps(report.to_dict())
+
+
+@needs_pefile
+def test_a_pe_string_gets_the_same_treatment(write):
+    """The PE extractor's PDB path is the same class of input."""
+    body = build_pe(pdb_path="C:\\build\x1b[2J\x07\\dropper.pdb")
+    data = analyse(write("a.exe", body)).data["pe"]
+    assert "\x1b" not in (data["pdb_path"] or "") and "\x07" not in (data["pdb_path"] or "")
+
+
+def test_an_executable_stack_is_low_and_not_a_loadable_segment(write):
+    """PT_GNU_STACK is a flags-only marker rather than a mapping, and
+    `gcc -z execstack` sets it on request. Counting it as a writable
+    executable segment called an ordinary build "a loadable segment mapped
+    writable and executable" -- both halves untrue, at medium."""
+    body = build_elf(sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x200)],
+                     segments=[(PT_LOAD, PF_R | PF_X, [".text"]),
+                               (0x6474E551, PF_R | PF_W | PF_X, [])])
+    report = analyse(write("a.elf", body))
+    assert "executable_stack" in _keys(report, "low")
+    assert "writable_executable_segment" not in _keys(report)
+
+
+def test_debug_and_read_only_sections_do_not_raise_an_entropy_medium(write):
+    """Scoring every section fired this medium on 8.5% of real binaries: 548
+    from `.debug_*` alone, because DWARF is dense, and the rest from read-only
+    tables. A 256-byte byte-permutation table reaches a ratio above 1.0 while
+    being the most ordered data there is, because the reference is an estimate
+    of what a random sample reaches. A payload has to be mapped to run."""
+    body = build_elf(sections=[
+        (".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x400),
+        (".debug_info", SHT_PROGBITS, 0, os.urandom(0x800)),
+        (".rodata", SHT_PROGBITS, SECTION_RODATA, bytes(range(256)) * 16)])
+    report = analyse(write("a.elf", body))
+    assert "section_entropy_high" not in _keys(report)
+    assert "nonstandard_section_name" not in _keys(report)
+    # and a mapped, writable-or-executable section still trips it
+    packed = build_elf(sections=[(".text", SHT_PROGBITS, SECTION_WX, os.urandom(0x800))],
+                       segments=[(PT_LOAD, PF_R | PF_X, [".text"])])
+    assert "section_entropy_high" in _keys(analyse(write("b.elf", packed)), "medium")
+
+
+@needs_pyelftools
+def test_a_nobits_section_does_not_break_the_layout_the_builder_produces(write):
+    """`cursor` stops advancing for NOBITS and `address` does not, so a
+    segment's file size and memory size are measured in different spaces.
+    Computing both from file offsets produced a PT_LOAD whose memory size
+    stopped short of its own contents and an entry point outside every
+    loadable segment -- a false medium from a builder whose docstring calls
+    its output structurally valid."""
+    body = build_elf(sections=[(".bss", SHT_NOBITS, SECTION_DATA_ELF, b"\x00" * 0x10000),
+                               (".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 64)],
+                     entry_section=".text")
+    ELFFile(io.BytesIO(body))                      # still a valid ELF
+    report = analyse(write("a.elf", body))
+    assert "entry_point_outside_segments" not in _keys(report)
+    assert _keys(report, "medium") == set()
+
+
+@pytest.mark.parametrize("offset,value,fmt", [
+    (ELF64_SHNUM, 0xFFFF, "<H"), (ELF64_PHNUM, 0xFFFF, "<H"),
+    (ELF64_SHENTSIZE, 0xFFFF, "<H"), (ELF64_PHENTSIZE, 1, "<H"),
+    (ELF64_SHSTRNDX, 0xFFFE, "<H"), (ELF64_SHOFF, 0xFFFFFFFFFFFFFFFF, "<Q"),
+    (32, 0xFFFFFFFFFFFFFFFF, "<Q"),                 # e_phoff
+    (24, 0xFFFFFFFFFFFFFFFF, "<Q"),                 # e_entry
+])
+def test_a_forged_header_field_is_survived(write, offset, value, fmt):
+    """No crash, no hang, and nothing at `high`, whatever the header claims."""
+    body = build_elf(interpreter="/lib64/ld.so", needed=["libc.so.6"],
+                     trailing=b"x" * 4096)
+    started = time.monotonic()
+    report = analyse(write("a.elf", _elf_patch(body, offset, value, fmt)))
+    assert time.monotonic() - started < 5
+    assert "high" not in {f["severity"] for f in report.findings}
+    assert report.data["hashes"]["sha256"]          # the rest of the run survives
+
+
+def test_a_truncated_elf_is_described_rather_than_crashed(write):
+    """A file cut at every length between the magic and a full header."""
+    body = build_elf(needed=["libc.so.6"])
+    for length in (4, 8, 16, 32, 51, 52, 63, 64, 65, 128, 512):
+        report = analyse(write(f"t{length}.elf", body[:length]))
+        assert report.data["hashes"]["sha256"]
+        assert "high" not in {f["severity"] for f in report.findings}
+
+
+def test_single_byte_csi_is_stripped_as_well_as_the_two_byte_form(write):
+    """0x9B is the single-byte form of the CSI introducer that `ESC [` spells
+    in two, so a string carrying it repaints a terminal without containing an
+    ESC at all. It survived the one path that decodes to `str` before
+    sanitising -- a certificate common name read as UTF-16."""
+    assert extractors_module.safe_text("a\x9b2Jb") == "a2Jb"
+    assert extractors_module.safe_text("a\x1b[2Jb") == "a[2Jb"
+    assert extractors_module.safe_text("a\x7f\x00\x08b") == "ab"
+    assert len(extractors_module.safe_text("x" * 5000)) == 512
+    assert extractors_module.safe_text(b"plain/path.so") == "plain/path.so"
+
+
+def test_a_terminated_dynamic_table_is_not_reported_as_truncated(write):
+    """Stopping at DT_NULL is the table ending; stopping at the cap is the
+    extractor giving up. Reporting the first as the second made every
+    ordinary binary announce a truncated dynamic table, which is the same
+    kind of false statement the flag exists to prevent -- just pointing the
+    other way."""
+    data = _elf_data(write("a.elf", build_elf(needed=["libc.so.6"], soname="a.so")))
+    assert data["dynamic_truncated"] is False
+    assert data["needed_truncated"] is False
+    assert not any("elf_max_dynamic" in p for p in data.get("parse_errors") or [])
+
+    many = build_elf(needed=[f"lib{n:04d}.so" for n in range(200)])
+    capped = _elf_data(write("b.elf", many),
+                       config={**DEFAULT_CONFIG, "elf_max_dynamic_entries": 20})
+    assert capped["dynamic_truncated"] is True

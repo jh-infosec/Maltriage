@@ -182,7 +182,7 @@ Both paths are asserted to agree, because entropy silently changing with the
 environment would be worse than being slow.
 
 Current extractors: `filetype` and `hashes` and `entropy` from v0.1, `pe` and
-`fuzzy` from v0.2, `yara` from v0.3.
+`fuzzy` from v0.2, `yara` from v0.3, `elf` from v0.3.1.
 
 Finding keys, which are a bounded and stable set on purpose — the findings
 envelope at v0.4 describes them as one, and a consumer groups, filters and
@@ -195,6 +195,12 @@ counts on them:
   `entry_point_in_writable_section`, `nonstandard_section_name`,
   `few_imports`, `implausible_timestamp`, `large_overlay`,
   `tls_callbacks_present`, `overlay_present`, `signature_present`
+- elf: `writable_executable_segment`, `section_entropy_high`,
+  `no_section_headers`, `entry_point_outside_segments`,
+  `entry_point_not_executable`, `packer_section_name`, `executable_stack`,
+  `runpath_set`, `rpath_set`, `nonstandard_section_name`,
+  `large_trailing_data`, `trailing_data_present`, `stripped_symbols`,
+  `statically_linked`, `build_id_present`
 - yara: `yara_match`
 
 `yara_match` is one key rather than one per rule, with the rule name in the
@@ -276,6 +282,20 @@ covers a parser that raises; a parser that spins on a crafted file will spin.
 Closing it needs a mechanism the pipeline does not have — a subprocess, a
 watchdog, or an alarm — and that is a change to how extractors run rather
 than a threshold to add.
+
+### Every string in a report came out of the sample
+
+Section names, interpreter paths, DT_RUNPATH, DT_SONAME, PDB paths and
+certificate common names are all attacker-chosen text that ends up in a
+terminal. `safe_text` strips C0 and C1 control characters and caps length
+before any of it is stored, because a RUNPATH of ANSI escapes can move the
+cursor up and clear the screen, erasing the findings printed above it and
+leaving a clean-looking block in their place. That is the most direct attack
+on a triage tool there is: not evading a finding, but unprinting one.
+
+C1 matters as much as C0. 0x9B is the single-byte form of the CSI introducer
+that `ESC [` spells in two, so a string carrying it repaints a terminal
+without containing an ESC at all.
 
 ### A rule set is not bounded by anything this project controls
 
@@ -443,6 +463,9 @@ extractor's resident cost does not scale with sample size, and that the
 second open is the mapped one and not an accident.
 
 #### Dependencies
+
+Status: shipped in v0.3.1, and the ELF half of this section is now code. The
+argument below stands as written.
 
 `pefile` is the first library maltriage would depend on for a finding rather
 than for speed, and it does not become a hard requirement.

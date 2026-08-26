@@ -154,6 +154,42 @@ DEFAULT_CONFIG = {
     # not be able to fail somebody's build by forgetting.
     "yara_default_severity": "info",
 
+    # ELF parsing. No optional dependency: the format is fixed-layout and
+    # `struct` reads it, so every bound below is this module's own.
+    "elf_max_segments": 256,
+    "elf_max_sections": 512,
+    "elf_max_dynamic_entries": 1024,
+    "elf_max_listed_names": 128,
+    "elf_max_string_bytes": 4096,
+    "elf_max_string_table_bytes": 262144,
+    "elf_region_entropy_bytes": 16777216,
+    "elf_entropy_budget_bytes": 67108864,
+    "elf_section_entropy_ratio": 0.94,
+    "elf_large_trailing_bytes": 1048576,
+
+    "elf_packer_sections": [
+        "upx0", "upx1", "upx2", "upx!", ".upx0", ".upx1", ".upx2",
+        "packed", ".packed", ".midgetpack", ".gnu_debugdata_upx",
+    ],
+
+    # Names a mainstream toolchain emits. Prefixed families -- `.debug*`,
+    # `.rela*`, `.rel*`, `.note*`, `.gnu*` -- are handled by prefix in the
+    # extractor rather than enumerated here, because they are open sets.
+    "elf_standard_sections": [
+        "", ".text", ".data", ".rodata", ".bss", ".init", ".fini",
+        ".init_array", ".fini_array", ".preinit_array", ".ctors", ".dtors",
+        ".plt", ".plt.got", ".plt.sec", ".got", ".got.plt", ".dynamic",
+        ".dynsym", ".dynstr", ".symtab", ".strtab", ".shstrtab", ".hash",
+        ".interp", ".comment", ".eh_frame", ".eh_frame_hdr", ".tbss",
+        ".tdata", ".jcr", ".data.rel.ro", ".sdata", ".sbss", ".tm_clone_table",
+        ".stab", ".stabstr", ".ARM.exidx", ".ARM.attributes", ".riscv.attributes",
+        ".gcc_except_table", ".stapsdt.base", ".probes", ".qtversion",
+        ".PyRuntime", "SYSTEMD_STATIC_DESTRUCT",
+        # Go emits its own runtime sections and they are not a signal.
+        ".gopclntab", ".gosymtab", ".noptrdata", ".noptrbss", ".typelink",
+        ".itablink", ".gcdata", ".gcbss", ".zdebug_info",
+    ],
+
     "pe_packer_sections": [
         "upx0", "upx1", "upx2", "upx!", ".upx0", ".upx1", ".aspack", ".adata",
         ".asdata", "aspack", ".boom", ".ccg", ".charmve", "bitarts", "dxpack",
@@ -290,6 +326,17 @@ def validate_config(config):
     check_int("yara_max_matches")
     check_int("yara_max_rules_reported")
     check_int("yara_max_scan_bytes")
+
+    check_int("elf_max_segments")
+    check_int("elf_max_sections")
+    check_int("elf_max_dynamic_entries")
+    check_int("elf_max_listed_names")
+    check_int("elf_max_string_bytes")
+    check_int("elf_max_string_table_bytes")
+    check_int("elf_region_entropy_bytes")
+    check_int("elf_entropy_budget_bytes")
+    check_int("elf_large_trailing_bytes")
+    check_ratio("elf_section_entropy_ratio")
     check_bool("yara_fast_matching")
     check_bool("yara_allow_includes")
     if "yara_default_severity" in config and config["yara_default_severity"] not in SEVERITIES:
@@ -298,7 +345,8 @@ def validate_config(config):
             f"{SEVERITIES}, default used")
 
     for key in ("executable_families", "document_extensions", "signatures",
-                "pe_packer_sections", "pe_standard_sections", "yara_rule_paths"):
+                "pe_packer_sections", "pe_standard_sections", "yara_rule_paths",
+                "elf_packer_sections", "elf_standard_sections"):
         if key in config and not isinstance(config[key], list):
             problems.append(f"{key} is not a list, default used")
 
@@ -641,6 +689,261 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     return bytes(out) + overlay + (certificate or b"")
 
 
+# Synthetic ELF construction
+#
+# The counterpart to `build_pe`, and deliberately simpler, because the format
+# is. An ELF header, a program header table and a section header table are
+# fixed-layout structures; there is no equivalent of a PE import table whose
+# thunks have to be built against an address that is not known until the file
+# is laid out.
+#
+# What is produced is structurally valid and contains no code. Section bodies
+# are padding, the entry point addresses a byte that does nothing, and there
+# is no dynamic linkage that resolves to anything at runtime.
+
+ELF_MAGIC = b"\x7fELF"
+
+ELFCLASS32, ELFCLASS64 = 1, 2
+ELFDATA_LSB, ELFDATA_MSB = 1, 2
+
+ET_REL, ET_EXEC, ET_DYN, ET_CORE = 1, 2, 3, 4
+EM_386, EM_X86_64, EM_AARCH64 = 3, 0x3E, 0xB7
+
+SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB = 0, 1, 2, 3
+SHT_DYNAMIC, SHT_NOTE, SHT_NOBITS, SHT_DYNSYM = 6, 7, 8, 11
+
+SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR = 0x1, 0x2, 0x4
+
+PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE = 1, 2, 3, 4
+PF_X, PF_W, PF_R = 0x1, 0x2, 0x4
+
+DT_NULL, DT_NEEDED, DT_STRTAB, DT_STRSZ = 0, 1, 5, 10
+DT_SONAME, DT_RPATH, DT_RUNPATH = 14, 15, 29
+
+# Section flag shorthands, mirroring the PE constants above.
+SECTION_TEXT = SHF_ALLOC | SHF_EXECINSTR
+SECTION_RODATA = SHF_ALLOC
+SECTION_DATA_ELF = SHF_ALLOC | SHF_WRITE
+SECTION_WX = SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR
+
+ELF_BASE_ADDRESS = 0x400000
+ELF_PAGE = 0x1000
+
+
+def _elf_formats(bitness, endian):
+    """Header layouts for one class and byte order.
+
+    The 32-bit program header is not the 64-bit one with narrower fields: it
+    puts `p_flags` after `p_memsz` rather than immediately after `p_type`.
+    Getting that wrong produces a file that parses and lies about which
+    segments are executable, which is the single most useful thing this
+    extractor reports, so the two layouts are written out separately rather
+    than derived from each other.
+    """
+    if bitness == 64:
+        return (f"{endian}16sHHIQQQIHHHHHH", 64,
+                f"{endian}IIQQQQQQ", 56,
+                f"{endian}IIQQQQIIQQ", 64)
+    return (f"{endian}16sHHIIIIIHHHHHH", 52,
+            f"{endian}IIIIIIII", 32,
+            f"{endian}IIIIIIIIII", 40)
+
+
+def _pack_phdr(fmt, bitness, p_type, flags, offset, vaddr, filesz, memsz, align):
+    if bitness == 64:
+        return struct.pack(fmt, p_type, flags, offset, vaddr, vaddr,
+                           filesz, memsz, align)
+    return struct.pack(fmt, p_type, offset, vaddr, vaddr,
+                       filesz, memsz, flags, align)
+
+
+def _string_table(names):
+    """A packed string table and the offset of each name within it."""
+    blob = bytearray(b"\x00")
+    offsets = {}
+    for name in names:
+        offsets[name] = len(blob)
+        blob += name.encode() + b"\x00"
+    return bytes(blob), offsets
+
+
+def build_elf(sections=None, segments=None, bitness=64, endian="<",
+              elf_type=ET_EXEC, machine=EM_X86_64, entry_section=".text",
+              interpreter=None, needed=None, soname=None, runpath=None,
+              trailing=b"", strip_sections=False, entry=None):
+    """Build a structurally valid ELF.
+
+    `sections` is a list of (name, sh_type, sh_flags, body). `segments` is a
+    list of (p_type, p_flags, [section names]) and defaults to one PT_LOAD
+    covering everything allocated.
+
+    `interpreter` adds a `.interp` section and a PT_INTERP segment.
+    `needed`, `soname` and `runpath` add `.dynstr` and `.dynamic`.
+    `trailing` is appended after everything, which is what makes it trailing.
+    `strip_sections` omits the section header table entirely, which no
+    mainstream toolchain does and several packers do.
+
+    `entry` overrides the entry point address, so a file whose entry lands
+    outside every executable segment can be built deliberately.
+    """
+    ehdr_fmt, ehdr_size, phdr_fmt, phdr_size, shdr_fmt, shdr_size = _elf_formats(
+        bitness, endian)
+
+    sections = list(sections if sections is not None
+                    else [(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x100)])
+
+    dynstr_names = []
+    if interpreter:
+        sections.append((".interp", SHT_PROGBITS, SECTION_RODATA,
+                         interpreter.encode() + b"\x00"))
+    if needed or soname or runpath:
+        dynstr_names = list(needed or []) + ([soname] if soname else []) \
+            + ([runpath] if runpath else [])
+        dynstr, dyn_offsets = _string_table(dynstr_names)
+        sections.append((".dynstr", SHT_STRTAB, SECTION_RODATA, dynstr))
+
+        word = f"{endian}QQ" if bitness == 64 else f"{endian}II"
+        entries = [(DT_NEEDED, dyn_offsets[n]) for n in (needed or [])]
+        if soname:
+            entries.append((DT_SONAME, dyn_offsets[soname]))
+        if runpath:
+            entries.append((DT_RUNPATH, dyn_offsets[runpath]))
+        entries.append((DT_STRSZ, len(dynstr)))
+        entries.append((DT_NULL, 0))
+        sections.append((".dynamic", SHT_DYNAMIC, SECTION_DATA_ELF,
+                         b"".join(struct.pack(word, tag, value)
+                                  for tag, value in entries)))
+
+    # Section index 0 is the reserved null entry the format requires.
+    placed = [{"name": "", "type": SHT_NULL, "flags": 0, "body": b"", "link": 0}]
+    placed += [{"name": name, "type": kind, "flags": flags, "body": body, "link": 0}
+               for name, kind, flags, body in sections]
+
+    # `.dynamic` addresses its string table through `sh_link`, and a real
+    # parser needs it: without it the dynamic tags carry offsets into a table
+    # nobody can find, so DT_NEEDED reads as a number rather than a library
+    # name. The fixture parsed happily and produced no names at all until this
+    # was set, which is the whole reason the builder is verified against an
+    # independent parser rather than against itself.
+    index_of = {entry["name"]: i for i, entry in enumerate(placed)}
+    if ".dynamic" in index_of and ".dynstr" in index_of:
+        placed[index_of[".dynamic"]]["link"] = index_of[".dynstr"]
+
+    shstrtab, name_offsets = _string_table([e["name"] for e in placed if e["name"]]
+                                           + [".shstrtab"])
+    placed.append({"name": ".shstrtab", "type": SHT_STRTAB, "flags": 0,
+                   "body": shstrtab, "link": 0})
+    name_offsets[""] = 0
+
+    cursor = ehdr_size
+    phdr_offset = cursor
+    segment_count = len(segments) if segments is not None else 1
+    if interpreter:
+        segment_count += 1
+    if any(e["type"] == SHT_DYNAMIC for e in placed):
+        segment_count += 1
+    cursor += phdr_size * segment_count
+
+    address = ELF_BASE_ADDRESS + cursor
+    for entry_ in placed[1:]:
+        entry_["offset"] = cursor
+        entry_["addr"] = address if entry_["flags"] & SHF_ALLOC else 0
+        size = len(entry_["body"])
+        # SHT_NOBITS occupies address space and no file space, which is the
+        # one case where offset and size do not describe a region of the file.
+        cursor += 0 if entry_["type"] == SHT_NOBITS else size
+        address += size
+    placed[0]["offset"], placed[0]["addr"] = 0, 0
+
+    shdr_offset = 0 if strip_sections else cursor
+    total = cursor + (0 if strip_sections else shdr_size * len(placed))
+
+    by_name = {e["name"]: e for e in placed}
+    start = by_name.get(entry_section, placed[1] if len(placed) > 1 else placed[0])
+    entry_address = entry if entry is not None else start.get("addr", 0)
+
+    out = bytearray(total)
+
+    ident = (ELF_MAGIC
+             + bytes([ELFCLASS64 if bitness == 64 else ELFCLASS32,
+                      ELFDATA_LSB if endian == "<" else ELFDATA_MSB, 1, 0, 0])
+             + b"\x00" * 7)
+    # A non-zero e_phoff with e_phnum == 0 is what readelf calls a possibly
+    # corrupt header, so an ELF with no segments declares no table at all.
+    struct.pack_into(ehdr_fmt, out, 0, ident, elf_type, machine, 1,
+                     entry_address, phdr_offset if segment_count else 0,
+                     shdr_offset, 0,
+                     ehdr_size, phdr_size, segment_count,
+                     shdr_size, 0 if strip_sections else len(placed),
+                     0 if strip_sections else len(placed) - 1)
+
+    written = []
+    def _span(members):
+        """File size and memory size of a run of sections.
+
+        The two are measured in different spaces and are not interchangeable.
+        An SHT_NOBITS section occupies address space and no file space, so a
+        segment containing one has a memory size larger than its file size --
+        which is the whole point of `.bss`. Computing both from file offsets
+        produced a segment whose `p_memsz` stopped short of its own contents,
+        and an entry point that fell outside every loadable segment, so the
+        builder handed the extractor a file its own docstring called
+        structurally valid and the extractor correctly called broken.
+        """
+        first, last = members[0], members[-1]
+        file_end = last["offset"] + (0 if last["type"] == SHT_NOBITS
+                                     else len(last["body"]))
+        file_size = max(0, file_end - first["offset"])
+        memory_size = max(file_size,
+                          last["addr"] + len(last["body"]) - first["addr"])
+        return first["offset"], first["addr"], file_size, memory_size
+
+    if segments is None:
+        allocated = [e for e in placed[1:] if e["flags"] & SHF_ALLOC]
+        if allocated:
+            offset, addr, filesz, memsz = _span(allocated)
+            written.append((PT_LOAD, PF_R | PF_X, offset, addr, filesz, memsz))
+    else:
+        for p_type, flags, names in segments:
+            members = [by_name[n] for n in names if n in by_name]
+            if not members:
+                written.append((p_type, flags, 0, 0, 0, 0))
+                continue
+            offset, addr, filesz, memsz = _span(members)
+            written.append((p_type, flags, offset, addr, filesz, memsz))
+
+    if interpreter:
+        interp = by_name[".interp"]
+        written.append((PT_INTERP, PF_R, interp["offset"], interp["addr"],
+                        len(interp["body"]), len(interp["body"])))
+    dynamic = next((e for e in placed if e["type"] == SHT_DYNAMIC), None)
+    if dynamic is not None:
+        written.append((PT_DYNAMIC, PF_R | PF_W, dynamic["offset"],
+                        dynamic["addr"], len(dynamic["body"]),
+                        len(dynamic["body"])))
+
+    for index, (p_type, flags, offset, vaddr, filesz, memsz) in enumerate(written):
+        out[phdr_offset + index * phdr_size:
+            phdr_offset + (index + 1) * phdr_size] = _pack_phdr(
+                phdr_fmt, bitness, p_type, flags, offset, vaddr,
+                filesz, memsz, ELF_PAGE)
+
+    for entry_ in placed:
+        body = entry_["body"]
+        if body and entry_["type"] != SHT_NOBITS:
+            out[entry_["offset"]:entry_["offset"] + len(body)] = body
+
+    if not strip_sections:
+        for index, entry_ in enumerate(placed):
+            struct.pack_into(
+                shdr_fmt, out, shdr_offset + index * shdr_size,
+                name_offsets.get(entry_["name"], 0), entry_["type"],
+                entry_["flags"], entry_["addr"], entry_["offset"],
+                len(entry_["body"]), entry_["link"], 0, 1, 0)
+
+    return bytes(out) + trailing
+
+
 # Sample files
 #
 # Every fixture is synthetic. The whole test suite runs without a single
@@ -663,8 +966,16 @@ SAMPLE_FILES = {
     # uniformly random: high whole-file entropy, no hotspot
     "encrypted.bin": lambda: os.urandom(200_000),
 
-    # a legitimate-looking ELF header
-    "helper.elf": lambda: b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 4096,
+    # a real ELF, replacing the eight plausible bytes this used to be. It
+    # carries a writable executable segment, a high-entropy section, a RUNPATH
+    # the loader searches before the system paths, and appended data.
+    "helper.elf": lambda: build_elf(
+        sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x400),
+                  (".packed", SHT_PROGBITS, SECTION_WX, os.urandom(0x800))],
+        segments=[(PT_LOAD, PF_R | PF_W | PF_X, [".text", ".packed"])],
+        interpreter="/lib64/ld-linux-x86-64.so.2",
+        needed=["libc.so.6"], runpath="/tmp/.hidden/lib",
+        trailing=os.urandom(0x2000)),
 
     # a document carrying a Windows executable in its body: the shape the
     # bundled YARA rules exist for, and one no extractor sees, because the

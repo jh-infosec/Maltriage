@@ -25,7 +25,7 @@ from pipeline import analyse, analyse_directory
 from sample_data import write_samples
 
 APP_NAME = "maltriage"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 SEVERITY_MARK = {"info": "  ", "low": " ~", "medium": " !", "high": "!!"}
 
@@ -88,6 +88,26 @@ def render_human(report: Report) -> str:
         if certificate.get("present"):
             named = ", ".join(certificate.get("common_names") or []) or "no name found"
             lines.append(f"  signed   {named} (not validated)")
+
+    elf = report.data.get("elf")
+    if elf and elf.get("elf_class"):
+        lines.append(
+            f"  elf      {elf['elf_class']} {elf.get('machine_label', '?')} "
+            f"{elf.get('type_label', '?')}, {len(elf.get('segments') or [])} "
+            f"segment(s), {len(elf.get('sections') or [])} section(s)")
+        if elf.get("interpreter"):
+            lines.append(f"  interp   {elf['interpreter']}")
+        if elf.get("needed"):
+            shown = ", ".join(elf["needed"][:6])
+            more = "" if len(elf["needed"]) <= 6 else ", ..."
+            lines.append(f"  needs    {shown}{more}")
+        for key in ("runpath", "rpath"):
+            if elf.get(key):
+                lines.append(f"  {key:8} {elf[key]}")
+        trailing = elf.get("trailing")
+        if trailing:
+            lines.append(
+                f"  trailing {trailing['size']:,} bytes at offset {trailing['offset']:,}")
 
     yara = report.data.get("yara")
     if yara and yara.get("match_count"):

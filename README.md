@@ -46,6 +46,9 @@ It never claims a file is malicious. It ranks a queue.
 - PE structure: sections with per-section entropy, imports and imphash,
   exports, TLS callbacks, debug directory and PDB path, overlay, and
   certificate presence with the names embedded in it
+- ELF structure: segments and their permissions, sections with per-section
+  entropy, dynamic linkage with RPATH and RUNPATH, the interpreter, the build
+  id, and trailing data. Standard library only
 - YARA matching against a bundled structural rule set and any rules you add,
   with per-rule-file compile isolation and offsets-only match context
 - Extension mismatch detection
@@ -156,7 +159,7 @@ reputation enrichment at v0.5, and it stopped at v0.6 entirely. Rather than
 keep two lists in step, here is the shape, and the file has the detail.
 
 - **v0.1** extraction engine, hashing, format identification, entropy, CLI
-- **v0.2** executable structure: PE now, ELF next
+- **v0.2** executable structure: PE and ELF
 - **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
 - **v0.4** strings and IOCs, the shared secret engine, ATT&CK mapping, a
   package layout, the findings envelope, optional reputation enrichment
