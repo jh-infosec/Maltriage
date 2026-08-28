@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from maltriage import apis
 from maltriage import cli
 from maltriage import extractors as extractors_module
 from maltriage.extractors import (
@@ -2975,3 +2976,233 @@ def test_indicators_drawn_from_a_capped_subset_say_so(write):
     problems = report.data["strings"]["parse_errors"]
     assert any("were kept" in p and "subset" in p for p in problems)
     assert "incomplete:" in cli.render_human(report)
+
+
+# API name registry and capability findings
+
+def _api_details(report, extractor=None):
+    return [f["detail"] for f in report.findings
+            if f["key"] == apis.FINDING_KEY
+            and (extractor is None or f["extractor"] == extractor)]
+
+
+def test_no_registry_name_is_another_one_wearing_an_ansi_suffix():
+    """The lookup falls back to stripping one trailing `A` or `W`, which is
+    only unambiguous while no two names differ by exactly that letter. If
+    `Foo` and `FooW` were both real APIs in different categories, the fallback
+    would silently credit the wrong one."""
+    collisions = [name for name in apis.VOCABULARY
+                  if name[-1] in ("a", "w") and name[:-1] in apis.VOCABULARY]
+    assert collisions == []
+
+
+def test_a_name_that_really_ends_in_a_is_not_stripped():
+    """The bug this ordering exists to prevent: strip first and
+    `CryptUnprotectData` becomes `cryptunprotectdat`, which matches nothing,
+    so the one credential-access API most worth catching is the one the
+    matcher loses."""
+    assert apis.match_symbol("CryptUnprotectData") == (
+        "cryptunprotectdata", ("credential_access",))
+
+
+def test_the_ansi_and_wide_spellings_reach_the_same_entry():
+    for spelling in ("CreateProcessA", "CreateProcessW", "CreateProcess"):
+        canonical, categories = apis.match_symbol(spelling)
+        assert (canonical, categories) == ("createprocess", ("execution",)), spelling
+
+
+def test_no_capability_reaches_medium():
+    """`GATE_SEVERITY` is medium and a medium is a non-zero exit. Every name
+    in this registry is also called by legitimate software, so a capability
+    inferred from names must not fail somebody's build. Raising one is a
+    deliberate act and this test is what makes it deliberate."""
+    assert {spec["severity"] for spec in apis.CAPABILITIES.values()} <= {"info", "low"}
+
+
+def test_every_ambiguous_name_is_one_the_registry_actually_holds():
+    """A `STRING_AMBIGUOUS` entry for a name not in the vocabulary excludes
+    nothing and reads as protection that is not there."""
+    assert apis.STRING_AMBIGUOUS <= apis.VOCABULARY
+
+
+def test_an_ambiguous_name_matches_as_a_symbol_and_not_as_text():
+    """`Sleep` is a real anti-analysis API and an English word. In an import
+    table it is a symbol; in a string table it is prose."""
+    assert apis.match_symbol("Sleep")[1] == ("anti_analysis",)
+    assert apis.match_text("Sleep") == []
+
+
+def test_a_name_inside_a_longer_word_is_not_a_match():
+    """Substring matching would make `PreloadLibraryPath` a dynamic-resolution
+    finding. Tokens, not substrings."""
+    assert apis.match_text("PreloadLibraryPath") == []
+    assert apis.match_symbol("PreloadLibraryPath") == (None, ())
+
+
+def test_decorated_and_mangled_spellings_are_found():
+    """The three forms the token path exists for."""
+    for text in ("_VirtualAllocEx@24", "?VirtualAllocEx@@YAPEAX",
+                 "kernel32.dll,VirtualAllocEx"):
+        assert apis.match_text(text) == [
+            ("virtualallocex", ("process_injection",))], text
+
+
+def test_prose_mentioning_an_api_is_not_a_match():
+    """Measured over 6725 real files, this rule is the difference between one
+    false positive and none: a run with a space in it is documentation or a
+    command line, and neither is a symbol reference."""
+    assert apis.match_text("a sentence mentioning VirtualAllocEx in passing") == []
+
+
+def test_a_run_longer_than_the_token_limit_is_not_taken_apart():
+    padding = "x" * 200
+    assert apis.match_text(f"{padding},VirtualAllocEx", token_limit=128) == []
+    assert apis.match_text(f"{padding},VirtualAllocEx", token_limit=4096) == [
+        ("virtualallocex", ("process_injection",))]
+
+
+def test_an_ordinal_import_matches_nothing():
+    assert apis.match_symbol("#42") == (None, ())
+
+
+def test_a_name_in_two_categories_is_reported_under_both():
+    """`SetWindowsHookEx` installs something that survives a reboot and reads
+    every keystroke. Forcing it into one category would lose half of what it
+    says."""
+    grouped = apis.categorise(["setwindowshookex"], view="import")
+    assert sorted(grouped) == ["persistence", "surveillance"]
+
+
+# capability findings
+
+def test_one_name_is_data_and_two_are_a_finding(write):
+    """The threshold, and the data-and-findings split underneath it: below it
+    the observation is still in the report, it is just not promoted."""
+    one = analyse(write("a.bin", b"\x00VirtualAllocEx\x00"))
+    assert one.data["strings"]["api_names"] == ["VirtualAllocEx"]
+    assert _api_details(one) == []
+
+    two = analyse(write("b.bin", b"\x00VirtualAllocEx\x00WriteProcessMemory\x00"))
+    assert len(_api_details(two)) == 1
+    assert "process injection" in _api_details(two)[0]
+
+
+def test_a_capability_finding_never_gates_a_build(write):
+    """Every category at once, and still nothing at medium."""
+    names = [name for spec in apis.CAPABILITIES.values() for name in spec["names"]]
+    body = b"\x00" + b"\x00".join(n.encode() for n in names) + b"\x00"
+    report = analyse(write("a.bin", body))
+    assert len(_api_details(report)) == len(apis.CAPABILITIES)
+    assert all(f["severity"] in ("info", "low") for f in report.findings
+               if f["key"] == apis.FINDING_KEY)
+
+
+def test_a_finding_quotes_the_registry_and_never_the_sample(write):
+    """The names in a report come from `apis.py`, not from the file. Nothing
+    a sample writes can reach a finding through this path, which is why the
+    capability lists need no `safe_text` and no length cap."""
+    body = b"\x00virtualallocex\x00WRITEPROCESSMEMORY\x00"
+    report = analyse(write("a.bin", body))
+    detail = _api_details(report)[0]
+    assert "VirtualAllocEx" in detail and "WriteProcessMemory" in detail
+    assert "virtualallocex" not in detail and "WRITEPROCESSMEMORY" not in detail
+
+
+def test_api_names_survive_the_retained_cap_and_the_text_switch(write):
+    """The reason this is matched during extraction rather than in a findings
+    pass over `report.data`. `strings_include_text` is off by default and the
+    retained list stops at its cap, so a later pass would see nothing on a
+    normal run -- while the packed sample this is for is exactly the one with
+    hundreds of thousands of strings."""
+    body = b"".join(b"\x00filler%05d" % n for n in range(500))
+    body += b"\x00VirtualAllocEx\x00WriteProcessMemory\x00"
+    report = analyse(write("a.bin", body),
+                     config={**DEFAULT_CONFIG, "strings_max_retained": 10})
+    data = report.data["strings"]
+    assert "text" not in data
+    assert data["retained"] == 10
+    assert data["api_names"] == ["VirtualAllocEx", "WriteProcessMemory"]
+    assert _api_details(report)
+
+
+def test_the_names_found_do_not_depend_on_the_chunk_size(write):
+    """The property that broke first when the string scanner was written, now
+    pinned for what is derived from it."""
+    body = (b"\x00" + b"junk" * 900 + b"\x00VirtualAllocEx\x00"
+            + b"junk" * 900 + b"\x00CreateRemoteThread\x00")
+    path = write("a.bin", body)
+    results = {size: analyse(path, config={**DEFAULT_CONFIG,
+                                           "read_chunk_bytes": size,
+                                           "header_bytes": size})
+               .data["strings"]["api_names"]
+               for size in (64, 512, 4096, 1 << 20)}
+    assert len(set(map(tuple, results.values()))) == 1, results
+    assert results[64] == ["CreateRemoteThread", "VirtualAllocEx"]
+
+
+@needs_pefile
+def test_imports_are_matched_before_the_display_cap(write):
+    """A binary with three thousand imports is exactly the one whose
+    interesting symbol sits past entry 256. A capability that depends on how
+    long the listed table was allowed to get is not a fact about the file."""
+    padding = [f"Ordinary{n:04d}" for n in range(300)]
+    body = build_pe(imports={"kernel32.dll": padding
+                             + ["VirtualAllocEx", "WriteProcessMemory"]})
+    report = analyse(write("a.exe", body),
+                     config={**DEFAULT_CONFIG, "pe_max_listed_symbols": 8})
+    data = report.data["pe"]
+    assert data["imports_truncated"] is True
+    assert len(data["imports"]["kernel32.dll"]) == 8
+    assert data["api_capabilities"]["process_injection"] == [
+        "VirtualAllocEx", "WriteProcessMemory"]
+    assert _api_details(report, "pe")
+
+
+@needs_pefile
+def test_the_import_view_and_the_string_view_are_reported_separately(write):
+    """Two extractors, two findings, and the detail says which view produced
+    it. An import is a symbol the loader will resolve; a string is text."""
+    body = build_pe(imports={"kernel32.dll": ["VirtualAllocEx",
+                                              "WriteProcessMemory"]})
+    report = analyse(write("a.exe", body))
+    assert any("in the import table" in d for d in _api_details(report, "pe"))
+    assert any("in the sample's strings" in d
+               for d in _api_details(report, "strings"))
+
+
+@needs_pefile
+def test_an_import_table_that_cannot_be_read_still_has_the_capability_keys(
+        write, monkeypatch):
+    """The fallback shape has to match the success shape, or a consumer that
+    reads `api_capabilities` breaks on exactly the malformed files this tool
+    exists for. Every other key in this dict was already in the fallback; two
+    new ones is two new ways to have missed it."""
+    def explode(self, pe, config):
+        raise ValueError("forged import directory")
+
+    monkeypatch.setattr(PEExtractor, "_imports", explode)
+    report = analyse(write("a.exe", build_pe(imports={"kernel32.dll": ["Sleep"]})))
+    data = report.data["pe"]
+    assert data["api_names"] == [] and data["api_capabilities"] == {}
+    assert set(data) >= {"imports", "import_count", "imphash",
+                         "imports_truncated", "imports_parsed",
+                         "api_names", "api_capabilities"}
+    assert _api_details(report, "pe") == []
+
+
+def test_the_new_config_keys_are_validated():
+    problems = validate_config({**DEFAULT_CONFIG,
+                                "api_min_names_per_capability": 0,
+                                "api_max_token_scan_bytes": "128"})
+    assert any("api_min_names_per_capability" in p for p in problems)
+    assert any("api_max_token_scan_bytes" in p for p in problems)
+
+
+def test_a_raised_threshold_silences_a_capability(write):
+    """The config key does what it says, which is the only reason it is a key
+    rather than a constant."""
+    body = b"\x00VirtualAllocEx\x00WriteProcessMemory\x00"
+    path = write("a.bin", body)
+    assert _api_details(analyse(path))
+    assert not _api_details(analyse(path, config={
+        **DEFAULT_CONFIG, "api_min_names_per_capability": 3}))

@@ -26,6 +26,18 @@ solve.
   and are always present; the raw list is two megabytes of somebody else's
   file in an artefact that gets stored, piped and shared, and a sample that
   harvests credentials has them among its strings
+- `apis.py`: a registry of Windows API names grouped into eleven capability
+  categories, and the matcher that recognises them. The first shared module,
+  which is what the package layout was added for. It answers "which of these
+  names did you see" and the extractors decide what to say about the answer
+- Capability findings from two views. `PEExtractor` reports what the import
+  table names outright; `StringsExtractor` reports what appears as literal
+  text, which is the only evidence there is when a sample resolves its
+  imports at runtime. Both file under the single key `api_capability` with
+  the category in the detail, for the reason v0.3 gave for `yara_match`
+- `api_names` and `api_capabilities` in the data for both extractors, listing
+  what was seen whether or not it reached the threshold for a finding
+- `api_min_names_per_capability` (2) and `api_max_token_scan_bytes` (128)
 
 ### Changed
 
@@ -38,6 +50,37 @@ solve.
   a Run key is an installer, and `GATE_SEVERITY` is medium. Turning a string
   into evidence is the secret engine's job and then the classifier's, once
   v0.7 can measure what it costs
+
+### Measured
+
+The capability vocabulary was run over 6725 real files -- 1610 Linux system
+binaries and shared objects, 2959 Python standard library source files, and
+2156 documentation files -- to find out what it fires on when nothing is
+wrong. Twenty-one files produced a finding, and twenty of those came from
+`gethostbyname` and `getaddrinfo`.
+
+They were the only libc names in a Win32 vocabulary, and they were correct
+matches: those binaries do resolve hostnames. Being correct is not the
+standard a finding has to meet. They are gone, and they belong to the POSIX
+vocabulary that arrives with ELF symbol parsing, where the caller is an
+import table rather than a string table.
+
+The twenty-first was a source file that mentioned two API names in prose,
+which is what led to the rule that a run containing a space is not a symbol
+reference. Nothing worth matching has a space in it: not a bare name, not a
+stdcall decoration, not a mangled C++ signature, not a comma-delimited pair.
+Prose does. After both changes the whole 6725 produced **no capability
+findings at all**.
+
+That rule is also, measured on a 100 MB sample with 2.8 million strings,
+about a third of the cost of matching -- the extractor goes from 5.28s to
+7.21s with it and to 8.44s without. The cheaper path and the more accurate
+one turned out to be the same path, which is not usually how that goes.
+
+What this does not measure is the Windows false positive rate, because these
+are not Windows binaries. It measures that the vocabulary does not fire on
+things that are not Windows binaries, which is a smaller claim. The real
+number is v0.7's job, and it is why nothing here reaches medium.
 
 ### Hardened
 

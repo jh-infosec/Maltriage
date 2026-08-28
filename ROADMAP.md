@@ -114,7 +114,7 @@ stays optional and off by default.
 - [x] ASCII and Unicode string extraction
 - [x] URL and IP extraction
 - [x] Registry path and mutex extraction
-- [ ] Suspicious API name detection
+- [x] Suspicious API name detection
 - [x] Package layout, so a shared module has one home
 - [ ] Secret engine: patterns, entropy and context (shared)
 - [ ] ATT&CK technique mapping from the shared registry (shared)
@@ -131,6 +131,29 @@ for installation as a library. Sharing a component with three repositories
 that cannot import it produces three copies that drift, which is the problem
 the sharing was meant to solve. What is needed here is importability, not a
 published artefact; distribution stays at v1.0.
+
+**API name detection is two views of one vocabulary, and neither is a fourth
+phase.** The registry lives in `apis.py` and both extractors import it: the PE
+extractor reports what the import table names, the strings extractor reports
+what appears as text. `Extractor.findings` sees only its own data by design,
+and the temptation here was to add a pass that sees all of `report.data` in
+order to correlate them. It was not taken. Each view is separately reportable,
+the correlation worth having -- a thin import table alongside many API strings
+-- is a `low` finding either way, and adding a phase to the pipeline to earn a
+`low` is not a trade. The data for that correlation is now present in both
+places, which is what v0.7 needs to decide whether it is worth anything.
+
+The string view matches during extraction rather than in a findings pass over
+`report.data`, and that is not an optimisation. `strings_include_text` is off
+by default and the retained list stops at `strings_max_retained`, so a later
+pass would see nothing on a default run -- while the packed sample this exists
+to catch is exactly the one with hundreds of thousands of strings.
+
+POSIX names are absent, and waiting on ELF symbol parsing rather than on a
+decision. `DT_NEEDED` gives library names, not function names, so a POSIX
+vocabulary today would be matched against strings alone -- and `connect`,
+`send`, `system`, `fork` and `socket` are ordinary English words. That is the
+view they are least safe in, so they wait for the one where they are safest.
 
 **The secret engine.** Pattern matching plus entropy plus context. Known
 patterns catch what a rule exists for; entropy catches what no rule exists

@@ -149,6 +149,26 @@ DEFAULT_CONFIG = {
         "currentversion\\explorer\\shell folders",
     ],
 
+    # API name matching. The vocabulary itself is in `apis.py` rather than
+    # here: it is several hundred names with their capability grouping and
+    # their severities, and a config file is a place for the two numbers below
+    # rather than for a taxonomy.
+    #
+    # How many distinct names a capability needs before it is worth a finding.
+    # Two, because one is not a pattern: every name in the registry is called
+    # by legitimate software, and a lone `GetTickCount` is a timer. Below the
+    # threshold nothing is lost -- the names are in `report.data` either way,
+    # which is the difference between an observation and a finding.
+    "api_min_names_per_capability": 2,
+
+    # How long a string may be before it is matched whole rather than taken
+    # apart into tokens. A symbol reference is short: bare, stdcall-decorated
+    # or inside a mangled C++ signature. A run longer than this that mentions
+    # an API name is prose, and reporting the manual as an injector teaches
+    # nobody anything. Also the cost bound -- this is the expensive path on a
+    # sample with millions of strings.
+    "api_max_token_scan_bytes": 128,
+
     # YARA. Rules are text and the bundled set ships with the project, so
     # `yara_rule_paths` adds to it rather than replacing it.
     "yara_rule_paths": [],
@@ -360,6 +380,9 @@ def validate_config(config):
     check_int("strings_max_retained")
     check_int("strings_max_iocs")
     check_bool("strings_include_text")
+
+    check_int("api_min_names_per_capability")
+    check_int("api_max_token_scan_bytes")
 
     check_int("yara_timeout_seconds")
     check_int("yara_max_matches")

@@ -241,6 +241,31 @@ single source of every PE fixture: variants are arguments to it rather than
 separate builders, so a fixture that drifts from the format drifts for every
 test at once and is caught immediately. What it produces contains no code.
 
+### apis.py
+
+A vocabulary of Windows API names grouped into capability categories, the
+matcher that recognises them, and the shared formatter that turns a match into
+a finding. The first module written to be shared rather than to be used from
+one place, which is what the v0.4 package layout exists for.
+
+Two properties are worth stating here because they are what let the rest of
+the design be simple.
+
+**Nothing a sample writes leaves this module.** The matcher is given text from
+a sample and returns keys from its own table. What reaches `report.data` and a
+finding's detail is the registry's spelling, never the sample's, so a
+capability list needs no `safe_text` and no length cap -- and cannot grow with
+the file, because it cannot hold more than the vocabulary. It is the only
+accumulator in the extraction engine that needs no ceiling, and that is a
+consequence of where the strings come from rather than a decision.
+
+**Both callers match before their own display caps.** The PE import table is
+listed up to `pe_max_listed_symbols` and the strings extractor retains up to
+`strings_max_retained`, and a binary with three thousand imports is exactly
+the one whose interesting symbol sits past entry 256. A capability that
+depended on how long a list was allowed to get would not be a fact about the
+file.
+
 ### test_maltriage.py
 
 Test suite covering the extraction engine, the config plumbing, the report

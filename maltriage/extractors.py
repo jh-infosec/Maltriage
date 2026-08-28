@@ -50,6 +50,7 @@ from typing import Any
 
 from .models import SEVERITY_RANK, mk_finding
 from .config import config_bool, config_int, config_list, config_ratio
+from . import apis
 
 log = logging.getLogger(__name__)
 
@@ -554,6 +555,12 @@ class StringsExtractor(StreamExtractor):
         self._found = {"ascii": [], "wide": []}
         self._counts = {"ascii": 0, "wide": 0}
         self._long = 0
+        self._tokens = config_int(config, "api_max_token_scan_bytes", 128)
+        # Bounded by the registry, not by the sample: this can never hold more
+        # than the vocabulary, whatever the file does. It is the only
+        # accumulator in this extractor that needs no cap, and the reason is
+        # worth stating -- what goes in comes from `apis`, not from the bytes.
+        self._api: set[str] = set()
 
     def feed(self, chunk: bytes) -> None:
         for kind, scanner in self._scanners.items():
@@ -564,12 +571,24 @@ class StringsExtractor(StreamExtractor):
         self._counts[kind] += 1
         if over_length:
             self._long += 1
+        text = run.decode("ascii", "replace") if kind == "ascii" else \
+            run[::2].decode("ascii", "replace")
+
+        # API matching runs here rather than over the retained list, and that
+        # placement is the whole point of doing it in the extractor. The
+        # retained list stops at `strings_max_retained`, and `text` is off by
+        # default, so a findings pass over `report.data` would see a truncated
+        # subset on a verbose run and nothing at all on a normal one -- while
+        # the packed sample this is meant to catch is exactly the one with
+        # hundreds of thousands of strings. Every string is matched; only what
+        # matched is kept.
+        for canonical, _categories in apis.match_text(text, self._tokens):
+            self._api.add(canonical)
+
         # The cap is shared across both kinds, not granted to each. Per-kind
         # it was a ceiling of twice what the config asked for, and the comment
         # beside the default claimed the product as the worst case.
         if len(self._found["ascii"]) + len(self._found["wide"]) < self._keep:
-            text = run.decode("ascii", "replace") if kind == "ascii" else \
-                run[::2].decode("ascii", "replace")
             self._found[kind].append(text)
 
     def finish(self, path: Path, ctx: dict[str, Any],
@@ -590,6 +609,16 @@ class StringsExtractor(StreamExtractor):
         }
         indicators, truncated = self._indicators(strings, config)
         data.update(indicators)
+
+        # Which known API names appeared, and under which capabilities. Not
+        # the strings themselves, and not subject to the switch below: this
+        # list is drawn from the registry's fixed vocabulary, so it is text
+        # this project wrote about a file rather than text taken out of one.
+        # That is what makes it safe to publish unconditionally, and it is
+        # also why it needs no truncation flag -- unlike every other list in
+        # this extractor, it cannot grow with the sample.
+        data["api_names"] = sorted(apis.display(n) for n in self._api)
+        data["api_capabilities"] = apis.categorise(self._api, view="string")
 
         # The strings themselves are off by default, and this is the one
         # switch in the extractor set. What it controls is a dump rather than
@@ -690,6 +719,16 @@ class StringsExtractor(StreamExtractor):
             out.append(mk_finding(self.name, "registry_path_present",
                 f"{'at least ' if capped else ''}{len(others)} registry path(s): "
                 f"{', '.join(others[:3])}", "info"))
+
+        # A name in the string table is weaker evidence than the same name in
+        # an import table -- text is text -- but it is the only evidence there
+        # is when a sample resolves its imports at runtime, which is the case
+        # worth catching. The registry holds the severities; none reaches
+        # medium.
+        out.extend(apis.capability_findings(
+            self.name, data.get("api_capabilities") or {},
+            config_int(config, "api_min_names_per_capability", 2),
+            view="string"))
         return out
 
 
@@ -1064,7 +1103,8 @@ class PEExtractor(RandomAccessExtractor):
         # known is that the file has no imports.
         data.update(attempt("imports", lambda: self._imports(pe, config),
                             {"imports": {}, "import_count": 0, "imphash": None,
-                             "imports_truncated": False, "imports_parsed": False}))
+                             "imports_truncated": False, "imports_parsed": False,
+                             "api_names": [], "api_capabilities": {}}))
         data.update(attempt("exports", lambda: self._exports(pe, config),
                             {"exports": [], "export_count": 0,
                              "exports_truncated": False}))
@@ -1192,16 +1232,27 @@ class PEExtractor(RandomAccessExtractor):
         limit = config_int(config, "pe_max_listed_symbols", 256)
         imports: dict[str, list[str]] = {}
         total, truncated = 0, False
+        matched: set[str] = set()
         for entry in entries or []:
             dll = safe_text(entry.dll or b"", 256)
             names = []
             for imported in entry.imports:
                 total += 1
+                symbol = (safe_text(imported.name, 256) if imported.name
+                          else f"#{imported.ordinal}")
+                # Matched before the display cap is applied, for the reason
+                # the strings extractor matches before its retained cap: a
+                # binary with three thousand imports is exactly the one whose
+                # interesting symbol sits past entry 256, and a capability
+                # that depends on how long the list was allowed to get is not
+                # a fact about the file.
+                canonical, _categories = apis.match_symbol(symbol)
+                if canonical is not None:
+                    matched.add(canonical)
                 if len(names) >= limit:
                     truncated = True
                     continue
-                names.append(safe_text(imported.name, 256)
-                             if imported.name else f"#{imported.ordinal}")
+                names.append(symbol)
             imports.setdefault(dll, []).extend(names)
         # imphash is computed over the import table pefile parsed, so it is
         # unaffected by the display cap above.
@@ -1212,6 +1263,8 @@ class PEExtractor(RandomAccessExtractor):
             "imphash": imphash or None,
             "imports_truncated": truncated,
             "imports_parsed": bool(entries) or not claimed,
+            "api_names": sorted(apis.display(n) for n in matched),
+            "api_capabilities": apis.categorise(matched, view="import"),
         }
 
     def _exports(self, pe, config: dict[str, Any]) -> dict[str, Any]:
@@ -1503,6 +1556,16 @@ class PEExtractor(RandomAccessExtractor):
                 f"only {count} imported symbol(s) from {', '.join(names)}, thin "
                 "enough to suggest the real import table is resolved at "
                 "runtime", "low"))
+
+        # The capabilities the import table names outright. This is the
+        # stronger of the two views: an import is a symbol the loader will
+        # resolve, so there is no question of whether the name means what it
+        # looks like. It still does not reach medium, because every name here
+        # is one that legitimate software also calls.
+        out.extend(apis.capability_findings(
+            self.name, data.get("api_capabilities") or {},
+            config_int(config, "api_min_names_per_capability", 2),
+            view="import"))
         return out
 
     def _other_findings(self, data, config):
