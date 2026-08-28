@@ -17,6 +17,12 @@ out/
 output/
 reports/
 
+# pytest's scratch space when relocated with --basetemp, which the README
+# recommends on Windows. It belongs in this section rather than under Python:
+# the suite writes synthetic PE and ELF fixtures into it, so it is a sample
+# directory that happens to be created by pytest.
+_tmp/
+
 # Backstop for samples written outside those directories.
 *.bin
 *.exe

@@ -198,35 +198,32 @@ installing.
 
 ## Running maltriage
 
-Install the dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
 Generate some synthetic test files
 
 ```bash
-python cli.py samples ./demo
+maltriage samples ./demo
 ```
 
 Scan them
 
 ```bash
-python cli.py scan ./demo
+maltriage scan ./demo
 ```
 
 Scan a single file and write a JSON report
 
 ```bash
-python cli.py scan suspicious.bin --json report.json
+maltriage scan suspicious.bin --json report.json
 ```
 
 Scan a directory into JSON Lines, one object per file
 
 ```bash
-python cli.py scan ./samples --recursive --json-lines out.jsonl
+maltriage scan ./samples --recursive --json-lines out.jsonl
 ```
+
+Every `maltriage` above works as `python -m maltriage` if you would rather not
+install, or if the console script is not on your `PATH`.
 
 `--json` always writes an array, one object per file, whatever the file count.
 
@@ -238,11 +235,35 @@ or a CI gate without conflating a finding with a failure.
 
 ## Testing
 
-Run the test suite
+```bash
+pip install -e '.[test]'
+python -m pytest -q
+```
+
+Expect **224 passed, 39 skipped**. The 39 need pefile, yara-python, ssdeep or
+numpy, and skip rather than fail when those are absent — the same rule the
+extractors follow. `pip install -e '.[all]'` runs all 263, though `ssdeep`
+needs libfuzzy present and will not build on a stock Windows box; `.[pe,yara,fast]`
+gets everything except the fuzzy-hash tests.
+
+`python -m pytest` rather than `pytest`, because a `pip install -e` into a
+Python that is not on `PATH` puts the console script somewhere `PATH` does not
+reach. The module form uses the interpreter you already named.
+
+**On Windows, if every test that touches a file errors with
+`PermissionError: [WinError 5]` on `AppData\Local\Temp\pytest-of-<user>`:**
 
 ```bash
-pytest
+python -m pytest -q --basetemp=./_tmp
 ```
+
+That is pytest's own temp directory being unreadable, not a maltriage failure —
+the traceback ends in `_pytest/pathlib.py`, before any code in this repository
+runs. The suite writes synthetic executables into that directory, so endpoint
+security taking an interest in it is a predictable outcome rather than a
+surprising one. Relocating the scratch space is the fix; adding an antivirus
+exclusion for it is not, because that is a permanent hole in the machine's
+coverage traded for a command-line flag.
 
 ---
 
