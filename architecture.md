@@ -112,7 +112,7 @@ restructuring.
 
 ### Config is validated, never trusted
 
-Config is read through the accessors in `sample_data.py`, never with a bare
+Config is read through the accessors in `config.py`, never with a bare
 `config.get`. Each accessor validates, falls back to a stated default and
 never raises.
 
@@ -182,7 +182,7 @@ Both paths are asserted to agree, because entropy silently changing with the
 environment would be worse than being slow.
 
 Current extractors: `filetype` and `hashes` and `entropy` from v0.1, `pe` and
-`fuzzy` from v0.2, `yara` from v0.3, `elf` from v0.3.1.
+`fuzzy` from v0.2, `yara` from v0.3, `elf` from v0.3.1, `strings` from v0.4.
 
 Finding keys, which are a bounded and stable set on purpose — the findings
 envelope at v0.4 describes them as one, and a consumer groups, filters and
@@ -201,6 +201,9 @@ counts on them:
   `runpath_set`, `rpath_set`, `nonstandard_section_name`,
   `large_trailing_data`, `trailing_data_present`, `stripped_symbols`,
   `statically_linked`, `build_id_present`
+- strings: `urls_present`, `emails_present`, `ipv4_present`,
+  `mutexes_present`, `windows_paths_present`, `unix_paths_present`,
+  `registry_persistence_path`, `registry_path_present`
 - yara: `yara_match`
 
 `yara_match` is one key rather than one per rule, with the rule name in the
@@ -224,7 +227,7 @@ shape of output.
 `SCHEMA_VERSION` is bumped when the report shape changes so consumers can
 fail loudly rather than mis-parse.
 
-### sample_data.py
+### config.py and fixtures.py
 
 Bundled synthetic fixtures, the default config, and the validated accessors
 every other module uses to read it.
@@ -342,11 +345,13 @@ Reporting nothing is correct; a score would be noise.
 Findings are derived entirely from the file's own bytes. There is no
 reputation lookup, threat intelligence or prior-sighting context until v0.4.
 
-### Flat module layout
+### extractors.py is one module and is getting large
 
-Modules import each other by bare name (`import models`), so commands must be
-run from the project directory. This matches the layout used across the other
-projects in this portfolio and is not suitable for installation as a library.
+At roughly 2900 lines it holds seven extractors and their helpers. The package
+layout in v0.4 made splitting it possible and deliberately did not do it: a
+mechanical move of that size alongside a new extractor would make any
+regression hard to attribute. It should become `extractors/` with one module
+per format, and that is its own change with no functional content.
 
 ## Accepted Designs
 
@@ -554,7 +559,7 @@ Every fixture in this project is generated in-process, and no malicious
 sample is required to develop or test the tool. That promise is not
 negotiable, and v0.2 is the first release where keeping it costs real work.
 
-Testing a PE parser needs a valid PE. `sample_data.py` must therefore
+Testing a PE parser needs a valid PE. `config.py` and `fixtures.py` must therefore
 construct one by hand: DOS header and stub, PE signature, COFF header,
 optional header, a section table, and section data positioned to match it.
 That is roughly sixty lines of `struct` and it must be correct enough that
@@ -588,8 +593,10 @@ v0.2; it is recorded here as a known gap rather than left to be rediscovered.
 The following files are part of the project structure and must be preserved:
 
 ```
-cli.py              pipeline.py         extractors.py
-models.py           sample_data.py      test_maltriage.py
+pyproject.toml      maltriage/__init__.py   maltriage/cli.py
+maltriage/pipeline.py                   maltriage/extractors.py
+maltriage/models.py maltriage/config.py maltriage/fixtures.py
+maltriage/rules/    tests/test_maltriage.py
 requirements.txt    architecture.md     README.md
 CHANGELOG.md        ROADMAP.md          .gitignore
 .githooks/pre-commit

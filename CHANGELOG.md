@@ -1,5 +1,115 @@
 # Changelog
 
+## Version 0.4 -- a package, and strings
+
+Two things, and the first exists to make the rest of v0.4 possible. Three
+components on the roadmap are shared with claude-recon-agent and Shadowfax,
+and a project that cannot be imported cannot share anything: "shared" would
+have meant three copies that drift, which is the problem sharing was meant to
+solve.
+
+### Added
+
+- An installable package. `maltriage/` with `pyproject.toml`, a `maltriage`
+  console script, `python -m maltriage`, and the bundled rules carried as
+  package data so an installed copy finds them. Optional dependencies are
+  declared as extras (`pe`, `yara`, `fuzzy`, `fast`, `test`, `all`) and the
+  core still has none
+- `config.py` and `fixtures.py`, split out of `sample_data.py`. Every
+  extractor needs the config accessors and none of them needs a PE builder,
+  so a module named for its fixtures was the wrong home -- the docstrings had
+  been apologising for it since v0.1.2
+- `StringsExtractor`: printable ASCII and UTF-16LE strings taken off the
+  shared pass, with URL, email, IPv4, registry path, mutex and absolute path
+  indicators drawn from them
+- `strings_include_text`, off by default. The indicators are the triage value
+  and are always present; the raw list is two megabytes of somebody else's
+  file in an artefact that gets stored, piped and shared, and a sample that
+  harvests credentials has them among its strings
+
+### Changed
+
+- `EntropyExtractor` keeps a running maximum, total and count instead of one
+  float per window
+- `cli.VERSION` reads `maltriage.__version__` instead of being a second
+  literal. They had already drifted: `--version` said 0.3.1 while the package
+  metadata said 0.4.0
+- Nothing the strings extractor reports reaches medium. An installer writing
+  a Run key is an installer, and `GATE_SEVERITY` is medium. Turning a string
+  into evidence is the secret engine's job and then the classifier's, once
+  v0.7 can measure what it costs
+
+### Hardened
+
+The strings extractor is the first stream extractor added since v0.1.2, and
+the chunk-boundary invariant is the one it broke.
+
+**Results depended on `read_chunk_bytes`.** The carry kept a run only when the
+regex had matched and the match reached the end of the buffer -- but a
+fragment shorter than the minimum length can never match `{6,}`, so it was
+dropped and the next buffer restarted inside the run. `MZAPPDATAROAM` split at
+a 4096-byte boundary was reported as `PPDATAROAM`. A UTF-16 continuation that
+resumed one byte late was emitted as a fresh run, so `wide_count` on 100 MB of
+`A\x00` was literally the number of chunks. And the skip state that discards
+the tail of an over-length run was never cleared by a buffer containing no
+match, so an unrelated later string was thrown away as though it were a tail.
+Fifty-two of sixty structured samples produced different results at different
+chunk sizes.
+
+The rule that makes it correct: **carry the trailing bytes that could still be
+part of a run, not the trailing bytes that already matched one.** That covers
+the matched case and the too-short case with the same code. UTF-16 parity is
+carried across the skip as well, because an odd chunk size leaves the next
+buffer starting on the NUL half of a pair.
+
+**The entropy extractor had been linear in sample size since v0.1.2.** It kept
+one float per window to compute a maximum, a mean and a count, all three of
+which are computable in constant space. It went unnoticed because a float is
+small -- 2441 of them for a 20 MB sample is 80 KB, invisible beside a 1 MB
+read chunk -- and because the test that should have caught it compared a
+200 KB sample with a 20 MB one. The stream phase has no size ceiling, so the
+same list is 400 MB at 100 GB.
+
+The rest:
+
+- The retained-strings cap was enforced per kind, so it was a ceiling of twice
+  what the config asked for, and the comment beside the default claimed the
+  product as the worst case
+- The fallback default in the extractor was 4096 while `DEFAULT_CONFIG` said
+  2048, so an absent value silently doubled the ceiling
+- A capped indicator list stated its length as a total: "128 URL(s)" when
+  there were 400. It now says "at least", and every cap reaches `parse_errors`
+  and the CLI, including the one that matters most -- that when the retained
+  list is full the indicators were drawn from a subset
+- `architecture.md` still described the flat layout it had just stopped having
+
+### Notes
+
+Three of the tests written alongside this release did not test what they
+claimed, and one of them could not have failed for any input:
+
+- The chunk-size test's body was 1380 bytes against a 4096-byte header read,
+  so the pipeline fed one chunk whatever `read_chunk_bytes` said. All four
+  parametrisations ran the same code
+- The terminal-escape test asserted `"\u001b" not in json.dumps(...)`. In
+  Python source that literal *is* the ESC character, and `json.dumps` always
+  escapes it to six characters, so the raw character can never appear.
+  Adding ESC to the printable range left the whole suite green
+- The over-length test asserted `>= 1`, which passes at 489 as happily as at 1
+
+Ten further mutations survived the suite, including deleting the entire
+cross-boundary carry and replacing the entropy maximum with a minimum. The
+`EntropyExtractor` change under review had no coverage at all.
+
+Both memory tests were also measuring the wrong thing. They compared a small
+sample with a large one, which conflates "grows with the sample" with "reaches
+its ceiling": a bounded retained list is a fixed cost a small file never pays.
+They now compare two sizes that have both saturated every ceiling, warm each
+path before measuring, and subtract the memory already live -- because
+`get_traced_memory` reports the whole process and these tests run after two
+hundred others that hold their own fixtures.
+
+
 ## Version 0.3.1 -- ELF
 
 The last unshipped piece of v0.2's design, arriving after v0.3 because that is

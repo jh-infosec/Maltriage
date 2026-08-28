@@ -111,11 +111,11 @@ Reputation enrichment lives here rather than owning a version. It is an API
 call and a cache, and it makes the tool depend on a network and a key, so it
 stays optional and off by default.
 
-- [ ] ASCII and Unicode string extraction
-- [ ] URL and IP extraction
-- [ ] Registry path and mutex extraction
+- [x] ASCII and Unicode string extraction
+- [x] URL and IP extraction
+- [x] Registry path and mutex extraction
 - [ ] Suspicious API name detection
-- [ ] Package layout, so a shared module has one home
+- [x] Package layout, so a shared module has one home
 - [ ] Secret engine: patterns, entropy and context (shared)
 - [ ] ATT&CK technique mapping from the shared registry (shared)
 - [ ] Findings envelope emit, provisional (shared)

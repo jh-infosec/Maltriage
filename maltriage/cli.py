@@ -5,9 +5,13 @@ Command line front end for the maltriage static triage pipeline.
 
 Run locally:
 
-    python cli.py scan suspicious_file.bin
-    python cli.py scan ./samples --recursive --json-lines out.jsonl
-    python cli.py samples ./demo
+    maltriage scan suspicious_file.bin
+    maltriage scan ./samples --recursive --json-lines out.jsonl
+    maltriage samples ./demo
+
+Or without installing, from the repository root:
+
+    python -m maltriage.cli scan suspicious_file.bin
 
 maltriage is a static analysis tool. It reads bytes from disk and never
 executes, launches or modifies a sample.
@@ -20,12 +24,19 @@ import logging
 import sys
 from pathlib import Path
 
-from models import SEVERITY_RANK, Report, max_severity
-from pipeline import analyse, analyse_directory
-from sample_data import write_samples
+from . import __version__
+from .models import SEVERITY_RANK, Report, max_severity
+from .pipeline import analyse, analyse_directory
+from .fixtures import write_samples
 
 APP_NAME = "maltriage"
-VERSION = "0.3.1"
+
+# One source of truth. These were two constants until v0.4, and they had
+# already drifted by the time anybody looked: `--version` said 0.3.1 while the
+# package metadata said 0.4.0. Version drift between a file and its own
+# documentation is a defect this project has fixed three times in other
+# places, and a second literal is how it happens.
+VERSION = __version__
 
 SEVERITY_MARK = {"info": "  ", "low": " ~", "medium": " !", "high": "!!"}
 
@@ -69,6 +80,20 @@ def render_human(report: Report) -> str:
     # turns a file the parser found hard into a run that produced nothing at
     # all, which is the opposite of what a triage tool should do with a
     # difficult sample.
+    strings = report.data.get("strings")
+    if strings and (strings.get("ascii_count") or strings.get("wide_count")):
+        lines.append(
+            f"  strings  {strings['ascii_count']:,} ascii, {strings['wide_count']:,} "
+            f"wide, {strings['retained']:,} kept"
+            f"{' (capped)' if strings.get('retained_truncated') else ''}")
+        for key, label in (("urls", "urls"), ("ipv4", "ips"),
+                           ("registry_paths", "registry"), ("mutexes", "mutexes")):
+            values = strings.get(key) or []
+            if values:
+                shown = ", ".join(values[:3])
+                more = "" if len(values) <= 3 else f", +{len(values) - 3}"
+                lines.append(f"  {label:8} {shown}{more}")
+
     pe = report.data.get("pe")
     if pe and pe.get("pe_type"):
         lines.append(

@@ -41,15 +41,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from extractors import (
+from .extractors import (
     Extractor,
     HeaderExtractor,
     RandomAccessExtractor,
     StreamExtractor,
     default_extractors,
 )
-from models import Report
-from sample_data import DEFAULT_CONFIG, config_int, validate_config
+from .models import Report
+from .config import DEFAULT_CONFIG, config_int, validate_config
 
 log = logging.getLogger(__name__)
 

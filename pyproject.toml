@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maltriage"
+version = "0.4.0"
+description = "Static triage for suspicious files. Never executes samples."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+
+# No hard runtime dependencies, deliberately. The tool has to be clonable and
+# runnable by anybody, so every parser is optional and its absence is
+# reported rather than fatal. See requirements.txt for what each one buys.
+dependencies = []
+
+[project.optional-dependencies]
+pe = ["pefile>=2023.2.7"]
+yara = ["yara-python>=4.3"]
+fuzzy = ["ssdeep>=3.4"]
+fast = ["numpy>=1.24"]
+test = ["pytest>=7.4", "pyelftools>=0.29"]
+all = ["pefile>=2023.2.7", "yara-python>=4.3", "numpy>=1.24"]
+
+[project.scripts]
+maltriage = "maltriage.cli:main"
+
+[tool.setuptools]
+packages = ["maltriage"]
+
+# The bundled rules are part of the package, not of the checkout. Without
+# this an installed maltriage finds an empty rules directory and reports that
+# it had nothing to scan with, which is true and useless.
+[tool.setuptools.package-data]
+maltriage = ["rules/*.yar", "rules/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

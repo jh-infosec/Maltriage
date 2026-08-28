@@ -28,9 +28,9 @@ from pathlib import Path
 
 import pytest
 
-import cli
-import extractors as extractors_module
-from extractors import (
+from maltriage import cli
+from maltriage import extractors as extractors_module
+from maltriage.extractors import (
     EntropyExtractor,
     Extractor,
     FileTypeExtractor,
@@ -45,11 +45,16 @@ from extractors import (
     expected_random_entropy,
     shannon,
 )
-from models import SEVERITIES, mk_finding
-from extractors import default_extractors
-from pipeline import analyse, analyse_directory
-from sample_data import (
+from maltriage.models import SEVERITIES, mk_finding
+from maltriage.extractors import default_extractors
+from maltriage.pipeline import analyse, analyse_directory
+from maltriage.config import (
     DEFAULT_CONFIG,
+    config_int,
+    config_ratio,
+    validate_config,
+)
+from maltriage.fixtures import (
     EM_AARCH64,
     ET_DYN,
     PE_HEADER_OFFSET,
@@ -71,9 +76,6 @@ from sample_data import (
     SECTION_RWX,
     build_certificate,
     build_pe,
-    config_int,
-    config_ratio,
-    validate_config,
     write_samples,
 )
 
@@ -488,24 +490,48 @@ def test_the_file_is_opened_once_and_read_once(write, monkeypatch):
 
 def test_peak_memory_does_not_track_sample_size(write):
     """The point of the refactor. Peak memory should be governed by the chunk
-    size, not by how large the sample is."""
+    size, not by how large the sample is.
+
+    Measured between two samples that are both large enough to have saturated
+    every per-run ceiling, rather than between a tiny one and a large one.
+    The strings extractor retains a bounded number of strings, so a 200 KB
+    file does not fill that list and a 20 MB file does: comparing those two
+    measures the approach to a ceiling and calls it growth. Comparing 20 MB
+    with 60 MB measures the thing the invariant actually claims.
+    """
+    config = {**DEFAULT_CONFIG, "read_chunk_bytes": 65_536}
+    large = write("large.bin", os.urandom(6_000_000))
+    larger = write("larger.bin", os.urandom(18_000_000))
+
+    def peak_for(path):
+        """The transient memory one run costs, isolated two ways.
+
+        Warm first, because a first run allocates caches a second does not --
+        compiled patterns, numpy's import, interned tables -- and charging
+        those to whichever sample went first measures the order of the calls.
+
+        Then subtract the memory already live at the start, because
+        `get_traced_memory` reports the whole process and this test runs after
+        two hundred others that hold their own fixtures. What that leaves is
+        the run's own footprint, which is the number this invariant is about.
+        """
+        analyse(path, config=config)
+        tracemalloc.reset_peak()
+        before, _ = tracemalloc.get_traced_memory()
+        analyse(path, config=config)
+        return tracemalloc.get_traced_memory()[1] - before
+
     tracemalloc.start()
     try:
-        small = write("small.bin", os.urandom(200_000))
-        tracemalloc.reset_peak()
-        analyse(small, config={**DEFAULT_CONFIG, "read_chunk_bytes": 65_536})
-        _, small_peak = tracemalloc.get_traced_memory()
-
-        large = write("large.bin", os.urandom(20_000_000))
-        tracemalloc.reset_peak()
-        analyse(large, config={**DEFAULT_CONFIG, "read_chunk_bytes": 65_536})
-        _, large_peak = tracemalloc.get_traced_memory()
+        large_peak = peak_for(large)
+        larger_peak = peak_for(larger)
     finally:
         tracemalloc.stop()
 
-    # 100x the sample for well under 2x the peak. v0.1.1 was linear.
-    assert large_peak < small_peak * 2
-    assert large_peak < 4_000_000
+    # 3x the sample for essentially no change in peak. v0.1.1 was linear,
+    # and so was the entropy extractor's window list until v0.4.
+    assert larger_peak < large_peak * 1.3, (large_peak, larger_peak)
+    assert larger_peak < 4_000_000, larger_peak
 
 
 def test_a_failure_mid_stream_drops_only_that_extractor(write):
@@ -1135,22 +1161,34 @@ def test_parsing_a_pe_does_not_copy_it_into_memory(write):
     Measured as a ratio rather than an absolute, for the same reason the
     streaming test is: an optional numpy adds a fixed cost on first use that
     dwarfs a bounded chunk and says nothing about whether the chunk is
-    bounded. Eight times the section for well under twice the peak.
+    bounded. Three times the section for essentially no change in peak.
     """
     def peak_for(name, size):
+        """Warm on this very path, then measure. Warming on a different file
+        leaves first-touch allocations to be charged to whichever measurement
+        ran first, which makes the result depend on the order of the calls and
+        on whether numpy is installed rather than on the size of the sample."""
         path = write(name, build_pe(sections=[(".big", SECTION_DATA, os.urandom(size))]))
+        run = lambda: analyse(path, extractors=[FileTypeExtractor(), PEExtractor()])
+        run()
         tracemalloc.reset_peak()
-        analyse(path, extractors=[FileTypeExtractor(), PEExtractor()])
-        return tracemalloc.get_traced_memory()[1]
+        before, _ = tracemalloc.get_traced_memory()
+        run()
+        return tracemalloc.get_traced_memory()[1] - before
 
     tracemalloc.start()
     try:
-        peak_for("warm.exe", 1_000_000)  # pay any one-off cost before measuring
-        small = peak_for("small.exe", 1_000_000)
-        large = peak_for("large.exe", 8_000_000)
+        # Both sizes are above `pe_region_entropy_bytes`'s 1 MiB working
+        # chunk, so both have reached the ceiling and the comparison measures
+        # growth rather than the approach to it. A 1 MB section never fills
+        # that chunk, so pairing it with an 8 MB one measured the ceiling and
+        # called the difference linear -- visibly so without numpy, where the
+        # standard-library histogram costs more per chunk.
+        small = peak_for("small.exe", 8_000_000)
+        large = peak_for("large.exe", 24_000_000)
     finally:
         tracemalloc.stop()
-    assert large < small * 2, (small, large)
+    assert large < small * 1.3, (small, large)
 
 
 @needs_pefile
@@ -1761,9 +1799,15 @@ def test_a_finding_carries_offsets_and_never_the_matched_bytes(write):
     path = write("a.bin", b"x" * 100 + marker + b"y" * 100)
     report = analyse(path, config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]})
 
-    blob = json.dumps(report.to_dict())
+    # Scoped to the yara section. The claim is that *this extractor* never
+    # reads `matched_data`, and it never has been that no extractor may
+    # report a byte the rule happened to match: v0.4's strings extractor can
+    # legitimately find the same run, which is why its raw text is off by
+    # default rather than why this assertion should be wider than the thing
+    # it is testing.
+    blob = json.dumps(report.data["yara"])
     assert "leaky" in blob                      # the rule fired
-    assert marker.decode() not in blob          # and the bytes are not in the report
+    assert marker.decode() not in blob          # and the bytes are not in it
     match = next(m for m in report.data["yara"]["matches"] if m["rule"] == "leaky")
     assert match["strings"][0]["offsets"] == [100]
     assert match["strings"][0]["lengths"] == [len(marker)]
@@ -1924,7 +1968,7 @@ rule dump { meta: severity = "info" condition: for all i in (0..23) : ( console.
     report = analyse(path, config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]})
     captured = capfd.readouterr()
     assert "0x" not in captured.out and "0x" not in captured.err
-    assert marker.decode() not in json.dumps(report.to_dict())
+    assert marker.decode() not in json.dumps(report.data["yara"])
 
 
 @needs_yara
@@ -2713,3 +2757,221 @@ def test_a_terminated_dynamic_table_is_not_reported_as_truncated(write):
     capped = _elf_data(write("b.elf", many),
                        config={**DEFAULT_CONFIG, "elf_max_dynamic_entries": 20})
     assert capped["dynamic_truncated"] is True
+
+
+# strings and indicators
+
+def _strings(path, config=None):
+    report = analyse(path, config=config)
+    assert "strings" not in report.errors, report.errors
+    return report.data["strings"]
+
+
+def test_ascii_and_utf16_strings_are_both_found(write):
+    body = b"\x00\x01" + b"CreateFileA" + b"\xff" * 4 + \
+        "MZ-a-wide-string".encode("utf-16-le") + b"\xff\xfe"
+    data = _strings(write("a.bin", body))
+    assert data["ascii_count"] >= 1
+    assert data["wide_count"] >= 1
+
+
+def test_a_run_shorter_than_the_floor_is_not_a_string(write):
+    """Six is the conventional floor and it matters: at five, printable runs
+    occur often enough in random data to bury the report in noise."""
+    data = _strings(write("a.bin", b"\x00abc\x00abcd\x00abcde\x00abcdef\x00"))
+    assert data["ascii_count"] == 1          # only "abcdef"
+
+
+@pytest.mark.parametrize("chunk_bytes", [1, 2, 3, 7, 512, 4096, 65_536, 1_048_576])
+def test_string_results_do_not_depend_on_the_chunk_size(write, chunk_bytes):
+    """The property that broke first when this was written, and the one the
+    first version of this test could not see: its body was 1380 bytes against
+    a 4096-byte header read, so the pipeline fed one chunk whatever
+    `read_chunk_bytes` said. The body below is larger than the header and
+    `header_bytes` is lowered, so the parametrisation reaches the scanner.
+
+    Odd chunk sizes are in the list deliberately. They split a UTF-16 pair,
+    which is the case that reported one run per chunk instead of one run.
+    """
+    body = (b"\x00" * 300 + b"https://example.com/payload" + b"\x00" * 7
+            + "C:\\Windows\\System32\\evil.dll".encode("utf-16-le") + b"\x00" * 900
+            + b"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" + b"\x00" * 40
+            + b"A" * 9000 + b"\x00" + b"W\x00" * 4000 + b"\xff" * 4
+            + b"MZAPPDATAROAM" + b"\x00" * 4 + b"tail-at-the-very-end")
+    data = _strings(write("a.bin", body),
+                    config={**DEFAULT_CONFIG, "read_chunk_bytes": chunk_bytes,
+                            "header_bytes": 64, "strings_include_text": True})
+    assert data["urls"] == ["https://example.com/payload"]
+    assert "C:\\Windows\\System32\\evil.dll" in data["windows_paths"]
+    assert data["registry_paths"] == [
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"]
+    # Five ASCII runs: the URL, the registry path, the 9000 A's, MZAPPDATAROAM
+    # and the tail. Two wide runs: the evil.dll path, and the one formed by
+    # the last A pairing with the NUL that follows it -- which is exactly the
+    # kind of accident a boundary-sensitive scanner would report differently
+    # at different chunk sizes, so it is left in on purpose.
+    assert (data["ascii_count"], data["wide_count"]) == (5, 2)
+    assert data["over_length"] == 2          # the 9000 A's and the 4000 W pairs
+    assert "MZAPPDATAROAM" in data["text"]
+    assert "tail-at-the-very-end" in data["text"]
+
+
+def test_indicators_are_extracted_from_the_strings(write):
+    body = (b"\x00visit https://example.com/a and ftp://files.example.org/b\x00"
+            b"\x00mail root@example.com about 10.10.5.9 and 999.1.1.1\x00"
+            b"\x00Global\\MyMutexName and /etc/cron.d/persist\x00")
+    data = _strings(write("a.bin", body))
+    assert sorted(data["urls"]) == ["ftp://files.example.org/b",
+                                    "https://example.com/a"]
+    assert data["emails"] == ["root@example.com"]
+    assert data["ipv4"] == ["10.10.5.9"]           # 999.1.1.1 is not an address
+    assert data["mutexes"] == ["Global\\MyMutexName"]
+    assert "/etc/cron.d/persist" in data["unix_paths"]
+
+
+def test_a_persistence_registry_path_is_separated_from_an_ordinary_one(write):
+    """Low, not medium. An installer writing a Run key is an installer, and
+    `GATE_SEVERITY` is medium: a finding earns it only if a file deserves a
+    human because of that finding alone."""
+    body = (b"\x00HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\svc\x00"
+            b"\x00HKLM\\Software\\Acme\\Settings\\Colour\x00")
+    report = analyse(write("a.bin", body))
+    assert "registry_persistence_path" in _keys(report, "low")
+    assert "registry_path_present" in _keys(report, "info")
+    assert _keys(report, "medium") == set()
+    assert _keys(report, "high") == set()
+
+
+def test_nothing_the_strings_extractor_raises_is_medium_or_higher(write):
+    """Strings are data. Deciding one looks like a credential is the v0.4
+    secret engine and deciding one names a suspicious API is a heuristic, and
+    both are later work with a measurement behind them."""
+    body = (b"\x00https://evil.example/beacon\x00" b"\x00Global\\Mutex\x00"
+            b"\x00HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\x00"
+            b"\x00192.168.1.1\x00" b"\x00C:\\Users\\x\\AppData\\evil.exe\x00")
+    report = analyse(write("a.bin", body))
+    strings_findings = [f for f in report.findings if f["extractor"] == "strings"]
+    assert strings_findings
+    assert not [f for f in strings_findings if f["severity"] in ("medium", "high")]
+
+
+def test_a_string_longer_than_the_ceiling_contributes_its_head_and_stops(write):
+    """A 200 MB file of printable text is one run. The remainder is discarded
+    rather than buffered, which is the difference between a ceiling and a
+    suggestion."""
+    body = b"\x00" + b"A" * 2_000_000 + b"\x00"
+    data = _strings(write("a.bin", body),
+                    config={**DEFAULT_CONFIG, "strings_max_length": 64,
+                            "read_chunk_bytes": 4096})
+    assert data["over_length"] == 1
+    assert data["ascii_count"] == 1
+    assert any("strings_max_length" in p for p in data["parse_errors"])
+
+
+def test_the_retained_list_is_capped_while_the_count_keeps_rising(write):
+    """The report still says how many there were, which is the fact a cap
+    would otherwise destroy."""
+    body = b"".join(b"\x00string%06d" % n for n in range(5000))
+    data = _strings(write("a.bin", body),
+                    config={**DEFAULT_CONFIG, "strings_max_retained": 100})
+    assert data["retained"] == 100
+    assert data["ascii_count"] == 5000
+    assert data["retained_truncated"] is True
+
+
+def test_extracted_strings_cannot_carry_a_terminal_escape(write):
+    """Printable ASCII is 0x20 to 0x7E, and ESC is 0x1B. Excluding the
+    control range at extraction time is what makes these safe to put in a
+    report without sanitising them afterwards.
+
+    Asserted against the strings themselves rather than against serialised
+    JSON. The first version of this test checked `"\\u001b" not in
+    json.dumps(...)`, which can never fail for any input: in Python source
+    that literal *is* the ESC character, and `json.dumps` always escapes it
+    to six characters. Adding ESC to the printable range left the whole suite
+    green.
+    """
+    body = b"\x00before\x1b[2Jafter-the-escape\x00" + b"\x00sep\x1b]0;title\x07done\x00"
+    data = _strings(write("a.bin", body),
+                    config={**DEFAULT_CONFIG, "strings_include_text": True})
+    everything = " ".join(data["text"])
+    assert "\x1b" not in everything and "\x07" not in everything
+    # and the escape really did split the run, rather than being carried
+    assert "before" in everything and "after-the-escape" in everything
+    assert "\x1b" not in json.dumps(analyse(write("b.bin", body)).to_dict())
+
+
+def test_window_statistics_match_an_independent_calculation(write):
+    """The entropy extractor kept one float per window until v0.4, which made
+    peak memory linear in sample size, and replaced it with a running maximum,
+    total and count. Nothing pinned any of the three: mutating `window_max` to
+    take the minimum, or the mean to zero, or the count to double, left the
+    whole suite green.
+    """
+    body = (b"\x00" * 8192 + os.urandom(8192) + b"A" * 8192
+            + os.urandom(8192) + b"\x11\x22" * 4096)
+    path = write("a.bin", body)
+    # `entropy_target_windows: 1` so the configured size is the window size:
+    # the sizing rule is max(minimum, min(configured, size // target)), and a
+    # target above one shrinks the window for a small sample.
+    config = {**DEFAULT_CONFIG, "entropy_window_bytes": 8192,
+              "entropy_target_windows": 1}
+    data = analyse(path, config=config).data["entropy"]
+
+    windows = [body[i:i + 8192] for i in range(0, len(body), 8192)]
+    expected = [shannon(w) for w in windows]
+    assert data["window_count"] == len(expected)
+    assert data["window_max"] == pytest.approx(max(expected), abs=1e-4)
+    assert data["window_mean"] == pytest.approx(sum(expected) / len(expected), abs=1e-4)
+    # the maximum is genuinely a maximum, not the last window scored
+    assert data["window_max"] > expected[-1]
+    assert data["window_max"] > min(expected)
+
+
+def test_a_short_final_window_is_still_scored(write):
+    """A tail of at least half a window is scored rather than discarded, which
+    is what makes `window_count` disagree with a plain division."""
+    config = {**DEFAULT_CONFIG, "entropy_window_bytes": 1024,
+              "entropy_target_windows": 1, "entropy_min_window_bytes": 256}
+    full = analyse(write("a.bin", b"A" * 2048), config=config).data["entropy"]
+    tail = analyse(write("b.bin", b"A" * 2048 + b"B" * 800), config=config).data["entropy"]
+    assert full["window_count"] == 2
+    assert tail["window_count"] == 3
+
+
+def test_the_retained_cap_is_shared_between_ascii_and_wide(write):
+    """Enforced per kind it was a ceiling of twice what the config asked for,
+    and the comment beside the default claimed the product as the worst case."""
+    body = b"".join(b"\x00ascii%05d" % n for n in range(500))
+    body += b"".join(b"\x00\x00" + ("wide%05d" % n).encode("utf-16-le")
+                     for n in range(500))
+    data = _strings(write("a.bin", body),
+                    config={**DEFAULT_CONFIG, "strings_max_retained": 40})
+    assert data["retained"] == 40
+
+
+def test_an_indicator_list_that_hit_its_ceiling_says_at_least(write):
+    """The finding used to state the capped length as a total: 128 URLs when
+    there were 400. A number nobody measured, in the sentence an analyst
+    reads."""
+    body = b"".join(b"\x00https://example.com/%05d" % n for n in range(400))
+    report = analyse(write("a.bin", body))
+    detail = next(f["detail"] for f in report.findings if f["key"] == "urls_present")
+    assert detail.startswith("at least 128 URL")
+    assert report.data["strings"]["indicators_truncated"] == ["urls"]
+    assert any("strings_max_iocs" in p
+               for p in report.data["strings"]["parse_errors"])
+    assert "incomplete:" in cli.render_human(report)
+
+
+def test_indicators_drawn_from_a_capped_subset_say_so(write):
+    """When the retained list is full the indicators come from a subset, and
+    a partial list that reads as a complete one is the failure this project
+    has now made in four extractors."""
+    body = b"".join(b"\x00filler%05d" % n for n in range(500)) + \
+        b"\x00https://example.com/late\x00"
+    report = analyse(write("a.bin", body),
+                     config={**DEFAULT_CONFIG, "strings_max_retained": 10})
+    problems = report.data["strings"]["parse_errors"]
+    assert any("were kept" in p and "subset" in p for p in problems)
+    assert "incomplete:" in cli.render_human(report)

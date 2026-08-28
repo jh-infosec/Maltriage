@@ -1,0 +1,19 @@
+# Line endings.
+#
+# Git on Windows checks files out with CRLF by default. For source and docs
+# that is harmless. For `.githooks/pre-commit` it is not: it is a shell script,
+# and a CRLF line ending after the shebang makes the interpreter path read as
+# `/bin/sh\r`, which does not exist. The hook then fails to start, and a guard
+# that cannot start is not protecting anything.
+#
+# So the repository stores LF throughout, and the two files that are executed
+# rather than read keep LF in the working tree as well.
+
+* text=auto
+
+.githooks/pre-commit    text eol=lf
+.githooks/pre-commit.py text eol=lf
+
+# YARA rules are parsed by libyara rather than by a text editor, and its
+# string literals should not acquire a stray carriage return.
+*.yar text eol=lf

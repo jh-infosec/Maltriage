@@ -1,0 +1,17 @@
+#!/bin/sh
+# Wrapper, so the hook runs on Windows as well as on Linux and macOS.
+#
+# Git for Windows executes hooks through its bundled sh, and a Python file
+# whose shebang says `python3` fails there: Windows installs `python`, or a
+# Store alias, and often nothing called `python3` at all. A hook that cannot
+# start is a hook that is not protecting anything, so this finds an
+# interpreter rather than assuming one -- and refuses the commit if it cannot
+# find any, because a guard that silently does not run is worse than no guard.
+for candidate in python3 python py; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        exec "$candidate" "$(dirname "$0")/pre-commit.py" "$@"
+    fi
+done
+echo "pre-commit: no Python interpreter found, so the magic-byte check could" >&2
+echo "  not run. Install Python, or override with ALLOW_BINARY=1 git commit" >&2
+exit 1

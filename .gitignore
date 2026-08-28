@@ -62,6 +62,8 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+*.whl
+.tox/
 
 # Editors and OS
 .idea/

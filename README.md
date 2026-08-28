@@ -51,6 +51,8 @@ It never claims a file is malicious. It ranks a queue.
   id, and trailing data. Standard library only
 - YARA matching against a bundled structural rule set and any rules you add,
   with per-rule-file compile isolation and offsets-only match context
+- ASCII and UTF-16 string extraction, with URL, email, IP, registry path,
+  mutex and absolute path indicators drawn from them
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
@@ -114,6 +116,11 @@ Git hooks are not installed by cloning. Enable it once per clone:
 git config core.hooksPath .githooks
 ```
 
+Git does not install hooks on clone, so this is per clone and per machine. The
+hook is a shell wrapper around `.githooks/pre-commit.py`: Git for Windows runs
+hooks through its bundled `sh`, where a shebang of `python3` often resolves to
+nothing, and a guard that cannot start is not a guard.
+
 It is dependency-free and project-agnostic, so it can be copied into any
 repository that must never receive a sample. `ALLOW_BINARY=1 git commit`
 overrides it when you genuinely mean to.
@@ -161,8 +168,8 @@ keep two lists in step, here is the shape, and the file has the detail.
 - **v0.1** extraction engine, hashing, format identification, entropy, CLI
 - **v0.2** executable structure: PE and ELF
 - **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
-- **v0.4** strings and IOCs, the shared secret engine, ATT&CK mapping, a
-  package layout, the findings envelope, optional reputation enrichment
+- **v0.4** a package layout and strings/IOCs (shipped); the shared secret
+  engine, ATT&CK mapping, the findings envelope and reputation enrichment
 - **v0.5** archive recursion, with the bomb, traversal and time bounds that
   make it safe, plus known-good filtering
 - **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
@@ -177,6 +184,17 @@ with claude-recon-agent and Shadowfax, and the findings envelope is the wire
 format the three of them speak.
 
 ---
+
+## Installing
+
+```bash
+pip install -e .            # the tool, with no hard dependencies
+pip install -e '.[all]'     # plus pefile, yara-python and numpy
+pip install -e '.[test]'    # plus pytest and pyelftools, to run the suite
+```
+
+Then `maltriage scan <path>`, or `python -m maltriage scan <path>` without
+installing.
 
 ## Running maltriage
 
@@ -247,3 +265,9 @@ nothing is reported rather than a number that looks like a measurement.
 Machine learning is planned for a later version. When it arrives it will
 score and rank, and it will never be the only thing standing between a sample
 and a verdict.
+
+---
+
+## License
+
+MIT. See `LICENSE`.
