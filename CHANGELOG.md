@@ -82,6 +82,69 @@ are not Windows binaries. It measures that the vocabulary does not fire on
 things that are not Windows binaries, which is a smaller claim. The real
 number is v0.7's job, and it is why nothing here reaches medium.
 
+### Reviewed
+
+Three independent adversarial passes over the API work found six defects that
+the tests and the measurement had both missed.
+
+**`display()` did not guarantee what its docstring claimed.** It was
+`SPELLING.get(canonical, canonical)`, so an unrecognised key came back
+verbatim -- ANSI escapes and all. The claim that no sample-derived text can
+reach a report through this module was therefore true of the two callers
+rather than of the function, and one refactor away from being false. It now
+raises on a key it did not write.
+
+**A token had a length ceiling, and a ceiling on a token is a hidden substring
+match.** `_TOKEN` capped a token at 64 characters, so `j` * 64 followed by
+`VirtualAllocEx@16` matched while `j` * 63 followed by the same text did not:
+the padding filled exactly one token and left the API name starting the next.
+Whether a name was found depended on its offset modulo 64, and the case that
+found it was the wrong one -- it is `PreloadLibraryPath` arriving by a
+different route. Tokens are now whole identifiers at any length.
+
+**`DnsQuery` could never have fired.** It is a macro; a binary imports
+`DnsQuery_A` or `DnsQuery_W`, and the suffix fallback only stripped a bare
+trailing letter. The fallback now also strips `_A` and `_W`. Registering both
+spellings instead would have been worse: two entries for one API, counting
+twice towards a threshold that means "two APIs".
+
+**U+212A KELVIN SIGN lowercases to `k`.** `Get\u212AeyState` canonicalised to
+`getkeystate`. Unreachable today because both callers decode through
+`ascii`/`replace` first, which makes it unreachable rather than harmless, and
+the POSIX vocabulary is going to arrive by another path. `_canonical` is now
+ASCII-only.
+
+**`categorise(view="Import")` silently selected the string index**, dropping
+every name the string view excludes. A wrong answer in the shape of a right
+one. Unknown views now raise.
+
+**Two tests were weaker than their docstrings.** `test_an_ordinal_import_
+matches_nothing` asserted that `"#42"` matches nothing, which no plausible bug
+could break -- it now drives an ordinal-only import through the real path
+instead. And the `CryptUnprotectData` test survived a reordering that tried
+the stripped form first, because nothing in the real vocabulary collides with
+`cryptunprotectdat`; it now pins the ordering against a vocabulary built to
+collide. The `", and N more"` sentence in a capability detail was executed on
+every run and asserted nowhere: an off-by-one in it passed the whole suite.
+
+### Known and not fixed
+
+**A wide string can steal the last byte of the string before it.** Where a
+narrow string's terminator sits directly against a UTF-16 string, the wide
+pattern reaches one byte too far left, because the last printable character of
+the ASCII run plus its NUL is itself a valid pair:
+`b"more\x00" + "LoadLibraryEx".encode("utf-16-le")` extracts as
+`eLoadLibraryEx`. The API name inside it then matches nothing and no cap
+fired, so the report looks complete.
+
+It predates this release and belongs to the string scanner rather than to
+anything reading from it -- widening the matcher to also try the run without
+its first character would be exactly the substring matching the vocabulary
+refuses, trading a silent miss for a silent false positive. Recorded in
+`architecture.md` and scheduled at v0.5. It reproduces in a single chunk and is
+identical at every chunk size, which is why the chunk-independence tests never
+saw it.
+
 ### Hardened
 
 The strings extractor is the first stream extractor added since v0.1.2, and

@@ -257,7 +257,17 @@ STRING_AMBIGUOUS = frozenset({
 # longer run that the scanner did not split. Pulling identifier-shaped tokens
 # out handles all three without the substring matching that would let
 # `LoadLibrary` fire on `PreloadLibraryPath`.
-_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,63}")
+#: A token is a whole identifier and is never cut short. It carried an upper
+#: bound of 64 characters until that bound was measured: `j` * 64 followed by
+#: `VirtualAllocEx@16` matched, and `j` * 63 followed by the same text did
+#: not, because the bound split the padding at exactly the point that left the
+#: API name starting a token of its own. Whether a name was found depended on
+#: its offset modulo 64, and the version that found it was the wrong one --
+#: that is the substring match on `PreloadLibraryPath` that this pattern
+#: exists to refuse, arriving by a different route. Unbounded, a run of
+#: identifier characters is one token whatever its length, and
+#: `api_max_token_scan_bytes` is the only length rule.
+_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
 
 #: A string that is nothing but one identifier. Its only token is itself, so
 #: the whole-string lookup has already decided it and tokenising is wasted.
@@ -267,10 +277,19 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 def _canonical(name: str) -> str:
     """Lowercase, with leading underscores removed.
 
+    ASCII only, and that is a rule rather than an assumption. `str.lower()` is
+    Unicode-aware: U+212A KELVIN SIGN lowercases to `k`, so `GetKeyState`
+    canonicalises to `getkeystate` and matches `GetKeyState`. Both callers
+    decode through `ascii`/`replace` before reaching here, so nothing can
+    exploit that today -- but the guard is one line and the POSIX vocabulary
+    this module is waiting on will arrive through a different path.
+
     Not the suffix strip: that is a fallback applied at lookup time only when
     the direct form misses, so a name that really ends in `A` or `W` is found
     before anything is removed from it.
     """
+    if not name.isascii():
+        return ""
     return name.lstrip("_").lower()
 
 
@@ -301,15 +320,28 @@ IMPORT_INDEX, STRING_INDEX, SPELLING = _build_index()
 #: Every canonical name, for callers that want the vocabulary itself.
 VOCABULARY = frozenset(IMPORT_INDEX)
 
+#: The two views, by name. A dict rather than a conditional so that an
+#: unrecognised view is a `KeyError` to be raised rather than an `else`
+#: branch to be silently taken.
+_VIEW_INDEX = {"import": IMPORT_INDEX, "string": STRING_INDEX}
+
 
 def _lookup(index: dict[str, tuple[str, ...]], candidate: str
             ) -> tuple[str | None, tuple[str, ...]]:
     """The index key `candidate` matched and its categories, or `(None, ())`.
 
-    Direct first, then one trailing `A` or `W` removed. `CreateFileW` misses
-    directly and hits as `createfile`; `CryptUnprotectData` hits directly and
-    never has its `a` taken off, which is why the strip is a fallback rather
-    than a normalisation applied on the way in.
+    Direct first, then one trailing `A` or `W` removed, then a trailing `_A`
+    or `_W`. `LoadLibraryW` misses directly and hits as `loadlibrary`;
+    `CryptUnprotectData` hits directly and never has its `a` taken off, which
+    is why the strip is a fallback rather than a normalisation applied on the
+    way in.
+
+    The underscored form is not a second guess at the same thing. `DnsQuery`
+    is a macro, and what a binary actually imports is `DnsQuery_A` or
+    `DnsQuery_W` -- so without this the registry's `DnsQuery` entry could
+    never fire on a real import table. Registering both spellings instead
+    would have been worse than useless: they would count as two names towards
+    a category threshold, and one API would clear a bar meant for two.
 
     The key is returned rather than the candidate because the caller records
     what it matched, and what it matched is a name from this file. Returning
@@ -319,12 +351,19 @@ def _lookup(index: dict[str, tuple[str, ...]], candidate: str
     hit = index.get(canonical)
     if hit is not None:
         return canonical, hit
-    if len(canonical) > 4 and canonical[-1] in ("a", "w"):
-        stripped = canonical[:-1]
+    for stripped in _without_suffix(canonical):
         hit = index.get(stripped)
         if hit is not None:
             return stripped, hit
     return None, ()
+
+
+def _without_suffix(canonical: str):
+    """The ANSI/wide spellings of `canonical`, longest suffix first."""
+    if len(canonical) > 5 and canonical[-2:] in ("_a", "_w"):
+        yield canonical[:-2]
+    if len(canonical) > 4 and canonical[-1] in ("a", "w"):
+        yield canonical[:-1]
 
 
 def match_symbol(name: str) -> tuple[str | None, tuple[str, ...]]:
@@ -391,13 +430,19 @@ def categorise(names: Iterable[str], view: str = "import") -> dict[str, list[str
 
     `view` selects which index decides membership, so a caller working from
     strings cannot credit a category through a name the string view excludes.
+    An unrecognised view raises rather than defaulting: `view="Import"` used
+    to select the string index and silently drop every ambiguous name, which
+    is a wrong answer wearing the shape of a right one.
 
     The output carries `display` spellings rather than canonical keys because
     it lands in `report.data` and is read by a person. The canonical form is
     an implementation detail of the lookup and `virtualallocex` is not what
     the API is called.
     """
-    index = IMPORT_INDEX if view == "import" else STRING_INDEX
+    if view not in _VIEW_INDEX:
+        raise ValueError(
+            f"unknown view {view!r}, expected one of {sorted(_VIEW_INDEX)}")
+    index = _VIEW_INDEX[view]
     grouped: dict[str, set[str]] = {}
     for name in names:
         for category in index.get(_canonical(name), ()):
@@ -453,10 +498,19 @@ def capability_findings(extractor: str, capabilities: dict[str, list[str]],
 def display(canonical: str) -> str:
     """The registry's spelling of a canonical name, for a finding's detail.
 
-    Findings quote the vocabulary's spelling rather than the sample's. The
-    name came from a fixed list in this file, so what reaches a report is text
-    this project wrote -- there is no path by which a sample's own bytes
-    arrive in a finding through this module, and nothing here needs
-    `safe_text` to make that true.
+    Findings quote the vocabulary's spelling rather than the sample's, so what
+    reaches a report is text this project wrote. That is the reason a
+    capability list needs no `safe_text` and no length cap, and it is a
+    guarantee rather than a convention: an unknown key raises instead of being
+    echoed back.
+
+    It used to be `SPELLING.get(canonical, canonical)`, which made the
+    guarantee true only because every caller happened to pass a key that came
+    out of `_lookup`. Handed anything else it returned it verbatim -- ANSI
+    escapes included -- so the docstring above it was a claim about the
+    callers rather than about this function, and one refactor away from being
+    false. A `KeyError` here is a bug in this module, never a hostile sample:
+    the pipeline isolates it, records it under `<extractor>.findings`, and
+    keeps the extracted data.
     """
-    return SPELLING.get(canonical, canonical)
+    return SPELLING[canonical]

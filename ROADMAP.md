@@ -234,6 +234,7 @@ handled before the feature is safe to run.
 - [ ] Nested reports linked to their parent
 - [ ] Known-good hash filtering, which reports what it suppressed
 - [ ] Bounded parse time
+- [ ] Wide strings that absorb the preceding string's last byte
 
 **Path locking is the third use of a primitive that already exists twice**, in
 `loganalysis._safe_path` and in the wordlist roots landing in

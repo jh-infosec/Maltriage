@@ -2987,12 +2987,13 @@ def _api_details(report, extractor=None):
 
 
 def test_no_registry_name_is_another_one_wearing_an_ansi_suffix():
-    """The lookup falls back to stripping one trailing `A` or `W`, which is
-    only unambiguous while no two names differ by exactly that letter. If
+    """The lookup falls back to stripping a trailing `A`, `W`, `_A` or `_W`,
+    which is only unambiguous while no two names differ by exactly that. If
     `Foo` and `FooW` were both real APIs in different categories, the fallback
     would silently credit the wrong one."""
-    collisions = [name for name in apis.VOCABULARY
-                  if name[-1] in ("a", "w") and name[:-1] in apis.VOCABULARY]
+    collisions = [name for name in sorted(apis.VOCABULARY)
+                  for stripped in apis._without_suffix(name)
+                  if stripped in apis.VOCABULARY]
     assert collisions == []
 
 
@@ -3000,9 +3001,72 @@ def test_a_name_that_really_ends_in_a_is_not_stripped():
     """The bug this ordering exists to prevent: strip first and
     `CryptUnprotectData` becomes `cryptunprotectdat`, which matches nothing,
     so the one credential-access API most worth catching is the one the
-    matcher loses."""
+    matcher loses.
+
+    Asserting only that the real name resolves was not enough. It survived a
+    reordering that tried the stripped form first and fell back to the direct
+    one, because no real entry collides with `cryptunprotectdat` -- the test
+    passed while the ordering the docstring describes was gone. A vocabulary
+    built to collide is what actually pins it."""
     assert apis.match_symbol("CryptUnprotectData") == (
         "cryptunprotectdata", ("credential_access",))
+
+    colliding = {"cryptunprotectdata": ("credential_access",),
+                 "cryptunprotectdat": ("network",)}
+    assert apis._lookup(colliding, "CryptUnprotectData") == (
+        "cryptunprotectdata", ("credential_access",))
+
+
+def test_the_underscored_ansi_spelling_reaches_the_entry():
+    """`DnsQuery` is a macro. What a binary imports is `DnsQuery_A` or
+    `DnsQuery_W`, so without the underscored fallback the registry's entry
+    could never fire on a real import table -- and registering both spellings
+    instead would let one API count as two names towards a threshold meant
+    for two APIs."""
+    for spelling in ("DnsQuery_A", "DnsQuery_W", "DnsQuery"):
+        assert apis.match_symbol(spelling) == ("dnsquery", ("network",)), spelling
+
+
+def test_a_name_is_found_at_any_offset_in_a_padded_token():
+    """The token pattern carried a 64-character ceiling, and a ceiling on a
+    token is a hidden substring match: `j` * 64 then `VirtualAllocEx@16`
+    matched because the padding filled exactly one token and left the API
+    name starting the next, while `j` * 63 did not. Whether a name was found
+    depended on its offset modulo 64, and the version that found it was the
+    one that should not have."""
+    found = {pad: apis.match_text("j" * pad + "VirtualAllocEx@16")
+             for pad in (62, 63, 64, 65, 100)}
+    assert all(result == [] for result in found.values()), found
+    assert apis.match_text("_VirtualAllocEx@24") == [
+        ("virtualallocex", ("process_injection",))]
+
+
+def test_a_non_ascii_lookalike_does_not_reach_an_entry():
+    """`str.lower()` is Unicode-aware and U+212A KELVIN SIGN lowercases to
+    `k`, so `Get\u212AeyState` canonicalised to `getkeystate`. Both callers
+    decode through ascii/replace today, which makes this unreachable rather
+    than harmless."""
+    assert apis.match_symbol("Get\u212AeyState") == (None, ())
+    assert apis.match_symbol("GetKeyState") == ("getkeystate", ("surveillance",))
+
+
+def test_display_refuses_a_name_it_did_not_write():
+    """The module's safety claim is that nothing a sample writes can reach a
+    report through it. `SPELLING.get(canonical, canonical)` made that true of
+    the callers rather than of the function: handed anything else it returned
+    it verbatim, ANSI escapes included."""
+    with pytest.raises(KeyError):
+        apis.display("\x1b[2J\x1b[H  findings (info max):")
+    assert apis.display("virtualallocex") == "VirtualAllocEx"
+
+
+def test_an_unrecognised_view_raises_rather_than_choosing_one():
+    """`view="Import"` selected the string index and silently dropped every
+    ambiguous name, which is a wrong answer in the shape of a right one."""
+    with pytest.raises(ValueError):
+        apis.categorise(["sleep"], view="Import")
+    assert apis.categorise(["sleep"], view="import") == {"anti_analysis": ["Sleep"]}
+    assert apis.categorise(["sleep"], view="string") == {}
 
 
 def test_the_ansi_and_wide_spellings_reach_the_same_entry():
@@ -3061,8 +3125,33 @@ def test_a_run_longer_than_the_token_limit_is_not_taken_apart():
         ("virtualallocex", ("process_injection",))]
 
 
-def test_an_ordinal_import_matches_nothing():
-    assert apis.match_symbol("#42") == (None, ())
+@needs_pefile
+def test_an_ordinal_import_is_listed_and_claims_no_capability(write):
+    """An import by ordinal has no name to match. `apis.match_symbol("#42")`
+    returning nothing proved almost nothing -- no plausible bug makes a string
+    sharing no substring with the vocabulary match -- so this drives the real
+    path instead: the symbol has to reach `imports` and not `api_names`."""
+    class _Imported:
+        name, ordinal = None, 42
+
+    class _Entry:
+        dll, imports = b"kernel32.dll", [_Imported()]
+
+    class _Fake:
+        class OPTIONAL_HEADER:
+            DATA_DIRECTORY = [type("D", (), {"VirtualAddress": 0x1000})()] * 16
+        DIRECTORY_ENTRY_IMPORT = [_Entry()]
+
+        def parse_data_directories(self, directories=None):
+            pass
+
+        def get_imphash(self):
+            return "d41d8cd98f00b204e9800998ecf8427e"
+
+    data = PEExtractor()._imports(_Fake(), DEFAULT_CONFIG)
+    assert data["imports"]["kernel32.dll"] == ["#42"]
+    assert data["import_count"] == 1
+    assert data["api_names"] == [] and data["api_capabilities"] == {}
 
 
 def test_a_name_in_two_categories_is_reported_under_both():
@@ -3095,6 +3184,14 @@ def test_a_capability_finding_never_gates_a_build(write):
     assert len(_api_details(report)) == len(apis.CAPABILITIES)
     assert all(f["severity"] in ("info", "low") for f in report.findings
                if f["key"] == apis.FINDING_KEY)
+
+    # Every category here holds more than six names, so every detail takes the
+    # truncated branch. Nothing looked at the sentence it produces, and an
+    # off-by-one in it survived the whole suite.
+    injection = next(d for d in _api_details(report) if "process injection" in d)
+    listed = len(apis.CAPABILITIES["process_injection"]["names"])
+    assert injection.startswith(f"{listed} process injection")
+    assert injection.endswith(f", and {listed - 6} more")
 
 
 def test_a_finding_quotes_the_registry_and_never_the_sample(write):

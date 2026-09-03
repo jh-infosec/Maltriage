@@ -245,11 +245,17 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-Expect **224 passed, 39 skipped**. The 39 need pefile, yara-python, ssdeep or
-numpy, and skip rather than fail when those are absent — the same rule the
-extractors follow. `pip install -e '.[all]'` runs all 263, though `ssdeep`
-needs libfuzzy present and will not build on a stock Windows box; `.[pe,yara,fast]`
-gets everything except the fuzzy-hash tests.
+The suite is **290 tests**, and how many run depends on which optional
+dependencies are present. A test that needs one skips rather than fails when
+it is missing — the same rule the extractors follow. Two anchors, both
+verified: with everything installed, **290 passed, 0 skipped**; with neither
+pefile nor yara-python, **196 passed, 94 skipped**. Anything in between is
+normal and the skip reasons say which dependency is absent (`pytest -rs`
+lists them).
+
+`pip install -e '.[all]'` is the full run, though `ssdeep` needs libfuzzy
+present and will not build on a stock Windows box; `.[pe,yara,fast]` gets
+everything except the fuzzy-hash tests.
 
 `python -m pytest` rather than `pytest`, because a `pip install -e` into a
 Python that is not on `PATH` puts the console script somewhere `PATH` does not
