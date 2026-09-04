@@ -51,6 +51,7 @@ from typing import Any
 from .models import SEVERITY_RANK, mk_finding
 from .config import config_bool, config_int, config_list, config_ratio
 from . import apis
+from . import attack
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +231,13 @@ class FileTypeExtractor(HeaderExtractor):
                 evidence=[{"name": "family", "value": data["family"]},
                           {"name": "extension", "value": data["extension"]},
                           {"name": "magic_offset", "value": data.get("magic_offset", 0)}],
-                discriminator=data["family"]))
+                discriminator=data["family"],
+                # The only finding maltriage maps on its own account, and it
+                # qualifies for the same reason it is this project's only
+                # `high`: there is no benign reason for a PE to be called
+                # `invoice.pdf`. `attack.py` records the findings that were
+                # considered and refused.
+                mitre=[attack.MASQUERADE_FILE_TYPE]))
         return out
 
 
@@ -2693,6 +2700,18 @@ class YaraExtractor(RandomAccessExtractor):
             "match_count": len(matches),
             "matches_truncated": len(matches) > limit,
         }
+
+        # A rule that declares an ATT&CK id this project does not recognise is
+        # a rule whose author should be told. Dropping it silently would leave
+        # the author believing the mapping works, which is the failure this
+        # channel exists for -- and a mistyped id in somebody's rule set is
+        # far likelier than a deliberate one.
+        for match in matches[:limit]:
+            for technique in match.get("mitre_unknown") or []:
+                problems.append(
+                    f"{match['rule']}: mitre '{safe_text(technique, 64)}' is not a "
+                    "technique this build knows, so it was not attached")
+
         if problems:
             data["parse_errors"] = problems
         return data
@@ -2718,6 +2737,7 @@ class YaraExtractor(RandomAccessExtractor):
                 # whole job is to say that nothing was left out.
                 "complete": complete and len(instances) <= limit,
             })
+        declared = self._techniques(meta)
         return {
             "rule": match.rule,
             "namespace": namespace,
@@ -2726,7 +2746,35 @@ class YaraExtractor(RandomAccessExtractor):
             "description": meta.get("description"),
             "meta": meta,
             "strings": strings,
+            "mitre": declared["mitre"],
+            "mitre_unknown": declared["unknown"],
         }
+
+    @staticmethod
+    def _techniques(meta: dict[str, Any]) -> dict[str, list[str]]:
+        """ATT&CK ids a rule declared, split into recognised and not.
+
+        A rule is a much narrower statement than a finding key, so a rule
+        author can be specific where the registry cannot -- which is what
+        makes this the extensible half of the mapping, in the same way the
+        rule set itself is extensible.
+
+        Unrecognised ids are kept separately rather than dropped, because a
+        rules directory is somebody else's input and a rule declaring an id
+        this project does not know is a rule whose author should be told. They
+        surface in `parse_errors`.
+        """
+        raw = meta.get("mitre")
+        if isinstance(raw, str):
+            # YARA meta values are scalars, so a rule declaring more than one
+            # technique writes them comma separated.
+            candidates = [part.strip() for part in raw.split(",") if part.strip()]
+        elif isinstance(raw, (list, tuple)):
+            candidates = list(raw)
+        else:
+            candidates = []
+        return {"mitre": attack.validate(candidates),
+                "unknown": attack.unknown(candidates)}
 
     @staticmethod
     def _severity(meta: dict[str, Any], config: dict[str, Any]) -> str:
@@ -2758,6 +2806,7 @@ class YaraExtractor(RandomAccessExtractor):
                 detail += f" [{', '.join(tags)}]"
             out.append(mk_finding(self.name, "yara_match",
                 f"{match['rule']}: {detail}", match["severity"],
+                mitre=match.get("mitre") or None,
                 # Offsets and counts. Never `matched_data`: the rule that
                 # holds everywhere else in this project holds hardest here,
                 # because a rules directory is user-extensible and the person

@@ -50,6 +50,14 @@ solve.
   everywhere else the envelope emits an empty evidence list, and the spec says
   what that means -- the emitter has not been taught this key yet, not that
   there was nothing to say
+- `attack.py`, the shared ATT&CK registry: technique ids with their names and
+  tactics, and the rule for when one may be attached. A registry rather than a
+  mapping -- it says what `T1036.008` is called, not which findings earn it
+- `mitre`, a third optional argument to `mk_finding`, validated against the
+  registry so an id that does not exist cannot reach a report by way of a typo
+- A `mitre` key in a YARA rule's `meta`, comma separated. An id this build does
+  not recognise is not attached and is reported in `parse_errors` against the
+  rule name
 
 ### Changed
 
@@ -93,6 +101,42 @@ What this does not measure is the Windows false positive rate, because these
 are not Windows binaries. It measures that the vocabulary does not fire on
 things that are not Windows binaries, which is a smaller claim. The real
 number is v0.7's job, and it is why nothing here reaches medium.
+
+### The ATT&CK mapping is mostly refusals
+
+Applied honestly to thirty-eight finding keys, the near-unambiguous rule
+disqualified thirty-seven of them. `extension_mismatch` carries `T1036.008`
+and nothing else carries anything.
+
+That is the feature rather than a shortfall, and the refusals are worth the
+space because each is a case somebody will reflexively want to map:
+
+- **`known_packer_section`, `writable_executable_section`,
+  `virtual_size_mismatch`, `no_imports`** are the shape of a packer.
+  `T1027.002` describes software packing accurately, which is exactly the
+  problem -- the technique is right and the inference is not, because packing
+  is the normal state of most installers and UPX is a legitimate tool.
+- **`registry_persistence_path`** looks like `T1547.001`, and an installer
+  writing a Run key is an installer. It is already held at `low` for that
+  reason and a technique id would undo the restraint.
+- **`implausible_timestamp`** is not `T1070.006`. Timestomping is about
+  filesystem timestamps, and a zero PE compile timestamp is what a
+  reproducible build produces on purpose.
+- **`api_capability`** is refused despite `apis.py` carrying a technique per
+  capability. A capability inferred from names present in a binary is not
+  evidence the binary used them.
+
+`extension_mismatch` qualifies for the same reason it is this project's only
+`high`: there is no benign reason for a PE to be called `invoice.pdf`.
+
+**The extensible half is a rule declaring its own technique**, because a rule
+is a much narrower statement than a finding key. **None of the bundled rules
+declares one**, and a test enforces that rather than leaving it to drift: they
+describe the *shape* of a file and ATT&CK describes *behaviour*, and shape does
+not survive the benign case. `embedded_pe_header` fires on any ZIP, CAB or MSI
+carrying an executable, which is what those formats are for.
+`base64_encoded_pe_header` fires on a MIME email attachment, because that is
+what MIME does to attachments.
 
 ### Decided in the envelope
 

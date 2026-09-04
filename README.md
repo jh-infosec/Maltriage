@@ -60,6 +60,9 @@ It never claims a file is malicious. It ranks a queue.
 - Findings envelope emit, an interchange format that carries findings and what
   could not be run, and deliberately carries no path, no filename and no
   extraction output
+- ATT&CK technique mapping, on one finding key and on any rule that declares
+  one. Deliberately sparse: a technique id is a claim about adversary
+  behaviour, and most of what a static triage tool sees is merely unusual
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
@@ -175,8 +178,8 @@ keep two lists in step, here is the shape, and the file has the detail.
 - **v0.1** extraction engine, hashing, format identification, entropy, CLI
 - **v0.2** executable structure: PE and ELF
 - **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
-- **v0.4** a package layout, strings/IOCs, API capability detection and the
-  findings envelope (shipped); the shared secret engine, ATT&CK mapping and
+- **v0.4** a package layout, strings/IOCs, API capability detection, the
+  findings envelope and ATT&CK mapping (shipped); the shared secret engine and
   reputation enrichment
 - **v0.5** archive recursion, with the bomb, traversal and time bounds that
   make it safe, plus known-good filtering

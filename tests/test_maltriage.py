@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from maltriage import apis
+from maltriage import attack
 from maltriage import envelope as envelope_module
 from maltriage.envelope import to_envelope
 from maltriage import cli
@@ -40,6 +41,7 @@ from maltriage.extractors import (
     FuzzyHashExtractor,
     HashExtractor,
     PEExtractor,
+    YaraExtractor,
     RandomAccessExtractor,
     StreamExtractor,
     byte_counts,
@@ -300,7 +302,7 @@ def test_failing_header_extractor_does_not_lose_other_results(write):
 def test_report_serialises_to_json(write):
     report = analyse(write("invoice.pdf", b"MZ" + b"\x00" * 100))
     parsed = json.loads(report.to_json())
-    assert parsed["schema_version"] == "1.5"
+    assert parsed["schema_version"] == "1.6"
     assert parsed["severity"] == "high"
 
 
@@ -3490,12 +3492,11 @@ def test_a_bounded_key_set_keeps_its_detail_in_the_discriminator(write):
     assert all(f["key"] == apis.FINDING_KEY for f in capabilities)
 
 
-def test_nothing_emits_a_mitre_technique_yet(write):
-    """The registry records a technique per capability as reference data. A
-    technique id is a claim about adversary behaviour, and attaching one to a
-    finding that is merely unusual inflates it -- `mitre` is the field a
-    consumer is most likely to aggregate without reading the finding under
-    it."""
+def test_a_capability_never_earns_a_technique(write):
+    """The registry records a technique per capability as reference data and
+    does not emit it. A capability inferred from names present in a binary is
+    not evidence the binary used them, and `mitre` is the field a consumer is
+    most likely to aggregate without reading the finding under it."""
     assert all("mitre" in spec for spec in apis.CAPABILITIES.values())
     body = b"\x00VirtualAllocEx\x00WriteProcessMemory\x00"
     envelope = _envelope(write("a.bin", body))
@@ -3520,3 +3521,105 @@ def test_the_cli_writes_one_envelope_per_file(write, tmp_path, capsys):
     assert all(line["envelope_version"] == envelope_module.ENVELOPE_VERSION
                for line in lines)
     assert len({line["subject"]["id"] for line in lines}) == 2
+
+
+# ATT&CK mapping
+
+def test_the_one_finding_that_earns_a_technique(write):
+    """`extension_mismatch` qualifies for the same reason it is this
+    project's only `high`: there is no benign reason for a PE to be called
+    `invoice.pdf`."""
+    envelope = _envelope(write("invoice.pdf", b"MZ" + b"\x00" * 512))
+    mismatch = next(f for f in envelope["findings"] if f["key"] == "extension_mismatch")
+    assert mismatch["mitre"] == [attack.MASQUERADE_FILE_TYPE]
+    assert attack.describe(attack.MASQUERADE_FILE_TYPE)["name"] == "Masquerade File Type"
+
+
+def test_a_technique_id_the_registry_does_not_know_cannot_reach_a_report():
+    """Validated where the finding is built, not at the emitter. A technique
+    id is the field a consumer is most likely to aggregate without reading the
+    finding underneath it, so a typo must not be publishable."""
+    with pytest.raises(ValueError):
+        mk_finding("x", "k", "d", "info", mitre=["T9999"])
+    with pytest.raises(ValueError):
+        mk_finding("x", "k", "d", "info", mitre=["T1036.008", "not-a-technique"])
+    assert mk_finding("x", "k", "d", "info", mitre=["T1036.008"])["mitre"] == ["T1036.008"]
+
+
+def test_a_finding_without_a_technique_has_no_mitre_key():
+    """Absent, not empty. An empty list reads as "we looked and there is no
+    technique", which is a different claim from "this finding does not make
+    one"."""
+    assert "mitre" not in mk_finding("x", "k", "d", "info")
+    assert "mitre" not in mk_finding("x", "k", "d", "info", mitre=[])
+
+
+def test_the_packer_findings_are_deliberately_unmapped(write):
+    """The refusals are the substance of this feature. `T1027.002` describes
+    software packing accurately, which is exactly the problem: the technique
+    is right and the inference is not, because packing is the normal state of
+    most installers."""
+    report = analyse(write("a.exe", build_pe(
+        sections=[(".text", SECTION_CODE, b"\x90" * 0x180),
+                  ("UPX0", SECTION_RWX, os.urandom(0x400))])))
+    refused = {"known_packer_section", "writable_executable_section",
+               "virtual_size_mismatch", "no_imports", "section_entropy_high",
+               "implausible_timestamp", "registry_persistence_path"}
+    for finding in report.findings:
+        if finding["key"] in refused:
+            assert "mitre" not in finding, finding["key"]
+
+
+def test_a_rule_may_declare_its_own_technique(tmp_path, write):
+    """A rule is a much narrower statement than a finding key, so a rule
+    author can be specific where the registry cannot. This is the extensible
+    half of the mapping."""
+    meta = {"severity": "low", "mitre": "T1204.002, T1059.005"}
+    assert YaraExtractor._techniques(meta) == {
+        "mitre": ["T1204.002", "T1059.005"], "unknown": []}
+    assert YaraExtractor._techniques({}) == {"mitre": [], "unknown": []}
+    assert YaraExtractor._techniques({"mitre": "T1204.002"})["mitre"] == ["T1204.002"]
+
+
+def test_a_rule_declaring_an_unknown_technique_is_told_rather_than_ignored():
+    """A rules directory is somebody else's input, and a mistyped id is far
+    likelier than a deliberate one. Dropping it silently would leave the
+    author believing the mapping works."""
+    result = YaraExtractor._techniques({"mitre": "T1204.002, T9999, nonsense"})
+    assert result["mitre"] == ["T1204.002"]
+    assert result["unknown"] == ["T9999", "nonsense"]
+
+
+def test_a_duplicate_technique_is_named_once():
+    assert YaraExtractor._techniques({"mitre": "T1055, T1055"})["mitre"] == ["T1055"]
+    assert mk_finding("x", "k", "d", "info",
+                      mitre=["T1055", "T1055"])["mitre"] == ["T1055"]
+
+
+def test_no_bundled_rule_declares_a_technique():
+    """Deliberate, not an oversight. Every bundled rule describes the shape of
+    a file and ATT&CK describes behaviour, so none of them survives the benign
+    case: `embedded_pe_header` fires on any ZIP carrying an executable, and
+    `base64_encoded_pe_header` fires on a MIME attachment.
+
+    This test is what makes that a decision rather than a thing nobody got
+    round to. Adding `mitre` to a bundled rule should require deleting it."""
+    source = (Path(extractors_module.__file__).parent / "rules"
+              / "structural.yar").read_text()
+    assert "mitre" not in source
+
+
+def test_every_technique_the_api_registry_names_is_a_real_one():
+    """`apis.py` records a technique per capability as reference data. It is
+    not emitted, so nothing else would ever catch a typo in it."""
+    for category, spec in apis.CAPABILITIES.items():
+        assert attack.is_known(spec["mitre"]), (category, spec["mitre"])
+
+
+def test_the_registry_carries_a_name_and_a_tactic_for_everything():
+    """A consumer should not have to resolve an id against an external source
+    to render it."""
+    for technique in attack.TECHNIQUES:
+        described = attack.describe(technique)
+        assert described["id"] == technique
+        assert described["name"] and described["tactic"]

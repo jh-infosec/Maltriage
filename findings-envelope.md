@@ -306,10 +306,24 @@ reading the finding underneath it. A writable executable section is consistent
 with packing; packing is the normal state of most installers; `T1055` on that
 finding would be a lie told at scale.
 
-**maltriage at v0.4 emits `mitre` on nothing.** The capability registry in
-`apis.py` records a technique per category as reference data and does not emit
-it. That is the correct state for a tool that ranks a queue and does not claim
-a file is malicious.
+**maltriage emits `mitre` on one finding key and on rules that ask for it.**
+
+`extension_mismatch` carries `T1036.008`, and it qualifies for the same reason
+it is the tool's only `high`: there is no benign reason for a PE to be called
+`invoice.pdf`. Every other key was considered and refused, and the refusals are
+recorded in `maltriage/attack.py` because each is a case somebody will
+reflexively want to map -- packer sections, writable executable sections, Run
+keys, zero compile timestamps, inferred capabilities.
+
+A YARA rule may declare techniques in its `meta`. A rule is a much narrower
+statement than a finding key, so a rule author can be specific where a
+per-key table cannot. None of the bundled rules does: they describe the shape
+of a file, ATT&CK describes behaviour, and shape does not survive the benign
+case -- `embedded_pe_header` fires on any ZIP carrying an executable.
+
+An id that is not in the registry never reaches an envelope. `mk_finding`
+raises on one, and a rule that declares one has it reported against the rule
+name instead.
 
 
 ## What a consumer may assume

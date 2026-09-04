@@ -138,10 +138,12 @@ def _finding(finding: dict[str, Any], report: Report) -> dict[str, Any]:
         # This is what makes a bounded key set survivable: the detail that
         # would otherwise want its own key goes here.
         out["discriminator"] = discriminator
-    # `mitre` is deliberately never set at v0.4. The registry in `apis.py`
-    # records a technique per capability as reference data, and emitting it
-    # would attach a claim about adversary behaviour to a finding that is
-    # merely unusual. Nothing here is near-unambiguous enough.
+    # Carried when the finding earned one, absent when it did not, and absent
+    # is the common case: exactly one finding key maps on maltriage's own
+    # account. `attack.py` records the rule and the findings it disqualifies,
+    # and `mk_finding` has already refused any id the registry does not know.
+    if finding.get("mitre"):
+        out["mitre"] = list(finding["mitre"])
     return out
 
 

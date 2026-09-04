@@ -117,7 +117,7 @@ stays optional and off by default.
 - [x] Suspicious API name detection
 - [x] Package layout, so a shared module has one home
 - [ ] Secret engine: patterns, entropy and context (shared)
-- [ ] ATT&CK technique mapping from the shared registry (shared)
+- [x] ATT&CK technique mapping from the shared registry (shared)
 - [x] Findings envelope emit, provisional (shared)
 - [ ] Optional reputation enrichment by hash, cached and rate limited
 - [ ] Offline mode
@@ -181,11 +181,27 @@ is stored, piped and shared, and putting a recovered credential in one turns
 a detection into a leak.
 
 **ATT&CK mapping leaves `mitre` absent unless the finding is
-near-unambiguous.** maltriage does not claim a file is malicious; it ranks a
+near-unambiguous, and applied honestly that disqualified all but one key.** maltriage does not claim a file is malicious; it ranks a
 queue. A technique id is a claim about adversary behaviour, and attaching one
 to a finding that is merely unusual inflates it. A writable executable
 section is consistent with packing, and packing is the normal state of most
 installers.
+
+Shipped, and the refusals turned out to be the substance. `extension_mismatch`
+carries `T1036.008` and nothing else carries anything, because every other
+candidate has a benign case that the technique describes just as well:
+`known_packer_section` is `T1027.002` and UPX is a legitimate tool,
+`registry_persistence_path` is `T1547.001` and an installer writes a Run key,
+`implausible_timestamp` is not `T1070.006` at all because a zero compile
+timestamp is what a reproducible build produces on purpose.
+
+The extensible half is a `mitre` key in a YARA rule's `meta`, validated
+against the registry, with an unrecognised id reported against the rule name
+rather than dropped. **None of the bundled rules declares one**, and a test
+enforces that: they describe the shape of a file while ATT&CK describes
+behaviour, and `embedded_pe_header` fires on any ZIP carrying an executable.
+A rule narrow enough to name one family's configuration block is where a
+technique is earned.
 
 **The findings envelope emits here rather than at v1.0.** See
 `findings-envelope.md`, which until v0.4 was a filename this roadmap pointed

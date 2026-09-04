@@ -266,6 +266,22 @@ the one whose interesting symbol sits past entry 256. A capability that
 depended on how long a list was allowed to get would not be a fact about the
 file.
 
+### attack.py
+
+The shared ATT&CK technique registry: ids, their names and tactics, and the
+rule for when maltriage may attach one.
+
+A registry rather than a mapping. It says what `T1036.008` is called; it does
+not say which findings earn it, because that decision belongs where the
+finding is constructed. What it does enforce is that an id which is not in the
+table cannot reach a report -- `mk_finding` raises on one, and a YARA rule that
+declares one has it reported against the rule name.
+
+The module's docstring carries the list of findings that were considered and
+refused, which is most of them. That list is the useful part: it is where
+somebody proposing to map `writable_executable_section` to `T1055` finds out
+why not.
+
 ### envelope.py
 
 Serialises a `Report` into the interchange format in `findings-envelope.md`.

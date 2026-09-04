@@ -116,3 +116,41 @@ cause.
 in-process and no malicious sample is committed. If a rule cannot be
 demonstrated against something `sample_data.py` can build, that is a reason to
 question the rule.
+
+
+## Declaring an ATT&CK technique
+
+A rule may name techniques in its `meta`, comma separated:
+
+```
+meta:
+    severity = "medium"
+    mitre = "T1204.002, T1059.005"
+```
+
+They reach the finding and the findings envelope. An id this build does not
+recognise is **not** attached and is reported in `parse_errors` against the
+rule name, so a typo tells you rather than silently producing a rule that
+looks mapped and is not. `maltriage/attack.py` holds the ids this build knows.
+
+**The bar is near-unambiguous, and it is higher than it sounds.** A technique
+id is a claim about adversary behaviour, and it is the field a consumer is
+most likely to aggregate without reading the finding underneath it. A
+dashboard reporting four hundred hits on a technique that turns out to mean
+four hundred installers is worse than one with no ATT&CK column at all.
+
+**None of the bundled rules declares a technique**, and that is deliberate
+rather than an oversight. Every rule here describes the *shape* of a file, and
+ATT&CK describes *behaviour*, so the mapping does not survive contact with the
+benign cases:
+
+- `embedded_pe_header` fires on any ZIP, CAB or MSI carrying an executable,
+  which is what those formats are for.
+- `base64_encoded_pe_header` fires on a MIME email attachment, because that is
+  what MIME does to attachments.
+- `pdf_with_automatic_action` and `ole_document_with_vba_project` fire on
+  ordinary forms and ordinary macros, which is why both are already `low`.
+
+A rule you write may well be narrower than any of these -- a rule matching one
+family's configuration block is a much more specific statement than "there is
+a PE header in here" -- and narrow is exactly where a technique id is earned.

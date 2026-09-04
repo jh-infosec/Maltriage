@@ -15,7 +15,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.5"
+from . import attack
+
+SCHEMA_VERSION = "1.6"
 
 SEVERITIES = ("info", "low", "medium", "high")
 SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
@@ -23,7 +25,8 @@ SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 
 def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
                evidence: list[dict[str, Any]] | None = None,
-               discriminator: str | None = None) -> dict[str, Any]:
+               discriminator: str | None = None,
+               mitre: list[str] | None = None) -> dict[str, Any]:
     """Build a single finding. Mirrors the alert constructor in Shadowfax.
 
     `evidence` and `discriminator` are optional and are omitted from the
@@ -46,6 +49,14 @@ def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
     `discriminator` says which instance of `key` this is -- the rule name, the
     capability category, the section. It is what lets the key set stay bounded
     while the findings underneath it are not.
+
+    `mitre` is a list of ATT&CK technique ids, and every one must be in
+    `attack.TECHNIQUES` or this raises. Validating here rather than at the
+    emitter is the point: a technique id is the field a consumer is most
+    likely to aggregate without reading the finding underneath it, so an id
+    that does not exist must not be able to reach a report by way of a typo.
+    Whether a finding *deserves* a technique is a separate question and a much
+    harder one -- `attack.py` records the rule and the findings it disqualifies.
     """
     if severity not in SEVERITY_RANK:
         raise ValueError(f"unknown severity '{severity}', expected one of {SEVERITIES}")
@@ -59,6 +70,12 @@ def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
         finding["evidence"] = list(evidence)
     if discriminator:
         finding["discriminator"] = discriminator
+    if mitre:
+        unknown = [t for t in mitre if not attack.is_known(t)]
+        if unknown:
+            raise ValueError(
+                f"unknown ATT&CK technique(s) {unknown}, not in attack.TECHNIQUES")
+        finding["mitre"] = list(dict.fromkeys(mitre))
     return finding
 
 
