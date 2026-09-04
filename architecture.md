@@ -266,6 +266,25 @@ the one whose interesting symbol sits past entry 256. A capability that
 depended on how long a list was allowed to get would not be a fact about the
 file.
 
+### envelope.py
+
+Serialises a `Report` into the interchange format in `findings-envelope.md`.
+Lossy on purpose: `report.data` does not cross, and neither does
+`report.path`.
+
+The only thing worth restating here is why `report.errors` does cross, as
+`incomplete`. Every other output this project produces has a channel for what
+could not be run, because a report that looks clean while omitting the
+analysis nobody performed is the failure mode this codebase has spent five
+releases closing. An envelope without that field would reintroduce it at the
+exact boundary where the reader is least able to notice -- a consumer
+ingesting envelopes from three tools has no way to know that one of them
+declined to parse.
+
+Emitting is not analysis. This module makes no judgements, applies no
+thresholds and adds no findings. A decision that wants to live here belongs in
+an extractor's `findings()`, where it can be tested against a sample.
+
 ### test_maltriage.py
 
 Test suite covering the extraction engine, the config plumbing, the report

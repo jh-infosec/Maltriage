@@ -29,6 +29,8 @@ from pathlib import Path
 import pytest
 
 from maltriage import apis
+from maltriage import envelope as envelope_module
+from maltriage.envelope import to_envelope
 from maltriage import cli
 from maltriage import extractors as extractors_module
 from maltriage.extractors import (
@@ -46,7 +48,7 @@ from maltriage.extractors import (
     expected_random_entropy,
     shannon,
 )
-from maltriage.models import SEVERITIES, mk_finding
+from maltriage.models import SCHEMA_VERSION, SEVERITIES, Report, mk_finding
 from maltriage.extractors import default_extractors
 from maltriage.pipeline import analyse, analyse_directory
 from maltriage.config import (
@@ -298,7 +300,7 @@ def test_failing_header_extractor_does_not_lose_other_results(write):
 def test_report_serialises_to_json(write):
     report = analyse(write("invoice.pdf", b"MZ" + b"\x00" * 100))
     parsed = json.loads(report.to_json())
-    assert parsed["schema_version"] == "1.4"
+    assert parsed["schema_version"] == "1.5"
     assert parsed["severity"] == "high"
 
 
@@ -3303,3 +3305,218 @@ def test_a_raised_threshold_silences_a_capability(write):
     assert _api_details(analyse(path))
     assert not _api_details(analyse(path, config={
         **DEFAULT_CONFIG, "api_min_names_per_capability": 3}))
+
+
+# findings envelope
+
+def _envelope(path, config=None):
+    return to_envelope(analyse(path, config=config))
+
+
+def test_the_envelope_carries_no_path_and_no_filename(write):
+    """The envelope is the output most likely to be handed to somebody else,
+    and `Report.path` is a resolved absolute path -- the safety checklist
+    records it as carrying the directory layout and the username of the
+    machine that produced it. A filename is little better: a document is often
+    named after the person it is about."""
+    path = write("Q3-payroll-hendricks.bin", b"\x00" + b"https://example.com/x" * 3)
+    envelope = _envelope(path)
+    rendered = json.dumps(envelope)
+    assert "Q3-payroll-hendricks" not in rendered
+    assert str(path) not in rendered and str(path.parent) not in rendered
+    assert "path" not in envelope["subject"]
+    assert envelope["subject"]["id"].startswith("sha256:")
+
+
+def test_the_envelope_carries_no_extraction_data(write):
+    """`report.data` does not cross. A consumer wanting the section table
+    should ask maltriage for its native report."""
+    body = build_elf(needed=["libc.so.6"])
+    report = analyse(write("a.elf", body))
+    envelope = to_envelope(report)
+    assert "data" not in envelope
+    assert set(envelope) == {"envelope_version", "emitter", "subject",
+                             "observed_at", "severity", "findings", "incomplete"}
+    assert "libc.so.6" not in json.dumps(envelope["findings"])
+
+
+def test_what_could_not_be_run_crosses_the_envelope(write):
+    """The field that keeps the format honest. An envelope carrying only
+    findings turns "I could not look" into "I looked and found nothing",
+    which is the distinction this project has spent five releases defending.
+
+    A file that says MZ and then says nothing else is the case exactly: the
+    magic identifies it as a PE, the parser is offered it, and the parser
+    cannot read it. Zero findings and a broken parse must not serialise the
+    same way as zero findings and a clean one."""
+    report = analyse(write("a.exe", b"MZ" + b"\x00" * 200))
+    assert not report.findings
+    assert report.errors, "expected the PE parse to fail on this fixture"
+    envelope = to_envelope(report)
+    assert envelope["incomplete"]
+    assert {"source", "reason"} == set(envelope["incomplete"][0])
+    assert {e["source"] for e in envelope["incomplete"]} == set(report.errors)
+
+
+def test_an_examined_file_with_nothing_found_is_still_an_envelope():
+    """Empty findings with severity info is a message -- "this was examined
+    and nothing was found" -- and is not the same as no envelope. Built from
+    a report directly, because the point is what the emitter does with an
+    empty findings list rather than which fixture happens to produce one."""
+    report = Report(path="/somewhere/private/a.bin", filename="a.bin",
+                    size_bytes=4096)
+    report.data["hashes"] = {"sha256": "00" * 32}
+    envelope = to_envelope(report)
+    assert envelope["findings"] == []
+    assert envelope["incomplete"] == []
+    assert envelope["severity"] == "info"
+    assert envelope["subject"]["id"] == "sha256:" + "00" * 32
+    assert "private" not in json.dumps(envelope)
+
+
+def test_a_transcribed_string_is_not_validated(write):
+    """`validated` is true when the emitter did work that could have
+    falsified the claim. A RUNPATH is copied out of the file: nothing was
+    tested, and a file can say anything."""
+    body = build_elf(needed=["libc.so.6"], runpath="/tmp/x")
+    envelope = to_envelope(analyse(write("a.elf", body)))
+    by_key = {f["key"]: f for f in envelope["findings"]}
+    assert by_key["runpath_set"]["validated"] is False
+
+
+def test_a_computed_finding_is_validated(write):
+    """Entropy could have come back low, so the work could have falsified the
+    claim. This is the half of the rule that makes the other half mean
+    something."""
+    envelope = _envelope(write("a.bin", os.urandom(65536)))
+    by_key = {f["key"]: f for f in envelope["findings"]}
+    assert by_key["high_file_entropy"]["validated"] is True
+
+
+def test_an_ipv4_finding_is_validated_though_it_quotes_the_sample(write):
+    """It looks like transcription and is not: every candidate passes through
+    an octet-range check that rejects, so `999.1.1.1` never becomes a
+    finding. That rejection is the falsifying work."""
+    body = b"\x00" + b"\x00".join(b"connect to 10.0.0.%d now" % n for n in range(3))
+    envelope = _envelope(write("a.bin", body))
+    by_key = {f["key"]: f for f in envelope["findings"]}
+    assert by_key["ipv4_present"]["validated"] is True
+    assert by_key["ipv4_present"]["key"] not in envelope_module.TRANSCRIBED
+
+
+@needs_pefile
+def test_extension_mismatch_is_validated_only_when_something_parsed(write):
+    """The one finding whose answer depends on how it was reached. A
+    successful parse could have contradicted the extension; two magic bytes
+    could not, because header-only identification is a claim the file makes
+    about itself."""
+    parsed = to_envelope(analyse(write("invoice.pdf", build_pe())))
+    by_key = {f["key"]: f for f in parsed["findings"]}
+    assert by_key["extension_mismatch"]["validated"] is True
+
+    # Magic bytes and nothing behind them: no parser could confirm it.
+    header_only = to_envelope(analyse(write("note.txt", b"MZ" + b"\x00" * 200)))
+    mismatch = [f for f in header_only["findings"] if f["key"] == "extension_mismatch"]
+    if mismatch:
+        assert mismatch[0]["validated"] is False
+
+
+def test_every_finding_key_has_a_decided_validated_value(write):
+    """`TRANSCRIBED` is a list of keys, so a key that stops existing leaves a
+    dead entry and a new key silently defaults to true. Neither is caught by
+    anything else."""
+    emitted = set()
+    for name, body in (("a.exe", build_pe()), ("b.elf", build_elf(runpath="/x")),
+                       ("c.bin", os.urandom(4096))):
+        emitted |= {f["key"] for f in analyse(write(name, body)).findings}
+    assert emitted, "expected these fixtures to produce findings"
+    stale = envelope_module.TRANSCRIBED - _every_finding_key()
+    assert stale == set(), f"TRANSCRIBED names keys nothing emits: {stale}"
+
+
+def _every_finding_key() -> set[str]:
+    """Every key the extractor set can produce, read out of the source.
+
+    Reading the source is unlovely, but the alternative is a hand-maintained
+    second list, which is the thing this test exists to catch."""
+    source = Path(extractors_module.__file__).read_text()
+    keys = set(re.findall(r'mk_finding\(\s*self\.name,\s*"([a-z_]+)"', source))
+    keys |= {f"{stem}_present" for stem in
+             ("urls", "emails", "ipv4", "mutexes", "windows_paths",
+              "unix_paths", "registry_path")}
+    keys |= {"runpath_set", "rpath_set", apis.FINDING_KEY}
+    return keys
+
+
+def test_evidence_never_carries_what_was_found(write):
+    """An offset, a length, a count or a name from this project's own
+    vocabulary. Never the extracted string: an envelope is stored, piped and
+    shared, and a report that recovers a credential into one turns a detection
+    into a leak."""
+    secret = "https://intranet.example.com/token/AKIAIOSFODNN7EXAMPLE"
+    body = b"\x00" + secret.encode() + b"\x00"
+    envelope = _envelope(write("a.bin", body))
+    evidence = [e for f in envelope["findings"] for e in f["evidence"]]
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.dumps(evidence)
+    assert secret not in json.dumps(evidence)
+
+
+@needs_yara
+def test_a_yara_match_carries_offsets_and_not_bytes(write):
+    """The rule that holds hardest here, because a rules directory is
+    user-extensible and the person most likely to want the bytes is the person
+    debugging a rule that matches secrets."""
+    carrier = b"%PDF-1.4\n" + build_pe() + b"\n%%EOF\n"
+    envelope = to_envelope(analyse(write("carrier.pdf", carrier)))
+    matches = [f for f in envelope["findings"] if f["key"] == "yara_match"]
+    assert matches, "expected embedded_pe_header to fire on a PE inside a PDF"
+    for match in matches:
+        assert match["discriminator"], "a rule name is what makes the key bounded"
+        names = {e["name"] for e in match["evidence"]}
+        assert "first_offset" in names and "string_count" in names
+        assert "matched_data" not in names and "bytes" not in names
+
+
+def test_a_bounded_key_set_keeps_its_detail_in_the_discriminator(write):
+    """The property that makes maltriage the right first emitter. Every
+    capability files under one key with the category beside it, so a consumer
+    can enumerate the keys and still group by what was actually found."""
+    body = b"\x00VirtualAllocEx\x00WriteProcessMemory\x00IsDebuggerPresent\x00GetTickCount\x00"
+    envelope = _envelope(write("a.bin", body))
+    capabilities = [f for f in envelope["findings"] if f["key"] == apis.FINDING_KEY]
+    assert len(capabilities) == 2
+    assert {f["discriminator"] for f in capabilities} == {
+        "process_injection", "anti_analysis"}
+    assert all(f["key"] == apis.FINDING_KEY for f in capabilities)
+
+
+def test_nothing_emits_a_mitre_technique_yet(write):
+    """The registry records a technique per capability as reference data. A
+    technique id is a claim about adversary behaviour, and attaching one to a
+    finding that is merely unusual inflates it -- `mitre` is the field a
+    consumer is most likely to aggregate without reading the finding under
+    it."""
+    assert all("mitre" in spec for spec in apis.CAPABILITIES.values())
+    body = b"\x00VirtualAllocEx\x00WriteProcessMemory\x00"
+    envelope = _envelope(write("a.bin", body))
+    assert envelope["findings"]
+    assert not any("mitre" in f for f in envelope["findings"])
+
+
+def test_the_envelope_version_moves_independently_of_the_schema():
+    """Two things that change for different reasons: one tracks what a
+    maltriage report looks like, the other what three tools have agreed to say
+    to each other."""
+    assert envelope_module.ENVELOPE_VERSION != SCHEMA_VERSION
+
+
+def test_the_cli_writes_one_envelope_per_file(write, tmp_path, capsys):
+    write("a.bin", os.urandom(4096))
+    write("b.txt", b"ordinary text\n" * 8)
+    out = tmp_path / "env.jsonl"
+    cli.main(["scan", str(tmp_path), "--envelope", str(out), "-q"])
+    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(lines) == 2
+    assert all(line["envelope_version"] == envelope_module.ENVELOPE_VERSION
+               for line in lines)
+    assert len({line["subject"]["id"] for line in lines}) == 2

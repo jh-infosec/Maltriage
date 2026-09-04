@@ -28,6 +28,7 @@ from . import __version__
 from .models import SEVERITY_RANK, Report, max_severity
 from .pipeline import analyse, analyse_directory
 from .fixtures import write_samples
+from .envelope import to_envelope
 
 APP_NAME = "maltriage"
 
@@ -219,6 +220,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
             for report in reports:
                 fh.write(report.to_json(indent=None) + "\n")
 
+    # JSON Lines rather than an array, because a directory scan produces one
+    # envelope per file and the consumer is a pipeline rather than a person.
+    # This is the one output that is safe to hand to somebody else: it carries
+    # no path, no filename and no extraction data, so it does not leak the
+    # directory layout and username that every other output here does.
+    if args.envelope:
+        with args.envelope.open("w") as fh:
+            for report in reports:
+                fh.write(json.dumps(to_envelope(report)) + "\n")
+
     worst = max_severity([{"severity": r.severity} for r in reports])
     return EXIT_FINDINGS if SEVERITY_RANK[worst] >= SEVERITY_RANK[GATE_SEVERITY] else EXIT_CLEAN
 
@@ -246,6 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("-r", "--recursive", action="store_true")
     scan.add_argument("--json", type=Path, help="write a JSON array of reports here")
     scan.add_argument("--json-lines", type=Path, help="write one JSON object per file")
+    scan.add_argument("--envelope", type=Path, metavar="PATH",
+                      help="write findings envelopes here, one JSON object per "
+                           "file. Carries findings and what could not be run, "
+                           "never extraction output and never the path")
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress human output")
     scan.add_argument("-v", "--verbose", action="store_true")
     scan.set_defaults(func=cmd_scan)

@@ -226,7 +226,11 @@ class FileTypeExtractor(HeaderExtractor):
         if executable and masquerading:
             out.append(mk_finding(self.name, "extension_mismatch",
                 f"content is {data['magic_label']} but the extension is "
-                f"'{data['extension']}', masquerading as a document", "high"))
+                f"'{data['extension']}', masquerading as a document", "high",
+                evidence=[{"name": "family", "value": data["family"]},
+                          {"name": "extension", "value": data["extension"]},
+                          {"name": "magic_offset", "value": data.get("magic_offset", 0)}],
+                discriminator=data["family"]))
         return out
 
 
@@ -468,14 +472,22 @@ class EntropyExtractor(StreamExtractor):
             out.append(mk_finding(self.name, "high_file_entropy",
                 f"whole-file entropy {data['overall']} is {data['overall_ratio']} of what "
                 "random data of this length reaches, consistent with packing, "
-                "compression or encryption", "low"))
+                "compression or encryption", "low",
+                evidence=[{"name": "entropy", "value": data["overall"]},
+                          {"name": "ratio_of_random", "value": data["overall_ratio"]},
+                          {"name": "threshold", "value": file_ratio}]))
 
         # the interesting case: low overall, but a hot region inside
         if data["overall_ratio"] < file_ratio and data["high_entropy_windows"] > 0:
             out.append(mk_finding(self.name, "entropy_hotspot",
                 f"{data['high_entropy_windows']} of {data['window_count']} window(s) at or "
                 f"above {window_ratio} of random, in an otherwise low-entropy file, "
-                "possible embedded packed or encrypted payload", "medium"))
+                "possible embedded packed or encrypted payload", "medium",
+                evidence=[{"name": "high_entropy_windows",
+                           "value": data["high_entropy_windows"]},
+                          {"name": "window_count", "value": data["window_count"]},
+                          {"name": "window_bytes", "value": data.get("window_bytes")},
+                          {"name": "threshold", "value": window_ratio}]))
         return out
 
 
@@ -1490,7 +1502,10 @@ class PEExtractor(RandomAccessExtractor):
                 "high-entropy section(s): " + ", ".join(
                     f"{s['name']} at {s['entropy_ratio']} of random" for s in hot) +
                 ", consistent with a packed, compressed or encrypted section",
-                "medium"))
+                "medium",
+                evidence=[{"name": f"{s['name']}.entropy_ratio",
+                           "value": s["entropy_ratio"]} for s in hot],
+                discriminator=", ".join(s["name"] for s in hot)))
 
         wx = [s["name"] for s in sections if s["writable"] and s["executable"]]
         if wx:
@@ -2290,7 +2305,10 @@ class ElfExtractor(RandomAccessExtractor):
                 "high-entropy section(s): " + ", ".join(
                     f"{s['name']} at {s['entropy_ratio']} of random" for s in hot) +
                 ", consistent with a packed, compressed or encrypted section",
-                "medium"))
+                "medium",
+                evidence=[{"name": f"{s['name']}.entropy_ratio",
+                           "value": s["entropy_ratio"]} for s in hot],
+                discriminator=", ".join(s["name"] for s in hot)))
 
         packers = {p.lower() for p in config_list(config, "elf_packer_sections", [])}
         standard = {p.lower() for p in config_list(config, "elf_standard_sections", [])}
@@ -2739,7 +2757,17 @@ class YaraExtractor(RandomAccessExtractor):
             if tags:
                 detail += f" [{', '.join(tags)}]"
             out.append(mk_finding(self.name, "yara_match",
-                                  f"{match['rule']}: {detail}", match["severity"]))
+                f"{match['rule']}: {detail}", match["severity"],
+                # Offsets and counts. Never `matched_data`: the rule that
+                # holds everywhere else in this project holds hardest here,
+                # because a rules directory is user-extensible and the person
+                # most likely to want the bytes is the person debugging a rule
+                # that matches secrets.
+                evidence=[{"name": "rule", "value": match["rule"]},
+                          {"name": "string_count", "value": len(match.get("strings") or [])},
+                          {"name": "first_offset",
+                           "value": (match.get("strings") or [{}])[0].get("offset")}],
+                discriminator=match["rule"]))
         return out
 
 

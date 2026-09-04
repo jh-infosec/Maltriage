@@ -15,22 +15,51 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 
 SEVERITIES = ("info", "low", "medium", "high")
 SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 
 
-def mk_finding(extractor: str, key: str, detail: str, severity: str = "info") -> dict[str, Any]:
-    """Build a single finding. Mirrors the alert constructor in Shadowfax."""
+def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
+               evidence: list[dict[str, Any]] | None = None,
+               discriminator: str | None = None) -> dict[str, Any]:
+    """Build a single finding. Mirrors the alert constructor in Shadowfax.
+
+    `evidence` and `discriminator` are optional and are omitted from the
+    result when not given, so a finding that supplies neither is byte for byte
+    what v0.4 produced. They are named for the findings envelope, and they are
+    parameters here rather than a lookup table in the emitter because an
+    observation belongs to whoever observed it: a table mapping keys to
+    evidence would be a second description of every finding, kept in a
+    different file, drifting.
+
+    `evidence` is a list of `{"name": ..., "value": ...}`. The rule for what
+    belongs, from `findings-envelope.md`: an observation is something the
+    subject would have to change for the value to change. And it never carries
+    what was found -- an offset, a length, a count or a name from this
+    project's own vocabulary, never the matched bytes, the extracted string or
+    the credential. There is no configuration switch to relax that, for the
+    reason v0.3 gave about YARA match context: the person most likely to
+    enable one is the person debugging a rule that matches secrets.
+
+    `discriminator` says which instance of `key` this is -- the rule name, the
+    capability category, the section. It is what lets the key set stay bounded
+    while the findings underneath it are not.
+    """
     if severity not in SEVERITY_RANK:
         raise ValueError(f"unknown severity '{severity}', expected one of {SEVERITIES}")
-    return {
+    finding = {
         "extractor": extractor,
         "key": key,
         "detail": detail,
         "severity": severity,
     }
+    if evidence:
+        finding["evidence"] = list(evidence)
+    if discriminator:
+        finding["discriminator"] = discriminator
+    return finding
 
 
 def max_severity(findings: list[dict[str, Any]]) -> str:

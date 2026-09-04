@@ -118,7 +118,7 @@ stays optional and off by default.
 - [x] Package layout, so a shared module has one home
 - [ ] Secret engine: patterns, entropy and context (shared)
 - [ ] ATT&CK technique mapping from the shared registry (shared)
-- [ ] Findings envelope emit, provisional (shared)
+- [x] Findings envelope emit, provisional (shared)
 - [ ] Optional reputation enrichment by hash, cached and rate limited
 - [ ] Offline mode
 
@@ -188,7 +188,10 @@ section is consistent with packing, and packing is the normal state of most
 installers.
 
 **The findings envelope emits here rather than at v1.0.** See
-`findings-envelope.md`. Both that document and this roadmap want maltriage to
+`findings-envelope.md`, which until v0.4 was a filename this roadmap pointed
+at and no file: the spec was written in conversation and never committed. It
+exists now, as envelope version 0.1, and is a draft for the other two emitters
+to argue with rather than a contract they are bound by. Both that document and this roadmap want maltriage to
 be the first emitter, so the shape is proven before claude-recon-agent and
 Shadowfax commit to it — and v1.0 is the worst possible time to discover the
 shape is wrong, because Shadowfax will have an ingest path by then. The emit

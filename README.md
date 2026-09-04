@@ -57,6 +57,9 @@ It never claims a file is malicious. It ranks a queue.
   two views: the names a PE imports outright, and the names that appear as
   literal text, which is the only evidence there is when a sample resolves its
   imports at runtime
+- Findings envelope emit, an interchange format that carries findings and what
+  could not be run, and deliberately carries no path, no filename and no
+  extraction output
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
@@ -172,9 +175,9 @@ keep two lists in step, here is the shape, and the file has the detail.
 - **v0.1** extraction engine, hashing, format identification, entropy, CLI
 - **v0.2** executable structure: PE and ELF
 - **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
-- **v0.4** a package layout, strings/IOCs and API capability detection
-  (shipped); the shared secret engine, ATT&CK mapping, the findings envelope
-  and reputation enrichment
+- **v0.4** a package layout, strings/IOCs, API capability detection and the
+  findings envelope (shipped); the shared secret engine, ATT&CK mapping and
+  reputation enrichment
 - **v0.5** archive recursion, with the bomb, traversal and time bounds that
   make it safe, plus known-good filtering
 - **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
@@ -226,6 +229,18 @@ Scan a directory into JSON Lines, one object per file
 ```bash
 maltriage scan ./samples --recursive --json-lines out.jsonl
 ```
+
+Write findings envelopes, the interchange format described in
+`findings-envelope.md`
+
+```bash
+maltriage scan ./samples --recursive --envelope out.jsonl
+```
+
+This is the one output that is safe to hand to somebody else. It carries the
+findings, what could not be run, and a content hash — and no path, no
+filename and no extraction data, so it does not leak the directory layout and
+username that every other output here does.
 
 Every `maltriage` above works as `python -m maltriage` if you would rather not
 install, or if the console script is not on your `PATH`.

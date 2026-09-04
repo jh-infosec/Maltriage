@@ -38,6 +38,18 @@ solve.
 - `api_names` and `api_capabilities` in the data for both extractors, listing
   what was seen whether or not it reached the threshold for a finding
 - `api_min_names_per_capability` (2) and `api_max_token_scan_bytes` (128)
+- `findings-envelope.md`, envelope version 0.1. The roadmap has pointed at
+  this filename since v0.4 and no such file existed: the spec was written in
+  conversation and never committed, so the reference was to nothing. It is a
+  draft from the constraints the roadmap did record, and maltriage is the
+  first emitter, so it is a proposal for claude-recon-agent and Shadowfax to
+  argue with rather than a contract
+- `envelope.py` and `maltriage scan --envelope PATH`, one JSON object per file
+- `evidence` and `discriminator`, optional arguments to `mk_finding`, omitted
+  from the result when not given. Supplied at six finding sites so far;
+  everywhere else the envelope emits an empty evidence list, and the spec says
+  what that means -- the emitter has not been taught this key yet, not that
+  there was nothing to say
 
 ### Changed
 
@@ -81,6 +93,51 @@ What this does not measure is the Windows false positive rate, because these
 are not Windows binaries. It measures that the vocabulary does not fire on
 things that are not Windows binaries, which is a smaller claim. The real
 number is v0.7's job, and it is why nothing here reaches medium.
+
+### Decided in the envelope
+
+**`validated` means the emitter did work that could have falsified the
+claim.** The roadmap recorded that "did the emitter compute it" was too weak
+without settling what replaces it. The test that discriminates asks the
+counterfactual: was there a version of this file for which the same work would
+have produced no finding? A string copied out of the subject is `false` --
+nothing was tested, and a file can say anything. A comparison, a computation or
+a structural walk is `true`. That lands at ten keys false and the rest true,
+rather than the twelve-in-thirteen `true` the roadmap was worried about.
+
+Three findings look like transcription and are not. `ipv4_present` rejects
+out-of-range octets, so `999.1.1.1` never becomes a finding. `registry_
+persistence_path` quotes paths but claims they survive a reboot, which is a
+membership test. `api_capability` counts names against a threshold, which is
+two ways to have come back empty.
+
+**`incomplete` is new and is not optional to the design.** The roadmap listed
+no such field. An envelope carrying only findings converts "I could not look"
+into "I looked and found nothing", which is the exact failure `report.errors`,
+`imports_parsed`, `entropy_skipped` and every `parse_errors` message exist to
+prevent. It carries `report.errors` across as `{source, reason}`.
+
+**The envelope carries no path and no filename.** `Report.path` is resolved
+and absolute, and the safety checklist records it as carrying the directory
+layout and the username of the machine that produced it. This is the output
+most likely to be handed to somebody else, so it is the one that must not
+carry it -- and a filename is little better, because a document is often named
+after the person it is about. The cost is accepted: a directory scan produces
+envelopes that only a hash distinguishes, and correlating one back to a file is
+the caller's job, the caller being the party entitled to know the path.
+
+**A name collision worth knowing about.** A maltriage report already has a
+field called `validated`, on the certificate, meaning "was this Authenticode
+signature verified against a chain" -- always false, because nothing here
+verifies chains. It and the envelope's `validated` are unrelated. They never
+meet, because the certificate field is inside `report.data` and `report.data`
+does not cross, but an emitter that later puts certificate data into `evidence`
+must not carry that name with it.
+
+**Nothing emits `mitre`.** The capability registry records a technique per
+category as reference data and does not emit it, because a technique id is a
+claim about adversary behaviour and `mitre` is the field a consumer is most
+likely to aggregate without reading the finding underneath it.
 
 ### Reviewed
 

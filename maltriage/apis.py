@@ -491,7 +491,15 @@ def capability_findings(extractor: str, capabilities: dict[str, list[str]],
             extractor, FINDING_KEY,
             f"{len(names)} {spec['label']} API name(s) "
             f"{_VIEW_PHRASE.get(view, view)}: {shown}{more}",
-            spec["severity"]))
+            spec["severity"],
+            # The names are safe as evidence in a way no other extracted
+            # string is: they come from this file's vocabulary, not from the
+            # sample. `display` has already refused anything else.
+            evidence=[{"name": "matched", "value": len(names)},
+                      {"name": "threshold", "value": max(1, min_names)},
+                      {"name": "view", "value": view}]
+                     + [{"name": "name", "value": n} for n in names[:6]],
+            discriminator=category))
     return out
 
 
