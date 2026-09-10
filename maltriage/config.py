@@ -169,6 +169,27 @@ DEFAULT_CONFIG = {
     # sample with millions of strings.
     "api_max_token_scan_bytes": 128,
 
+    # Secret engine. The vocabulary of known formats lives in `secrets.py`
+    # for the reason the API names do: a config file is a place for numbers,
+    # not for a taxonomy.
+    #
+    # How long a token must be before entropy alone can nominate it, and how
+    # close to random it has to score. The ratio is against what a token of
+    # that length drawn from that alphabet actually reaches, so one threshold
+    # is correct for a 32-character token and a 64-character one.
+    #
+    # Thirty-two rather than twenty-four, measured: three quarters of the
+    # false positives over 1610 Linux binaries were tokens of 24 to 27
+    # characters, and they were symbol names. A credential shorter than this
+    # with no known format to identify it is a weak candidate anyway.
+    "secrets_min_entropy_length": 32,
+    "secrets_entropy_ratio": 0.95,
+
+    # The one accumulator in the strings extractor whose size a sample
+    # controls. The API name set is bounded by a vocabulary; this is bounded
+    # only by this number, and the count says when it bit.
+    "secrets_max_candidates": 32,
+
     # YARA. Rules are text and the bundled set ships with the project, so
     # `yara_rule_paths` adds to it rather than replacing it.
     "yara_rule_paths": [],
@@ -380,6 +401,10 @@ def validate_config(config):
     check_int("strings_max_retained")
     check_int("strings_max_iocs")
     check_bool("strings_include_text")
+
+    check_int("secrets_min_entropy_length")
+    check_int("secrets_max_candidates")
+    check_ratio("secrets_entropy_ratio")
 
     check_int("api_min_names_per_capability")
     check_int("api_max_token_scan_bytes")

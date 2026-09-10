@@ -102,6 +102,76 @@ are not Windows binaries. It measures that the vocabulary does not fire on
 things that are not Windows binaries, which is a smaller claim. The real
 number is v0.7's job, and it is why nothing here reaches medium.
 
+### The secret engine, and what the exclusions cost
+
+`secrets.py`, the second shared module. Three detectors: known vendor formats,
+assignment context, and entropy for the formats no rule exists for.
+
+**The engine never returns the secret**, and the rule now covers `report.data`
+as well as findings, because `--json` writes the data and a report is stored,
+piped and shared. There is no configuration switch and a `Candidate` has no
+field to put one in.
+
+**Offsets meant teaching the string scanner to count.** The roadmap has
+promised findings that carry an offset since it was written, and
+`StringsExtractor` recorded what a string was and never where it was.
+`_RunScanner` now tracks an absolute file position across chunks, and an
+offset is pinned to be independent of `read_chunk_bytes` exactly as a string
+already was.
+
+**The detector runs on the shared pass and the policy runs in `findings()`.**
+"Lives in `findings()`, never in `parse()`" cannot be done as written:
+`strings_include_text` is off by default, so by then there are no strings.
+Matching happens where the strings are and produces a candidate with an offset
+and no text; which candidates become findings is decided in `findings()`.
+
+**Nine tenths of this module is exclusions, and every one was measured.**
+Unfiltered, the entropy tier fired on **84.7% of 1610 Linux system binaries**.
+In order of what each removed:
+
+- Tokens that are not the whole string. A credential in a string table is its
+  own null-terminated run. 70.8% to 27.5% of binaries, and 12.3% to zero on
+  2959 Python source files.
+- Digests, GUIDs and mangled C++ symbols.
+- Tokens with every character distinct. That is an enumeration, not a draw:
+  forty characters taken at random from sixty-four repeat one with probability
+  about 0.999999, so not repeating is evidence the token was written out. It
+  is what a base64 alphabet table looks like.
+- Tokens that read like words, judged by the longest run of same-case letters
+  against `log2(n) + 2`. Scaled rather than fixed, for the reason
+  `expected_random_entropy` exists: a fixed bar of six rejects 12% of random
+  32-character tokens and 21% of 48-character ones, while the scaled bar holds
+  near 5% at both.
+- A minimum length of 32 rather than 24. Three quarters of what was left were
+  tokens of 24 to 27 characters, and they were symbol names.
+- **And finally the one that found the rest: a token with no digit in it is
+  words.** `CERT_VerifySignedDataWithPublicKeyInfo` is thirty-eight characters
+  of mixed case that scores as random and contains no number. A token drawn
+  from base62 omits digits entirely with probability about 0.0007 at that
+  length, so the rule costs almost nothing.
+
+That leaves **3.3% of binaries, 0% of source files and 0.3% of documentation**,
+at a cost of about 15% of genuinely random tokens -- and the recall is steady
+from 32 characters to 48, which is what the scaling was for.
+
+Two known-tier corrections came out of the same measurement.
+`aws_access_key_id` fired on `wget` and `xkbprint`, because `AKIA` plus
+sixteen uppercase characters occurs inside longer uppercase runs; every known
+pattern is now required to be a whole token. And `private_key_block` is `low`
+rather than `medium`: the strings extractor splits on newlines, so the rule can
+only ever see the PEM header, and every TLS library on a machine contains that
+header as a parser literal.
+
+**Two flaky tests were found and fixed rather than left.** Both assumed a
+random token is always detected, and one in seven is not. A test that fails
+sometimes is worse than one that does not exist: it teaches whoever sees it to
+re-run rather than to read.
+
+`entropy.py` was split out of `extractors.py` in the process -- the engine
+needed the same maths and could not import a module that imports it -- and
+`expected_random_entropy` now takes an alphabet size, because a base64 token
+cannot reach eight bits per character however random it is.
+
 ### The ATT&CK mapping is mostly refusals
 
 Applied honestly to thirty-eight finding keys, the near-unambiguous rule
@@ -228,23 +298,54 @@ the stripped form first, because nothing in the real vocabulary collides with
 collide. The `", and N more"` sentence in a capability detail was executed on
 every run and asserted nowhere: an off-by-one in it passed the whole suite.
 
+### The wide-string defect, fixed
+
+`architecture.md` has carried this as a known constraint since the API work,
+described as cosmetic. The secret engine made it a missed `medium`, and that
+is what moved it.
+
+Where an ASCII string's NUL terminator sits against a UTF-16 string, the wide
+pattern reached one byte too far left: the last character of `config\x00` plus
+that NUL is itself a valid `(printable, NUL)` pair, so a wide `AKIA...` behind
+it came out as `gAKIA...`. Known-format secret patterns require whole-token
+boundaries -- without them `aws_access_key_id` fired on `wget` -- so a stolen
+leading character puts a letter in front of the token and the guard refuses the
+match. The credential disappeared and the report looked clean.
+
+    b"\x00config\x00" + "AKIAIOSFODNN7EXAMPLE".encode("utf-16-le")
+
+reported nothing. The same bytes with one more NUL reported the key.
+
+**Fixed with a lookbehind rather than by filtering matches**, because
+`finditer` returns non-overlapping matches: rejecting the run that starts at
+`g` afterwards would not then find the one that starts at `A`, since it lies
+inside the rejected span.
+
+**Every buffer now carries the byte that preceded it.** A lookbehind has
+nothing to look at when a match starts at offset zero of a buffer, so the fix
+on its own would have made the result depend on where the chunks fell -- the
+one thing this scanner exists to prevent. The guard byte cannot seed a match of
+its own: it is only printable when the carry is non-empty, and a non-empty
+carry always begins with a printable byte rather than the NUL a pair would
+need. Verified over 3000 randomised chunk splits across five bodies, and by
+tests at chunk sizes 1, 2 and 3, which land a boundary exactly on the stolen
+byte.
+
+What it gives up is a wide string that begins immediately after ASCII text
+with no NUL between them. That is ambiguous in the bytes and rare in practice,
+since strings in a string table are terminated.
+
+**One line in this fix is defensive and says so.** The carry index is held
+above the guard byte, and mutation testing showed no test fails without it: for
+the walk to reach the guard, the guard must be printable, which needs an empty
+carry, and the only branch producing both is the skipping path. I could not
+build an input that reaches it. The comment records that rather than implying
+a test covers it.
+
 ### Known and not fixed
 
-**A wide string can steal the last byte of the string before it.** Where a
-narrow string's terminator sits directly against a UTF-16 string, the wide
-pattern reaches one byte too far left, because the last printable character of
-the ASCII run plus its NUL is itself a valid pair:
-`b"more\x00" + "LoadLibraryEx".encode("utf-16-le")` extracts as
-`eLoadLibraryEx`. The API name inside it then matches nothing and no cap
-fired, so the report looks complete.
-
-It predates this release and belongs to the string scanner rather than to
-anything reading from it -- widening the matcher to also try the run without
-its first character would be exactly the substring matching the vocabulary
-refuses, trading a silent miss for a silent false positive. Recorded in
-`architecture.md` and scheduled at v0.5. It reproduces in a single chunk and is
-identical at every chunk size, which is why the chunk-independence tests never
-saw it.
+Nothing outstanding from this release. The wide-string defect recorded here
+when the API work shipped is fixed above.
 
 ### Hardened
 

@@ -30,6 +30,7 @@ import pytest
 
 from maltriage import apis
 from maltriage import attack
+from maltriage import secrets as secrets_module
 from maltriage import envelope as envelope_module
 from maltriage.envelope import to_envelope
 from maltriage import cli
@@ -101,6 +102,34 @@ def _run_one(extractor, path, ctx=None, config=None):
         ctx["sha256"] = report.data["hashes"]["sha256"]
     assert not report.errors, report.errors
     return report.data[extractor.name]
+
+
+def _random_token(length: int) -> str:
+    """A token drawn the way a credential generator draws one.
+
+    Hand-written "random-looking" strings are not random: the first one used
+    here had thirty-two distinct characters and was correctly refused as an
+    enumeration, which looked like a bug in the engine and was a bug in the
+    fixture."""
+    import random as _random
+    import string as _string
+    alphabet = _string.ascii_letters + _string.digits
+    return "".join(_random.choice(alphabet) for _ in range(length))
+
+
+def _detected_token(length: int) -> str:
+    """A random token the engine actually nominates.
+
+    About one in seven random tokens scores below `secrets_entropy_ratio` and
+    is not reported, which is the tier admitting it is a heuristic. A test
+    that wants to pin what happens to a *detected* token has to be handed one,
+    or it fails one run in seven for a reason that has nothing to do with what
+    it is testing."""
+    for _ in range(200):
+        token = _random_token(length)
+        if secrets_module.scan(token):
+            return token
+    raise AssertionError("no random token was detected in 200 attempts")
 
 
 @pytest.fixture
@@ -3623,3 +3652,346 @@ def test_the_registry_carries_a_name_and_a_tactic_for_everything():
         described = attack.describe(technique)
         assert described["id"] == technique
         assert described["name"] and described["tactic"]
+
+
+# the secret engine
+
+def _secret_data(path, config=None):
+    return _strings(path, config=config)["secrets"]
+
+
+def test_a_known_format_is_medium_and_a_candidate_is_low(write):
+    """Decided by the roadmap before any of this was written. `AKIA...` is an
+    AWS access key id and nothing else, so a human should look at that file on
+    its own account. A high-entropy token with no rule to explain it is a
+    candidate, and `GATE_SEVERITY` is medium."""
+    body = (b"\x00AKIAIOSFODNN7EXAMPLE\x00"
+            + b"\x00" + _detected_token(40).encode() + b"\x00")
+    report = analyse(write("a.bin", body))
+    by_rule = {f["discriminator"]: f for f in report.findings
+               if f["key"] == "secret_candidate"}
+    assert by_rule["aws_access_key_id"]["severity"] == "medium"
+    assert by_rule["high_entropy_token"]["severity"] == "low"
+    assert all(f["severity"] != "high" for f in report.findings
+               if f["key"] == "secret_candidate")
+
+
+def test_no_secret_reaches_the_report_by_any_path(write):
+    """The rule the engine exists under. It covers findings and `report.data`
+    alike, because `--json` writes the data and a report is stored, piped and
+    shared -- a tool that recovers a credential into an artefact has turned a
+    detection into a leak."""
+    token = _random_token(44)
+    body = (b"\x00AKIAIOSFODNN7EXAMPLE\x00password=hunter2correct\x00"
+            + token.encode() + b"\x00")
+    report = analyse(write("a.bin", body),
+                     config={**DEFAULT_CONFIG, "strings_include_text": True})
+    rendered = json.dumps(report.to_dict())
+    for secret in ("AKIAIOSFODNN7EXAMPLE", "hunter2correct", token):
+        assert secret not in json.dumps(report.data["strings"]["secrets"]), secret
+        assert secret not in json.dumps(report.findings), secret
+    # `strings_include_text` is a separate switch and is on here, so the raw
+    # strings are present. That is the switch the caller asked for; the point
+    # is that nothing the secret engine emits carries them.
+    assert "AKIAIOSFODNN7EXAMPLE" in rendered
+
+
+def test_no_candidate_in_a_report_carries_a_field_it_should_not(write):
+    """Structural, and at the report rather than at the dataclass.
+
+    `test_a_candidate_has_no_field_for_the_value` pins `Candidate.as_dict`,
+    and adding a `text` key to the dictionary *after* that call passed the
+    whole suite -- the leak test only looked for the specific secrets it had
+    planted, so a field carrying anything else went unnoticed. What has to be
+    pinned is the shape of what reaches the report, not the shape of what one
+    function returns."""
+    body = (b"\x00AKIAIOSFODNN7EXAMPLE\x00password=hunter2correct\x00"
+            + _random_token(40).encode() + b"\x00")
+    data = _secret_data(write("a.bin", body))
+    assert data["candidates"], "expected this fixture to produce candidates"
+    allowed = {"rule", "tier", "offset", "length", "entropy", "entropy_ratio"}
+    for candidate in data["candidates"]:
+        assert set(candidate) == allowed, set(candidate) - allowed
+        assert all(isinstance(v, (str, int, float)) for v in candidate.values())
+
+
+def test_a_token_inside_a_longer_string_is_not_a_candidate():
+    """A credential in a string table is its own null-terminated run. A
+    random-looking span inside a longer string is a span of something else,
+    and matching it is what took the entropy tier to 70% of binaries.
+
+    Pinned separately because the digit rule now catches the symbol names
+    this used to be demonstrated with, so removing the whole-string rule
+    stopped failing anything."""
+    token = _detected_token(40)
+    assert secrets_module.scan(f"loading resource {token} from cache") == []
+    assert secrets_module.scan(f"{token}.cache.tmp") == []
+
+    # `prefix-TOKEN` is deliberately not in that list. A hyphen is inside the
+    # token character class -- base64url uses it -- so that string is one
+    # token of forty-seven characters rather than a token with something in
+    # front of it, and reporting it is right.
+    assert secrets_module.scan(f"prefix-{token}")
+
+
+def test_a_candidate_has_no_field_for_the_value():
+    """Structural, not a matter of what the current code happens to put in
+    it: there is nowhere to put a secret even by mistake."""
+    candidate = secrets_module.Candidate("r", "known", 4, 20, 3.0, 0.9)
+    assert set(candidate.as_dict()) == {
+        "rule", "tier", "offset", "length", "entropy", "entropy_ratio"}
+    assert not hasattr(candidate, "text")
+    assert not hasattr(candidate, "value")
+
+
+def test_the_offset_is_where_the_secret_actually_is(write):
+    """A finding that cannot be followed back to the sample is not a finding.
+    The whole reason the run scanner learned to count."""
+    prefix = b"\x00" + b"harmless padding string" + b"\x00"
+    body = prefix + b"AKIAIOSFODNN7EXAMPLE\x00"
+    data = _secret_data(write("a.bin", body))
+    candidate = next(c for c in data["candidates"]
+                     if c["rule"] == "aws_access_key_id")
+    assert candidate["offset"] == body.index(b"AKIAIOSFODNN7EXAMPLE")
+    assert candidate["length"] == 20
+
+
+def test_an_offset_in_a_wide_string_lands_on_the_right_byte(write):
+    """UTF-16 characters are two bytes, so a character index is not a file
+    offset. Getting this wrong points an analyst at half the distance."""
+    prefix = b"\x00\x00" + b"pad" + b"\x00\x00"
+    body = prefix + ("..AKIAIOSFODNN7EXAMPLE").encode("utf-16-le") + b"\x00\x00"
+    data = _secret_data(write("a.bin", body))
+    candidate = next(c for c in data["candidates"]
+                     if c["rule"] == "aws_access_key_id")
+    assert candidate["offset"] == body.index("AKIA".encode("utf-16-le"))
+
+
+def test_offsets_do_not_depend_on_the_chunk_size(write):
+    """The invariant the whole stream phase is built on, now that something
+    downstream reports a position rather than only a string."""
+    body = (b"\x00" + b"filler" * 40 + b"\x00AKIAIOSFODNN7EXAMPLE\x00"
+            + b"more filler here" * 30 + b"\x00")
+    path = write("a.bin", body)
+    offsets = {size: [c["offset"] for c in _secret_data(
+                   path, config={**DEFAULT_CONFIG, "read_chunk_bytes": size,
+                                 "header_bytes": size})["candidates"]]
+               for size in (1, 2, 3, 7, 64, 4096, 1 << 20)}
+    assert len({tuple(v) for v in offsets.values()}) == 1, offsets
+    assert offsets[1] == [body.index(b"AKIAIOSFODNN7EXAMPLE")]
+
+
+def test_a_placeholder_is_not_a_credential():
+    """The context tier fires on prose, so the value has to survive this."""
+    for text in ("password=changeme", "api_key=<your key here>",
+                 "secret=${SECRET}", "password=xxxxxxxx", "token=TODO",
+                 "client_secret=YOUR_CLIENT_SECRET"):
+        assert secrets_module.scan(text) == [], text
+    assert secrets_module.scan("password=hunter2correct")
+
+
+def test_a_digest_is_not_a_secret():
+    """maltriage already reports the hashes it computed. Reporting the ones a
+    file mentions as possible credentials is noise on top of a fact already in
+    the report."""
+    for text in ("d41d8cd98f00b204e9800998ecf8427e",
+                 "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                 "550e8400-e29b-41d4-a716-446655440000"):
+        assert secrets_module.scan(text) == [], text
+
+
+def test_a_symbol_name_is_not_a_secret():
+    """Measured: after every other exclusion the entropy tier still fired on
+    one binary in five, and every match was a symbol name."""
+    for text in ("CERT_VerifySignedDataWithPublicKeyInfo",
+                 "SECKEY_DestroySubjectPublicKeyInfo",
+                 "_ZNK9tesseract10UNICHARSET13id_to_unicharEi",
+                 "u_getIntPropertyValueAndSomeMoreWordsHere"):
+        assert secrets_module.scan(text) == [], text
+
+    # And the rate this leaves, measured rather than claimed: over 1610 Linux
+    # system binaries the entropy tier fires on 4.5% of files, down from
+    # 84.7% before these exclusions. It is a filter, not a proof, which is
+    # part of why the tier is `low`.
+
+
+def test_an_alphabet_table_is_not_a_secret():
+    """Every character distinct is an enumeration, not a draw. Forty
+    characters taken at random from sixty-four repeat one with probability
+    about 0.999999."""
+    assert secrets_module.scan(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") == []
+
+
+def test_a_known_format_must_be_a_whole_token():
+    """`AKIA` plus sixteen uppercase characters occurs inside longer runs of
+    uppercase in ordinary binaries -- measured, it fired on `wget` and
+    `xkbprint` -- and a known-format match is medium, which is a non-zero exit
+    on somebody's build."""
+    assert secrets_module.scan("AKIAIOSFODNN7EXAMPLE")
+    assert secrets_module.scan("XXAKIAIOSFODNN7EXAMPLEYY") == []
+
+
+def test_the_word_rule_scales_with_length():
+    """A fixed bar rejects more random tokens the longer they get, which is
+    the mistake `expected_random_entropy` exists to avoid. Six same-case
+    letters is ordinary in a 48-character token and remarkable in a 16.
+
+    Asserted as a rate rather than on one token. The single-sample version of
+    this test failed about one run in twenty-five, and a test that fails
+    sometimes is worse than one that does not exist: it teaches whoever sees
+    it to re-run rather than to read."""
+    assert secrets_module._reads_like_words("DestroyPrivateKeyInformation")
+    for length in (32, 40, 48):
+        rejected = sum(1 for _ in range(400)
+                       if secrets_module._reads_like_words(_random_token(length)))
+        # Near 5% at every length, which is the whole point of scaling it. A
+        # fixed bar of six ranges from 12% at 32 characters to 21% at 48.
+        assert rejected < 60, (length, rejected)
+
+
+def test_a_real_random_token_is_still_found():
+    """The exclusions above are worth nothing if they also remove the thing
+    being looked for. Recall over precision is this project's stated trade, so
+    this is the number that has to stay high."""
+    found = sum(1 for _ in range(400) if secrets_module.scan(_random_token(40)))
+    # Measured at about 85%, and steady from 32 characters to 48 -- the
+    # threshold scales, so recall does not fall away as tokens get longer.
+    # What is lost is mostly tokens that happened not to score above
+    # `secrets_entropy_ratio`, which is the tier admitting it is a heuristic.
+    assert found > 300, found
+
+
+def test_the_candidate_list_is_capped_and_says_so(write):
+    """The one accumulator in this extractor whose size a sample controls.
+    The API name set is bounded by a vocabulary; this is not."""
+    body = b"".join(b"\x00" + _random_token(40).encode() for _ in range(80))
+    report = analyse(write("a.bin", body),
+                     config={**DEFAULT_CONFIG, "secrets_max_candidates": 5})
+    data = report.data["strings"]["secrets"]
+    assert len(data["candidates"]) == 5
+    assert data["candidates_truncated"] is True
+    assert any("secrets_max_candidates" in p
+               for p in report.data["strings"]["parse_errors"])
+    detail = next(f["detail"] for f in report.findings
+                  if f["key"] == "secret_candidate")
+    assert detail.startswith("at least ")
+
+
+def test_a_pem_header_is_low_because_every_tls_library_has_one(write):
+    """The strings extractor splits on newlines, so the base64 body is a
+    different string and this rule can only ever see the header. Measured,
+    `libmbedcrypto` alone accounts for ten matches."""
+    assert secrets_module.severity_of("private_key_block", "known") == "low"
+    report = analyse(write("a.bin", b"\x00-----BEGIN RSA PRIVATE KEY-----\x00"))
+    finding = next(f for f in report.findings if f["key"] == "secret_candidate")
+    assert finding["severity"] == "low"
+
+
+def test_the_rule_names_are_a_bounded_set():
+    """A consumer must be able to enumerate the keys an emitter produces, and
+    the rule is the envelope's discriminator."""
+    names = secrets_module.rule_names()
+    assert "high_entropy_token" in names and "aws_access_key_id" in names
+    assert len(names) == len(set(names))
+
+
+def test_looks_like_secret_answers_about_the_whole_string():
+    """The entry point for a caller filtering values rather than scanning a
+    document. A sentence that contains a token is not a secret by this test."""
+    assert secrets_module.looks_like_secret("AKIAIOSFODNN7EXAMPLE")
+    assert not secrets_module.looks_like_secret(
+        "the key AKIAIOSFODNN7EXAMPLE appears in this sentence")
+
+
+def test_the_secret_config_keys_are_validated():
+    problems = validate_config({**DEFAULT_CONFIG,
+                                "secrets_min_entropy_length": 0,
+                                "secrets_max_candidates": -1,
+                                "secrets_entropy_ratio": "high"})
+    assert any("secrets_min_entropy_length" in p for p in problems)
+    assert any("secrets_max_candidates" in p for p in problems)
+    assert any("secrets_entropy_ratio" in p for p in problems)
+
+
+# the wide-string boundary defect
+
+def test_a_wide_string_does_not_steal_the_byte_before_it(write):
+    """Where an ASCII string's NUL terminator sits against a UTF-16 string,
+    the wide pattern used to reach one byte too far left: the last character
+    of `config\x00` plus that NUL is itself a valid pair, so the wide run came
+    out as `gAKIA...`.
+
+    Both readings are correct regexes over those bytes and the engine takes
+    the leftmost, which is why this is fixed with a lookbehind rather than by
+    filtering matches -- `finditer` returns non-overlapping matches, so
+    rejecting the run that starts at `g` would not then find the one inside
+    it."""
+    key = "AKIAIOSFODNN7EXAMPLE"
+    body = b"\x00config\x00" + key.encode("utf-16-le") + b"\x00\x00"
+    data = _secret_data(write("a.bin", body))
+    candidate = next(c for c in data["candidates"] if c["rule"] == "aws_access_key_id")
+    assert candidate["offset"] == body.index(key.encode("utf-16-le"))
+
+
+def test_the_stolen_byte_was_hiding_a_finding(write):
+    """Why this stopped being cosmetic. Known-format patterns require whole
+    token boundaries, because without them `aws_access_key_id` fired on
+    `wget`. A stolen leading character puts a letter immediately before the
+    token, so the boundary guard refuses the match and the report looks
+    clean."""
+    key = b"AKIAIOSFODNN7EXAMPLE"
+    abutting = b"\x00config\x00" + key.decode().encode("utf-16-le") + b"\x00\x00"
+    padded = b"\x00config\x00\x00" + key.decode().encode("utf-16-le") + b"\x00\x00"
+    rules = lambda body, name: {c["rule"] for c
+                                in _secret_data(write(name, body))["candidates"]}
+    assert rules(abutting, "a.bin") == rules(padded, "b.bin") == {"aws_access_key_id"}
+
+
+def test_a_wide_string_is_found_wherever_it_sits(write):
+    """The guard must not cost the ordinary layouts: after binary bytes, at
+    offset zero of the file, and after a NUL-padded string."""
+    key = "AKIAIOSFODNN7EXAMPLE"
+    wide = key.encode("utf-16-le")
+    for name, body, prefix in (
+            ("binary.bin", b"\xff\xfe\xff" + wide + b"\x00\x00", 3),
+            ("start.bin", wide + b"\x00\x00", 0),
+            ("padded.bin", b"\x00pad\x00\x00" + wide + b"\x00\x00", 6)):
+        data = _secret_data(write(name, body))
+        candidate = next(c for c in data["candidates"]
+                         if c["rule"] == "aws_access_key_id")
+        assert candidate["offset"] == prefix, name
+
+
+def test_the_guard_byte_survives_every_chunk_boundary(write):
+    """A lookbehind has nothing to look at when a match begins at offset zero
+    of a buffer, so the fix would have made the result depend on where the
+    chunks fell -- the one thing this scanner exists to prevent. Every buffer
+    is prefixed with the byte that preceded it instead.
+
+    Sizes 1, 2 and 3 matter most: they split the UTF-16 pairs and land a
+    buffer boundary exactly on the stolen byte."""
+    key = "AKIAIOSFODNN7EXAMPLE"
+    body = b"\x00config\x00" + key.encode("utf-16-le") + b"\x00\x00"
+    path = write("a.bin", body)
+    results = {size: [(c["rule"], c["offset"]) for c in _secret_data(
+                   path, config={**DEFAULT_CONFIG, "read_chunk_bytes": size,
+                                 "header_bytes": size})["candidates"]]
+               for size in (1, 2, 3, 5, 7, 8, 16, 64, 4096, 1 << 20)}
+    assert len({tuple(v) for v in results.values()}) == 1, results
+    assert results[1] == [("aws_access_key_id",
+                           body.index(key.encode("utf-16-le")))]
+
+
+def test_a_wide_run_still_carries_across_a_chunk_boundary(write):
+    """The guard byte is prepended to every buffer and must never be carried
+    forward as though it were part of the run. Forcing the carry index to
+    stay above it is what stops that, and a run longer than a chunk is what
+    exercises it."""
+    text = "ThisIsALongWideStringThatCrossesSeveralChunks"
+    body = b"\xff\xff" + text.encode("utf-16-le") + b"\x00\x00"
+    for size in (2, 3, 5, 16):
+        data = _strings(write(f"a{size}.bin", body),
+                        config={**DEFAULT_CONFIG, "strings_include_text": True,
+                                "read_chunk_bytes": size, "header_bytes": size})
+        assert text in data["text"], (size, data["text"])

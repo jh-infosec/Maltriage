@@ -116,7 +116,7 @@ stays optional and off by default.
 - [x] Registry path and mutex extraction
 - [x] Suspicious API name detection
 - [x] Package layout, so a shared module has one home
-- [ ] Secret engine: patterns, entropy and context (shared)
+- [x] Secret engine: patterns, entropy and context (shared)
 - [x] ATT&CK technique mapping from the shared registry (shared)
 - [x] Findings envelope emit, provisional (shared)
 - [ ] Optional reputation enrichment by hash, cached and rate limited
@@ -179,6 +179,26 @@ anything higher makes every minified bundle a CI failure.
 length, the entropy and the matched rule name, and not the string. A report
 is stored, piped and shared, and putting a recovered credential in one turns
 a detection into a leak.
+
+Shipped, and three things are worth recording.
+
+**The offset needed the string scanner to learn to count.** `StringsExtractor`
+recorded what a string was and never where it was, so the first commitment
+this paragraph makes was the one maltriage could not keep. `_RunScanner` now
+carries an absolute file position across chunks, and an offset is pinned to be
+independent of `read_chunk_bytes` exactly as a string already was.
+
+**The detector runs on the shared pass and the policy runs in `findings()`.**
+"Lives in `findings()`, never in `parse()`" is impossible as written --
+`strings_include_text` is off by default, so by the time `findings()` runs
+there are no strings left to scan. What holds instead is the intent: matching
+happens where the strings are, it produces a candidate with an offset and no
+text, and which candidates become findings is decided in `findings()`.
+
+**The exclusions are the engine.** Unfiltered, the entropy tier fired on 84.7%
+of 1610 Linux system binaries. Every rule that brought that to 3.3% was
+measured rather than reasoned, and the last one found the rest: a token with
+no digit in it is words, not a key.
 
 **ATT&CK mapping leaves `mitre` absent unless the finding is
 near-unambiguous, and applied honestly that disqualified all but one key.** maltriage does not claim a file is malicious; it ranks a
@@ -253,7 +273,6 @@ handled before the feature is safe to run.
 - [ ] Nested reports linked to their parent
 - [ ] Known-good hash filtering, which reports what it suppressed
 - [ ] Bounded parse time
-- [ ] Wide strings that absorb the preceding string's last byte
 
 **Path locking is the third use of a primitive that already exists twice**, in
 `loganalysis._safe_path` and in the wordlist roots landing in

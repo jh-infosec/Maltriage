@@ -266,6 +266,43 @@ the one whose interesting symbol sits past entry 256. A capability that
 depended on how long a list was allowed to get would not be a fact about the
 file.
 
+### entropy.py
+
+Shannon entropy, the Miller-corrected reference it is scored against, and the
+byte counting underneath both. Split out of `extractors.py` when the secret
+engine needed the same maths and could not import a module that imports it.
+Two callers is the point at which a shared home is cheaper than an import
+cycle.
+
+`expected_random_entropy` takes an alphabet size as well as a length. A token
+drawn from base64 cannot reach eight bits per character however random it is,
+so scoring it against every byte value would call every credential ordinary --
+the same reasoning that made the reference length-aware in v0.1.1, applied to
+the other axis.
+
+### secrets.py
+
+The shared secret engine: known vendor formats, assignment context, and
+entropy for what no rule covers. Callers are maltriage over extracted strings,
+claude-recon-agent over JavaScript and configuration, and ShadowClip's
+`SECRET_FILTER` through `looks_like_secret`.
+
+Two things hold it up.
+
+**Nothing it returns has a field for the secret.** Not the findings and not
+`report.data`, because `--json` writes the data. There is no configuration
+switch, for the reason v0.3 gave about YARA match context. The cost is that a
+candidate cannot be confirmed without going back to the sample, which is the
+right place to confirm it and the right person to do it.
+
+**The exclusions are most of the module, and every one was measured.** The
+entropy tier began by firing on 84.7% of 1610 Linux system binaries. Digests,
+GUIDs, mangled C++ symbols, alphabet tables, tokens embedded in longer
+strings, tokens that read like words, and finally tokens with no digit in them
+brought that to 3.3%, at a cost of about 15% of genuinely random tokens. The
+docstrings carry the numbers because a threshold without a measurement behind
+it is a guess that looks like a decision.
+
 ### attack.py
 
 The shared ATT&CK technique registry: ids, their names and tactics, and the
@@ -404,30 +441,6 @@ Reporting nothing is correct; a score would be noise.
 
 Findings are derived entirely from the file's own bytes. There is no
 reputation lookup, threat intelligence or prior-sighting context until v0.4.
-
-### A wide string can steal its predecessor's last byte
-
-The ASCII and UTF-16 scanners run independently over the same bytes, and where
-a narrow string's terminator sits directly against a wide string the wide
-pattern reaches one byte too far left: the final printable character of the
-ASCII run, plus the NUL that ended it, is itself a valid `(printable, NUL)`
-pair. `b"more\x00" + "LoadLibraryEx".encode("utf-16-le")` is extracted as
-`eLoadLibraryEx`.
-
-Both readings are correct regexes over those bytes and the scanner takes the
-leftmost, so this is an ambiguity in the input rather than a mistake in the
-carry logic -- it reproduces in a single chunk and is identical at every chunk
-size, which is why the chunk-independence tests never saw it. What makes it
-worth recording rather than shrugging at is that it is silent: the string is
-reported with an extra character, the API name inside it no longer matches the
-vocabulary, and no cap fired, so nothing in `parse_errors` says anything
-happened. A capability can go missing from a report that looks complete.
-
-The fix belongs to the string scanner and not to anything that reads from it.
-Widening the matcher to try the run without its first character would be the
-substring matching the vocabulary exists to refuse, and would trade a silent
-miss for a silent false positive. Scheduled at v0.5, where the scanner is
-being opened anyway for archive members.
 
 ### extractors.py is one module and is getting large
 

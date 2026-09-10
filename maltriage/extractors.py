@@ -51,11 +51,23 @@ from typing import Any
 from .models import SEVERITY_RANK, mk_finding
 from .config import config_bool, config_int, config_list, config_ratio
 from . import apis
+# Re-exported rather than hidden: these were defined here until the secret
+# engine needed them too, and the tests, the fixtures and anything that
+# imported them from this module should keep working.
+from .entropy import (
+    BYTE_VALUES,
+    HAVE_NUMPY,
+    byte_counts,
+    entropy_from_counts,
+    expected_random_entropy,
+    ratio as _ratio,
+    shannon,
+)
 from . import attack
+from . import secrets as secret_engine
 
 log = logging.getLogger(__name__)
 
-BYTE_VALUES = 256
 
 
 class Extractor(ABC):
@@ -146,31 +158,6 @@ class RandomAccessExtractor(Extractor):
     def parse(self, path: Path, ctx: dict[str, Any],
               config: dict[str, Any]) -> dict[str, Any]:
         """Return raw analysis data. Prefer partial data over raising."""
-
-
-# byte counting
-
-try:  # optional accelerator, not a hard requirement
-    import numpy as _np
-
-    def byte_counts(data: bytes) -> list[int]:
-        """Histogram of the 256 byte values, as a fixed-length list."""
-        if not data:
-            return [0] * BYTE_VALUES
-        return _np.bincount(
-            _np.frombuffer(data, dtype=_np.uint8), minlength=BYTE_VALUES
-        ).tolist()
-
-    HAVE_NUMPY = True
-except ImportError:
-    def byte_counts(data: bytes) -> list[int]:
-        """Histogram of the 256 byte values, as a fixed-length list."""
-        counts = [0] * BYTE_VALUES
-        for value, count in Counter(data).items():
-            counts[value] = count
-        return counts
-
-    HAVE_NUMPY = False
 
 
 # file type
@@ -313,53 +300,6 @@ class FuzzyHashExtractor(RandomAccessExtractor):
 
 
 # entropy
-
-def entropy_from_counts(counts, total: int) -> float:
-    """Shannon entropy in bits per byte, from a byte histogram.
-
-    Taking counts rather than bytes is what makes the streaming refactor
-    possible: the histogram of a file is the sum of the histograms of its
-    parts, so the whole-file figure needs nothing held in memory.
-    """
-    if total <= 0:
-        return 0.0
-    # The `+ 0.0` is not decoration. A region with all its mass in one bucket
-    # negates to -0.0, which compares equal to zero and then serialises into
-    # the report as "-0.0", so a flat section reads as though something odd
-    # happened to it.
-    return -sum((c / total) * math.log2(c / total) for c in counts if c) + 0.0
-
-
-def shannon(data: bytes) -> float:
-    """Shannon entropy in bits per byte. Range 0.0 (uniform) to 8.0 (random)."""
-    return entropy_from_counts(byte_counts(data), len(data))
-
-
-def expected_random_entropy(n: int) -> float:
-    """What uniformly random data of length `n` actually scores.
-
-    The plug-in entropy estimator is biased low on short samples: 375 random
-    bytes cannot fill 256 buckets evenly, so they measure about 7.42 rather
-    than 8.0. A fixed threshold of 7.5 is therefore unreachable at that size,
-    which is exactly why v0.1.0 never flagged a small packed file.
-
-    This is the Miller bias correction, log2(K) - (K-1)/(2n ln2), floored by
-    log2(n) since n samples cannot express more than log2(n) bits. Measured
-    against random data it predicts within 1.5% from 128 bytes upward.
-
-    Scoring entropy as a ratio of this reference makes one threshold correct
-    at every window size.
-    """
-    if n <= 1:
-        return 0.0
-    corrected = math.log2(BYTE_VALUES) - (BYTE_VALUES - 1) / (2 * n * math.log(2))
-    return max(0.0, min(math.log2(n), corrected))
-
-
-def _ratio(observed: float, n: int) -> float:
-    reference = expected_random_entropy(n)
-    return round(observed / reference, 4) if reference > 0 else 0.0
-
 
 def entropy_window_size(size: int, config: dict[str, Any]) -> int:
     """Window size for a file of `size` bytes.
@@ -566,7 +506,11 @@ class StringsExtractor(StreamExtractor):
         self._max = config_int(config, "strings_max_length", 1024)
         self._keep = config_int(config, "strings_max_retained", 2048)
         self._ascii_re = re.compile(rb"[" + PRINTABLE + rb"]{%d,}" % self._min)
-        self._wide_re = re.compile(rb"(?:[" + PRINTABLE + rb"]\x00){%d,}" % self._min)
+        # The lookbehind is the fix for a wide run stealing the last character
+        # of the ASCII string in front of it. See `_RunScanner` for why it is
+        # in the pattern rather than applied to the matches afterwards.
+        self._wide_re = re.compile(
+            rb"(?<![" + PRINTABLE + rb"])(?:[" + PRINTABLE + rb"]\x00){%d,}" % self._min)
         self._scanners = {
             "ascii": _RunScanner(self._ascii_re, self._max, step=1),
             "wide": _RunScanner(self._wide_re, self._max, step=2),
@@ -575,6 +519,15 @@ class StringsExtractor(StreamExtractor):
         self._counts = {"ascii": 0, "wide": 0}
         self._long = 0
         self._tokens = config_int(config, "api_max_token_scan_bytes", 128)
+        self._secret_min = config_int(config, "secrets_min_entropy_length", 24)
+        self._secret_ratio = config_ratio(config, "secrets_entropy_ratio", 0.95)
+        self._secret_cap = config_int(config, "secrets_max_candidates", 32)
+        # Candidates, never the strings behind them. Capped because a file can
+        # hold any number of them and this list is the one accumulator here
+        # that a sample controls the size of -- the API set is bounded by a
+        # vocabulary, this is not.
+        self._secrets: list[Any] = []
+        self._secrets_dropped = 0
         # Bounded by the registry, not by the sample: this can never hold more
         # than the vocabulary, whatever the file does. It is the only
         # accumulator in this extractor that needs no cap, and the reason is
@@ -583,10 +536,10 @@ class StringsExtractor(StreamExtractor):
 
     def feed(self, chunk: bytes) -> None:
         for kind, scanner in self._scanners.items():
-            for run, over_length in scanner.feed(chunk):
-                self._record(kind, run, over_length)
+            for run, over_length, offset in scanner.feed(chunk):
+                self._record(kind, run, over_length, offset)
 
-    def _record(self, kind: str, run: bytes, over_length: bool) -> None:
+    def _record(self, kind: str, run: bytes, over_length: bool, offset: int) -> None:
         self._counts[kind] += 1
         if over_length:
             self._long += 1
@@ -604,6 +557,22 @@ class StringsExtractor(StreamExtractor):
         for canonical, _categories in apis.match_text(text, self._tokens):
             self._api.add(canonical)
 
+        # The detector runs here because this is the only place the strings
+        # exist: `strings_include_text` is off by default and the retained
+        # list has a ceiling, so a pass over `report.data` would have nothing
+        # to read. What it produces is a candidate with an offset and no text,
+        # and deciding which candidates deserve a finding stays in
+        # `findings()` where a heuristic belongs.
+        stride = 1 if kind == "ascii" else 2
+        for candidate in secret_engine.scan(text, base=offset,
+                                            min_length=self._secret_min,
+                                            entropy_ratio=self._secret_ratio,
+                                            stride=stride):
+            if len(self._secrets) >= self._secret_cap:
+                self._secrets_dropped += 1
+                continue
+            self._secrets.append(candidate)
+
         # The cap is shared across both kinds, not granted to each. Per-kind
         # it was a ceiling of twice what the config asked for, and the comment
         # beside the default claimed the product as the worst case.
@@ -613,8 +582,8 @@ class StringsExtractor(StreamExtractor):
     def finish(self, path: Path, ctx: dict[str, Any],
                config: dict[str, Any]) -> dict[str, Any]:
         for kind, scanner in self._scanners.items():
-            for run, over_length in scanner.flush():
-                self._record(kind, run, over_length)
+            for run, over_length, offset in scanner.flush():
+                self._record(kind, run, over_length, offset)
 
         strings = self._found["ascii"] + self._found["wide"]
         data: dict[str, Any] = {
@@ -638,6 +607,15 @@ class StringsExtractor(StreamExtractor):
         # this extractor, it cannot grow with the sample.
         data["api_names"] = sorted(apis.display(n) for n in self._api)
         data["api_capabilities"] = apis.categorise(self._api, view="string")
+
+        # Offsets, lengths, entropies and rule names. No secret reaches here,
+        # and there is no switch that would let one: `--json` writes this
+        # dictionary to a file somebody keeps.
+        data["secrets"] = {
+            "candidates": [c.as_dict() for c in self._secrets],
+            "counts": secret_engine.summarise(self._secrets),
+            "candidates_truncated": bool(self._secrets_dropped),
+        }
 
         # The strings themselves are off by default, and this is the one
         # switch in the extractor set. What it controls is a dump rather than
@@ -670,6 +648,11 @@ class StringsExtractor(StreamExtractor):
             problems.append(
                 f"strings: {self._long} run(s) were longer than "
                 "strings_max_length and contributed only their first bytes")
+        if self._secrets_dropped:
+            problems.append(
+                f"secrets: {self._secrets_dropped} candidate(s) beyond "
+                "secrets_max_candidates were not kept, so the counts below are "
+                "a floor")
         if problems:
             data["parse_errors"] = problems
         return data
@@ -748,6 +731,44 @@ class StringsExtractor(StreamExtractor):
             self.name, data.get("api_capabilities") or {},
             config_int(config, "api_min_names_per_capability", 2),
             view="string"))
+        out.extend(self._secret_findings(data))
+        return out
+
+    def _secret_findings(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        """The policy half of the secret engine.
+
+        The detector ran during extraction because that is where the strings
+        were. What happens here is the decision: one finding per rule, its
+        severity taken from the tier, and the offsets carried so somebody can
+        go and look. A known format is medium because a human should look at
+        that file on its own account; entropy and context are low because they
+        are candidates and `GATE_SEVERITY` is medium.
+        """
+        block = data.get("secrets") or {}
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for candidate in block.get("candidates") or []:
+            grouped.setdefault(candidate["rule"], []).append(candidate)
+
+        capped = block.get("candidates_truncated")
+        out = []
+        for rule, found in sorted(grouped.items()):
+            tier = found[0]["tier"]
+            offsets = ", ".join(str(c["offset"]) for c in found[:4])
+            more = "" if len(found) <= 4 else f", and {len(found) - 4} more"
+            out.append(mk_finding(self.name, "secret_candidate",
+                f"{'at least ' if capped else ''}{len(found)} string(s) matching "
+                f"{rule} at offset(s) {offsets}{more}. The value is not in this "
+                "report; seek to the offset in the sample to see it.",
+                secret_engine.severity_of(rule, tier),
+                # Offsets, lengths and entropies. Never the value, and there
+                # is no configuration that would add it.
+                evidence=[{"name": "tier", "value": tier},
+                          {"name": "count", "value": len(found)}]
+                         + [{"name": "offset", "value": c["offset"]}
+                            for c in found[:4]]
+                         + [{"name": "entropy_ratio",
+                             "value": found[0]["entropy_ratio"]}],
+                discriminator=rule))
         return out
 
 
@@ -770,6 +791,31 @@ class _RunScanner:
     So the tail is found by walking backwards over what could continue a run,
     which covers the matched case and the too-short case with the same code,
     and matches are emitted only where they end before that tail begins.
+
+    **The guard byte.** A UTF-16 run may not begin at a printable byte whose
+    predecessor is also printable. Without that rule the wide pattern reaches
+    one byte too far left wherever an ASCII string's NUL terminator sits
+    against a wide string: the last character of `config\x00` plus that NUL is
+    itself a valid `(printable, NUL)` pair, so `config\x00` followed by a
+    wide `AKIA...` extracted as `gAKIA...`. Both readings are correct regexes
+    over those bytes and the engine takes the leftmost.
+
+    It is a lookbehind in the pattern rather than a filter over the matches
+    because `finditer` returns non-overlapping matches: rejecting the run that
+    starts at `g` afterwards would not then find the one that starts at `A`,
+    since it lies inside the rejected span.
+
+    A lookbehind has nothing to look at when a match starts at offset zero of
+    a buffer, which would make the result depend on where the chunks fell --
+    the one thing this class exists to prevent. So every buffer is prefixed
+    with the byte that preceded it, and offsets are shifted back by one to
+    compensate. That byte cannot seed a false match of its own: it is only
+    printable when the carry is non-empty, and a non-empty carry always begins
+    with a printable byte rather than the NUL a pair would need.
+
+    What this gives up is a wide string that begins immediately after ASCII
+    text with no NUL between them, which is ambiguous in the bytes and rare in
+    practice, since strings in a string table are terminated.
     """
 
     def __init__(self, pattern, maximum: int, step: int) -> None:
@@ -778,6 +824,18 @@ class _RunScanner:
         self.carry = b""
         self.skipping = False
         self.skip_half = False
+        # The byte immediately before the current buffer, so the wide
+        # pattern's lookbehind has something to look at even when a run
+        # begins at a chunk boundary. NUL rather than None at the start of a
+        # file: nothing precedes the first byte, and a run may begin there.
+        self.prior = 0
+        # Absolute position in the file of the next byte `feed` has not seen.
+        # A run's offset is what makes a secret finding actionable -- "there
+        # is a credential in this 40 MB file" is not a finding -- and it is
+        # the one thing a scanner working a chunk at a time has to be told to
+        # remember, because every position it computes is relative to a buffer
+        # that will not exist a moment later.
+        self.fed = 0
 
     def _continuable_from(self, buffer: bytes) -> int:
         """Where the trailing bytes that could still extend a run begin."""
@@ -822,6 +880,10 @@ class _RunScanner:
         return (index + 1 if half else index), half
 
     def feed(self, chunk: bytes):
+        # Where this chunk begins in the file, fixed before anything trims it.
+        start = self.fed
+        self.fed += len(chunk)
+
         if self.skipping:
             # Inside a run already emitted at its full length. Discard the
             # rest of it, and stop skipping the moment it ends -- which the
@@ -833,24 +895,42 @@ class _RunScanner:
                 return
             self.skipping = False
             self.skip_half = False
+            if consumed:
+                self.prior = chunk[consumed - 1]
             chunk = chunk[consumed:]
+            start += consumed
 
-        buffer = self.carry + chunk
+        # `carry` holds bytes that end exactly where this chunk begins, so the
+        # buffer starts that many bytes earlier in the file; the guard byte in
+        # front of it shifts everything one further. Every offset below is
+        # buffer-relative until this is added back.
+        origin = start - len(self.carry) - 1
+        buffer = bytes([self.prior]) + self.carry + chunk
         self.carry = b""
-        tail = self._continuable_from(buffer)
+        # Never zero: the guard byte is not part of the run, so it must not be
+        # carried into the next buffer as though it were.
+        #
+        # Defensive rather than demonstrated. For the walk to reach the guard
+        # the guard must be printable, which needs an empty carry, and the
+        # only branch that produces both is the skipping path. I could not
+        # build an input that reaches it, and mutation testing confirms no
+        # test fails without this line -- which is exactly why it says so here
+        # rather than pretending to be pinned.
+        tail = max(self._continuable_from(buffer), 1)
+        self.prior = buffer[tail - 1]
 
         for match in self.pattern.finditer(buffer):
             if match.end() > tail:
                 break
             run = match.group()
             if len(run) >= self.ceiling:
-                yield run[: self.ceiling], True
+                yield run[: self.ceiling], True, origin + match.start()
             else:
-                yield run, False
+                yield run, False, origin + match.start()
 
         pending = buffer[tail:]
         if len(pending) >= self.ceiling:
-            yield pending[: self.ceiling], True
+            yield pending[: self.ceiling], True, origin + tail
             self.skipping = True
             # The ceiling is a whole number of units, so what is left of the
             # run keeps the alignment `pending` started with.
@@ -859,11 +939,18 @@ class _RunScanner:
             self.carry = pending
 
     def flush(self):
-        if self.carry and self.pattern.fullmatch(self.carry):
-            yield self.carry[: self.ceiling], False
+        # Guarded the same way, so a run left in the carry is subject to the
+        # same rule as one found mid-buffer. `fullmatch` against the bare
+        # carry would have no predecessor to look at and would accept a run
+        # the buffer path had refused.
+        guarded = bytes([self.prior]) + self.carry
+        if self.carry and self.pattern.fullmatch(guarded, 1):
+            yield self.carry[: self.ceiling], False, self.fed - len(self.carry)
         self.carry = b""
         self.skipping = False
         self.skip_half = False
+        self.fed = 0
+        self.prior = 0
 
 
 def _is_ipv4(value: str) -> bool:

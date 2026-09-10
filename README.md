@@ -63,6 +63,9 @@ It never claims a file is malicious. It ranks a queue.
 - ATT&CK technique mapping, on one finding key and on any rule that declares
   one. Deliberately sparse: a technique id is a claim about adversary
   behaviour, and most of what a static triage tool sees is merely unusual
+- Secret detection over extracted strings: known vendor formats, assignment
+  context, and entropy for the formats no rule exists for. Findings carry the
+  offset, the length and the rule name, and never the value
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
@@ -179,8 +182,8 @@ keep two lists in step, here is the shape, and the file has the detail.
 - **v0.2** executable structure: PE and ELF
 - **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
 - **v0.4** a package layout, strings/IOCs, API capability detection, the
-  findings envelope and ATT&CK mapping (shipped); the shared secret engine and
-  reputation enrichment
+  findings envelope, ATT&CK mapping and the shared secret engine (shipped);
+  reputation enrichment and offline mode
 - **v0.5** archive recursion, with the bomb, traversal and time bounds that
   make it safe, plus known-good filtering
 - **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
