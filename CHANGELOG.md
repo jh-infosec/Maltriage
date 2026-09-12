@@ -1,5 +1,41 @@
 # Changelog
 
+## Version 0.4.1 -- the README is an interface
+
+A close-out rather than a feature. `__version__` and `pyproject.toml` both say
+0.4.1; v0.4 itself is not finished, because reputation enrichment and offline
+mode are still open, and a tag saying otherwise would be a claim this project
+does not make.
+
+**Verified from the public clone**, which is the only test that matters for a
+repository somebody else might use: `git clone`, a clean virtual environment,
+`pip install -e '.[all]'`, every command the README documents, and the whole
+suite. 343 passed.
+
+**The README now has tests behind it.** It documented `python cli.py scan ...`
+for two releases after the package layout moved `cli.py` inside `maltriage/`,
+and every command in it was broken while the suite stayed green -- because the
+commands in a README are an interface with nothing behind them. Three tests
+close that:
+
+- every shell line in a `bash` block must be a form this tool offers, and its
+  arguments must parse. This is what catches `python cli.py` and a renamed
+  flag.
+- every extra the README names in `pip install -e '.[...]'` must be declared
+  in `pyproject.toml`.
+- the walkthrough runs for real: generate the samples, scan them, write all
+  three output formats, and check the envelope carries no path.
+
+Each was checked by reintroducing the bug it exists for. The first fails on the
+historical `python cli.py`, and on `--jsonlines` for `--json-lines`; the second
+fails on `.[everything]`.
+
+The counts in the README are corrected and re-measured: **343 passed** with
+every optional dependency, **247 passed and 96 skipped** with neither pefile
+nor yara-python.
+
+---
+
 ## Version 0.4 -- a package, and strings
 
 Two things, and the first exists to make the rest of v0.4 possible. Three

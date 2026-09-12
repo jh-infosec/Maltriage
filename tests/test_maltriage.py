@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import shlex
 import statistics
 import struct
 import sys
@@ -3995,3 +3996,100 @@ def test_a_wide_run_still_carries_across_a_chunk_boundary(write):
                         config={**DEFAULT_CONFIG, "strings_include_text": True,
                                 "read_chunk_bytes": size, "header_bytes": size})
         assert text in data["text"], (size, data["text"])
+
+
+# the README is an interface
+
+def _readme_commands() -> list[str]:
+    """Every shell line the README tells a reader to run.
+
+    Only fenced blocks tagged `bash`: the architecture diagram is a fenced
+    block too, and treating it as commands would make this test fail on a
+    drawing."""
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    if not readme.is_file():
+        pytest.skip("README.md is not beside the test suite in this layout")
+    blocks = re.findall(r"```bash\n(.*?)```", readme.read_text(), re.S)
+    lines = []
+    for block in blocks:
+        for line in block.splitlines():
+            line = line.split("#")[0].strip()
+            if line:
+                lines.append(line)
+    return lines
+
+
+def test_every_command_the_readme_documents_is_one_this_tool_accepts():
+    """The README had documented `python cli.py scan ...` since the package
+    layout landed, which moved `cli.py` inside `maltriage/`. Every command in
+    it was broken and the whole suite was green, because the commands in a
+    README are an interface with nothing behind them.
+
+    This is that something. It does not run the commands -- the next test does
+    -- it checks that each one is a form this project actually offers, and
+    that the arguments parse."""
+    commands = _readme_commands()
+    assert len(commands) > 5, commands
+
+    parser = cli.build_parser()
+    for command in commands:
+        if command.startswith(("pip install", "git config", "python -m pytest")):
+            continue
+        for prefix in ("maltriage ", "python -m maltriage "):
+            if command.startswith(prefix):
+                args = shlex.split(command[len(prefix):])
+                try:
+                    parser.parse_args(args)
+                except SystemExit:
+                    raise AssertionError(
+                        f"the README documents `{command}`, which this tool "
+                        f"does not accept")
+                break
+        else:
+            raise AssertionError(
+                f"the README documents `{command}`, which is not a way this "
+                f"tool can be invoked")
+
+
+def test_the_extras_the_readme_names_are_declared():
+    """`pip install -e '.[all]'` is a promise about `pyproject.toml`."""
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.is_file():
+        pytest.skip("pyproject.toml is not beside the test suite in this layout")
+    declared = set(re.findall(r"^(\w+)\s*=\s*\[", pyproject.read_text(), re.M))
+    for command in _readme_commands():
+        for extra in re.findall(r"\.\[([\w,]+)\]", command):
+            for name in extra.split(","):
+                assert name in declared, (
+                    f"the README names extra '{name}', which pyproject.toml "
+                    f"does not declare")
+
+
+def test_the_readme_walkthrough_runs(tmp_path, capsys):
+    """The commands in order, for real: generate the samples, scan them, and
+    write each of the three output formats. A clean clone was verified by hand
+    before this existed, which is exactly the problem -- by hand is a thing
+    that happens once."""
+    demo = tmp_path / "demo"
+    assert cli.main(["samples", str(demo)]) == 0
+    assert demo.is_dir() and list(demo.iterdir())
+
+    # Non-zero because the bundled samples include a PE wearing a `.pdf`
+    # extension. A clean exit here would mean the gate had stopped working.
+    assert cli.main(["scan", str(demo), "-q"]) == 1
+
+    outputs = {
+        "--json": tmp_path / "report.json",
+        "--json-lines": tmp_path / "out.jsonl",
+        "--envelope": tmp_path / "env.jsonl",
+    }
+    for flag, path in outputs.items():
+        cli.main(["scan", str(demo), "--recursive", flag, str(path), "-q"])
+        assert path.is_file() and path.stat().st_size > 0, flag
+
+    reports = json.loads(outputs["--json"].read_text())
+    assert isinstance(reports, list) and len(reports) == len(list(demo.iterdir()))
+    for line in outputs["--envelope"].read_text().splitlines():
+        envelope = json.loads(line)
+        assert envelope["envelope_version"] == envelope_module.ENVELOPE_VERSION
+        assert "path" not in envelope["subject"]

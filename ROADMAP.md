@@ -119,8 +119,19 @@ stays optional and off by default.
 - [x] Secret engine: patterns, entropy and context (shared)
 - [x] ATT&CK technique mapping from the shared registry (shared)
 - [x] Findings envelope emit, provisional (shared)
-- [ ] Optional reputation enrichment by hash, cached and rate limited
+- [ ] Optional reputation enrichment, cached and rate limited
 - [ ] Offline mode
+
+**Reputation enrichment says "by hash" above and should not.** Using the tool
+during an incident-handling exercise made the gap obvious: of the questions
+that wanted enrichment, two were lookups on an IP address and none was a file
+hash. An analyst pivots on addresses and domains at least as often as on
+hashes, and a feature specced around the one input maltriage already has is a
+feature shaped by what was convenient rather than by what the work needs. The
+IOC extraction that feeds it has been there since v0.4's string work.
+
+Offline mode is the switch that disables it, and means nothing until it
+exists. They are one item.
 
 **The package layout comes first, and it is not the packaged distribution at
 v1.0.** Four components are now planned as shared — the secret engine, the

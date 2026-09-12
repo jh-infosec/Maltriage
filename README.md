@@ -266,11 +266,11 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The suite is **290 tests**, and how many run depends on which optional
+The suite is **343 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
 it is missing — the same rule the extractors follow. Two anchors, both
-verified: with everything installed, **290 passed, 0 skipped**; with neither
-pefile nor yara-python, **196 passed, 94 skipped**. Anything in between is
+verified: with everything installed, **343 passed, 0 skipped**; with neither
+pefile nor yara-python, **247 passed, 96 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
 lists them).
 
