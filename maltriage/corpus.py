@@ -17,6 +17,16 @@ A corpus root holds directories named for what is in them:
 Anything in a directory not named for a label is ignored rather than guessed
 at, because a corpus whose ground truth is inferred is not ground truth.
 
+That layout is for a corpus you are assembling. For one you already have --
+a system directory, a package cache, a software library -- name the label
+instead of building the directory:
+
+    maltriage corpus --benign C:\\Windows\\System32 --limit 500
+
+`named_files` takes the labels as given rather than reading them off a path,
+because copying two gigabytes of Windows in order to rename its parent folder
+is a cost this tool has no business imposing.
+
 **A corpus with only benign files is useful, and the harness is built for
 that case rather than tolerating it.** Precision and recall need both labels.
 False positive rates need only one, and the false positive rate is what every
@@ -53,6 +63,7 @@ that, and it is off unless asked for.
 
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +121,10 @@ class CorpusResult:
     incomplete: dict[str, int] = field(default_factory=dict)
     elapsed: float = 0.0
     per_file: list[dict[str, Any]] = field(default_factory=list)
+    #: Labelled files found, per label, before any sampling. Equal to `files`
+    #: on a full run. It is carried so a sampled result cannot be mistaken for
+    #: a complete one six months later, when the only thing left is the JSON.
+    available: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_files(self) -> int:
@@ -179,12 +194,29 @@ class CorpusResult:
             },
             "incomplete": dict(sorted(self.incomplete.items())),
             "elapsed_seconds": round(self.elapsed, 3),
+            # Present only when a sample was taken, and then unmissable. A rate
+            # over 500 of 4,000 files is a different claim from a rate over
+            # 4,000, and the difference has to survive into the artefact.
+            **({"sampled_from": dict(sorted(self.available.items()))}
+               if self.available and self.available != self.files else {}),
             "throughput": self.throughput(),
             "counterfactual": counterfactual(self),
         }
         if self.per_file:
             out["per_file"] = self.per_file
         return out
+
+
+def files_under(label: str, directory: Path) -> list[tuple[str, Path]]:
+    """Every regular file below `directory`, carrying `label`.
+
+    Symbolic links are skipped. On Windows a large system directory is full of
+    reparse points and hard links, and following them measures the same file
+    twice under two names -- which inflates a denominator quietly, which is the
+    one thing a false positive rate must not do.
+    """
+    return [(label, path) for path in sorted(directory.rglob("*"))
+            if path.is_file() and not path.is_symlink()]
 
 
 def labelled_files(root: Path) -> list[tuple[str, Path]]:
@@ -197,32 +229,87 @@ def labelled_files(root: Path) -> list[tuple[str, Path]]:
     found: list[tuple[str, Path]] = []
     for label in LABELS:
         directory = root / label
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.rglob("*")):
-            if path.is_file() and not path.is_symlink():
-                found.append((label, path))
+        if directory.is_dir():
+            found.extend(files_under(label, directory))
     return found
+
+
+def named_files(sources: dict[str, list[Path]]) -> list[tuple[str, Path]]:
+    """Every file under directories the caller labelled itself.
+
+    The corpus layout wants files arranged as `corpus/benign/...`, which is
+    fine when you are assembling a corpus and useless when you already have
+    one. `C:\\Windows\\System32` is two thousand of the most ordinary Windows
+    binaries in existence, and copying two gigabytes to measure them would be
+    a cost this tool imposed for the sake of a directory name.
+    """
+    unknown = sorted(set(sources) - set(LABELS))
+    if unknown:
+        raise ValueError(f"unknown label(s) {unknown}, expected {list(LABELS)}")
+    found: list[tuple[str, Path]] = []
+    for label in LABELS:
+        for directory in sources.get(label) or []:
+            if not directory.is_dir():
+                raise NotADirectoryError(f"not a directory: {directory}")
+            found.extend(files_under(label, directory))
+    return found
+
+
+def sample(items: list[tuple[str, Path]], limit: int,
+           seed: int = 0) -> list[tuple[str, Path]]:
+    """At most `limit` files of each label, drawn at random and reproducibly.
+
+    Random rather than the first `limit`, because the first files of a sorted
+    system directory all begin with the same letter, and on Windows that is a
+    coherent group rather than an arbitrary one -- `api-ms-win-*` alone is
+    hundreds of stub DLLs that are nothing like the rest.
+
+    Seeded, because a sample nobody can redraw is a measurement nobody can
+    check.
+    """
+    if limit <= 0:
+        raise ValueError(f"limit must be positive, got {limit}")
+    chosen: list[tuple[str, Path]] = []
+    picker = random.Random(seed)
+    for label in LABELS:
+        group = [item for item in items if item[0] == label]
+        chosen.extend(group if len(group) <= limit
+                      else sorted(picker.sample(group, limit)))
+    return chosen
 
 
 def scan_corpus(root: Path | str, config: dict[str, Any] | None = None,
                 extractors: list[Extractor] | None = None,
-                per_file: bool = False) -> CorpusResult:
-    """Run maltriage over a labelled corpus and count what happened.
+                per_file: bool = False, limit: int | None = None) -> CorpusResult:
+    """Run maltriage over a labelled corpus and count what happened."""
+    root = Path(root)
+    if not root.is_dir():
+        raise NotADirectoryError(f"not a directory: {root}")
+    return scan_files(labelled_files(root), config, extractors, per_file, limit)
+
+
+def scan_files(items: Iterable[tuple[str, Path]],
+               config: dict[str, Any] | None = None,
+               extractors: list[Extractor] | None = None,
+               per_file: bool = False,
+               limit: int | None = None) -> CorpusResult:
+    """Run maltriage over labelled files and count what happened.
 
     Extractors are built once and reused, which is the contract
     `analyse_directory` relies on and the reason a corpus run is not a
     thousand YARA compilations.
     """
-    root = Path(root)
-    if not root.is_dir():
-        raise NotADirectoryError(f"not a directory: {root}")
+    items = list(items)
+    result = CorpusResult()
+    for label, _ in items:
+        result.available[label] = result.available.get(label, 0) + 1
+    if limit is not None:
+        items = sample(items, limit)
 
     extractors = extractors if extractors is not None else default_extractors()
-    result = CorpusResult()
     started = time.perf_counter()
 
-    for label, path in labelled_files(root):
+    for label, path in items:
         try:
             report = analyse(path, config, extractors)
         except OSError:
@@ -364,6 +451,10 @@ def render(result: CorpusResult) -> str:
                        for label, count in sorted(result.files.items()))
     speed = result.throughput()
     lines.append(f"corpus: {totals or 'no labelled files'}")
+    if result.available and result.available != result.files:
+        lines.append("  sampled from " + ", ".join(
+            f"{count:,} {label}"
+            for label, count in sorted(result.available.items())))
     lines.append(f"  {result.total_bytes / 1e6:.1f} MB in {result.elapsed:.1f}s "
                  f"({speed['bytes_per_second'] / 1e6:.1f} MB/s, "
                  f"{speed['files_per_second']:.0f} files/s)")

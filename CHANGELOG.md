@@ -1,5 +1,146 @@
 # Changelog
 
+## Version 0.4.3 -- the Windows corpus, and what it cost to find out
+
+v0.4.2 could not answer four deferred decisions because it had no Windows
+binaries to answer them with. This release points the harness at
+`C:\Windows\System32` and answers them.
+
+**The gate flagged 32.3% of ordinary Windows files.** Against 0.6% on Linux.
+As a CI gate on Windows software this tool was unusable, and had been since
+v0.2, with nobody in a position to say so. It now flags 15.8%, which is still
+too high and is now a number with a list of causes attached rather than a
+suspicion.
+
+### Pointing the harness at a corpus you already have
+
+`--benign DIR` and `--malicious DIR`, repeatable, taking the label as given
+rather than reading it off a path. The `corpus/benign/` layout is right for a
+corpus you are assembling and useless for one that already exists: copying two
+gigabytes of Windows in order to rename its parent directory is a cost this
+tool had no business imposing, and it is the reason this measurement did not
+happen sooner.
+
+`--limit N` scans at most N files of each label, drawn at random with a fixed
+seed. Random rather than the first N: a sorted System32 opens with hundreds of
+`api-ms-win-*` stubs, which are a coherent group and nothing like the rest.
+Seeded, because a sample nobody can redraw is a measurement nobody can check --
+and because it made the before-and-after below a controlled comparison on
+identical files rather than two samples of the same directory.
+
+A sampled result records what it was sampled from, in the output and in the
+JSON. A rate over 291 of 23,907 files is a different claim from a rate over
+23,907, and the difference has to survive into the artefact.
+
+Symbolic links are skipped, which matters more here than on Linux: a Windows
+system directory is full of hard links and reparse points, and a denominator
+that counts one file twice is the one thing a false positive rate must not do.
+
+### `api_capability` is settled, after three releases of deferral
+
+It fires on **23.7%** of ordinary Windows binaries -- 69 of 291. Promoting it
+to medium would newly flag 44 files nothing else flags and take the gate from
+15.8% to **30.9%**.
+
+v0.4 wrote "when v0.7's corpus harness can state the cost, that is the release
+that may change it", and that sentence has been carried, rephrased, through
+three releases. The cost is stated. The severity does not move, and the reason
+is now arithmetic rather than argument.
+
+Worth keeping both numbers: **0% over 6,688 Linux files and 23.7% over 291
+Windows ones.** That contrast is the clearest statement this project has of
+why a corpus must match the claim being made about it.
+
+### `no_imports` at medium was the largest single defect in the tool
+
+52 of 291 files, and the sole cause of flagging on 48 of the 94 the gate
+caught. The cause is a population that does not exist on Linux: Windows ships
+thousands of **resource-only modules** -- every `en-US\*.mui`, and a large
+share of the DLLs beside them -- with no entry point, no executable section
+and no imports.
+
+The finding's own argument excludes them. It says a binary with no imports
+"must resolve them at runtime, the usual mark of a packed stub", and resolving
+imports at runtime takes instructions. A module with no code has none.
+
+So a PE with no entry point and no executable section now reports
+`resource_only_module` at `info` instead. Not silence: a PE with no code is a
+fact an analyst wants, and without it the absence of every import-derived
+finding has no visible explanation. A stub with code and no imports still
+scores medium, and a non-zero entry point defeats the exclusion, so it cannot
+be used to carry code past the gate.
+
+Measured on `C:\Windows\System32\en-US`, which is resource modules and almost
+nothing else: 98.0% `resource_only_module`, and the gate at 1.0%.
+
+### The counterfactual predicted the outcome exactly
+
+Before the change, over the same 291 files, `counterfactual` reported that
+demoting `no_imports` below the gate would take the false positive rate to
+**15.8%**.
+
+After the change, measured on the same seeded sample: **15.8%**.
+
+That is what the marginal calculation was for. A gross count would have
+predicted 32.3% - 17.9% = 14.4% and been wrong, because four of the 52 files
+were flagged by something else as well. This is the first time this project
+has been able to state the cost of a change before making it, and have the
+number hold.
+
+`no_imports` went from 52 files to 1. Fifty-one were resource-only; the
+remaining one is a genuine no-imports binary with code, which is exactly what
+the finding is for.
+
+### What is still wrong, in order of what it costs
+
+Over the same sample, now at 15.8%:
+
+- `entropy_hotspot`, 12.4%, sole cause on 28. Demoting it would reach 6.2%.
+  On Linux it cost 0.6%. Twenty times the rate on Windows is a fact about
+  Windows binaries -- compressed resources, embedded media, Authenticode
+  blobs -- and not yet a fact about the finding. Unmeasured: whether those
+  hotspots land inside the certificate the file is signed with, which would
+  be a mechanical exclusion rather than a severity change. `signature_present`
+  fires on 12.0%, which is close enough to 12.4% to be worth checking and far
+  from proof.
+- `virtual_size_mismatch`, 5.5%, sole cause on 9.
+- `known_packer_section` and `no_imports`, one file each.
+
+### What was measured and did not settle anything
+
+- `registry_persistence_path` costs 0.3% here -- two files, promoting newly
+  flags two. That reads as affordable and is the wrong corpus to read it from:
+  Run keys live in installers, not in System32. It stays at low until a
+  `Program Files` corpus says otherwise.
+- **YARA did not run at all.** `incomplete: yara on 291 file(s)`: yara-python
+  has no wheel for Python 3.14 and building it needs MSVC. So 15.8% is the
+  rate *without* rules, and rules can only add to it. Whether a rule may
+  declare its own severity, the question `AUTHORING.md` defers, remains
+  unmeasured on Windows.
+- `unrecognised_format` fires on 52.6%. That is the magic table meeting
+  `.nls`, `.cat`, `.mun`, `.winmd` and the rest of the Windows data-file
+  vocabulary. It is `info` and costs nothing, and it says the format table is
+  thin for the platform.
+- `implausible_timestamp`, 30.6%, and it is Microsoft's doing rather than the
+  finding's: a `/Brepro` build writes a hash into the timestamp field instead
+  of a date. The finding is correct and useless as a signal here. It stays at
+  low; promoting it would reach 39.9%.
+
+### Also
+
+- 9 of 300 files were unreadable and counted as `incomplete` rather than
+  quietly leaving the denominator, which is what that counter was added for.
+- Throughput on Windows: 5.0 MB/s and 11 files/s, against 5.6 MB/s and 81
+  files/s on Linux. The per-file rate differs because the files are larger,
+  not because the tool is slower.
+- Predictions recorded before the run, for the record: `extension_mismatch`
+  would light up on `.mui` and `.cpl`. It fired **zero** times.
+- 26 tests, each mutation-verified, including one that pins that a DLL with
+  code and no `DllMain` -- entry point zero, which is ordinary -- is not
+  treated as a resource module. **399 passed.**
+
+---
+
 ## Version 0.4.2 -- the corpus harness, three releases early
 
 The harness was v0.7's headline feature. It is here instead, because six

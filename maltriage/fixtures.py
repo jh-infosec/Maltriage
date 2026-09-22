@@ -186,13 +186,18 @@ def build_certificate(common_names=("Example Signing Ltd",), revision=0x0200,
 def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
              timestamp=0x5D2C0000, subsystem=3, characteristics=0x0102,
              entry_section=".text", tls_callbacks=None, pdb_path=None,
-             certificate=None):
+             certificate=None, entry_point=None):
     """Build a structurally valid PE32 executable.
 
     `sections` is a list of (name, characteristics, body). `imports` is a
     mapping of DLL name to a list of function names, which adds an `.idata`
     section. `overlay` is appended after the last section, which is exactly
     what makes it an overlay.
+
+    `entry_point` overrides the address of entry, and exists for one shape:
+    a resource-only module has no entry point at all. Windows ships thousands
+    of them -- every `en-US\\*.mui` is one -- so it is a fixture this suite
+    needs rather than a curiosity.
 
     `tls_callbacks` is a list of virtual addresses and adds a `.tls` section;
     `pdb_path` adds a `.debug` section carrying a CodeView record; and
@@ -306,7 +311,8 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
 
     struct.pack_into("<HBBIIIIII", out, offset,
                      0x10B, 14, 0, code_size, data_size, 0,
-                     entry["rva"], placed[0]["rva"], placed[0]["rva"])
+                     entry["rva"] if entry_point is None else entry_point,
+                     placed[0]["rva"], placed[0]["rva"])
     struct.pack_into("<IIIHHHHHHIIIIHHIIIIII", out, offset + 28,
                      0x400000, SECTION_ALIGNMENT, FILE_ALIGNMENT,
                      6, 0, 0, 0, 6, 0, 0,

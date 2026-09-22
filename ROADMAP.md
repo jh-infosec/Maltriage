@@ -338,10 +338,12 @@ precision and recall, so it comes before the classifier rather than after.
 - [x] Corpus harness with labelled directories *(shipped in v0.4.2)*
 - [x] Per-finding false positive rates *(shipped in v0.4.2)*
 - [x] Throughput benchmarking *(shipped in v0.4.2)*
+- [x] A corpus of ordinary Windows binaries *(System32, in v0.4.3)*
 - [ ] Precision and recall, which need a labelled malicious corpus
-- [ ] A corpus of ordinary Windows binaries
 - [ ] False negatives introduced by known-good filtering (needs v0.5)
 - [ ] Report diff between two runs
+- [ ] A Program Files corpus, for the findings System32 cannot exercise
+- [ ] YARA measured on Windows, which needs a Python a wheel exists for
 
 **The harness moved out of this release, and the reason it had to is the
 useful part.** Six decisions across `apis.py`, `extractors.py`, `AUTHORING.md`
@@ -353,13 +355,18 @@ attached. Two of the six are now settled, two more were settled by arithmetic
 that was previously an argument, and the remaining ones turned out not to be
 waiting on the harness at all.
 
-**What they were waiting on is a Windows corpus.** `api_capability` and
-`registry_persistence_path` fired zero times over 6,688 ordinary Linux files,
-which measures that a Win32 vocabulary does not fire on things that are not
-Win32 programs. That is the smaller claim v0.4 already made, and no quantity
-of ELF files will ever make it the larger one. The blocker is a corpus of
-ordinary Windows binaries, which is an item somebody can go and obtain, not a
-release number to point at. It is listed above as one.
+**What they were waiting on was a Windows corpus, and v0.4.3 supplied it.**
+`api_capability` fired zero times over 6,688 ordinary Linux files and 23.7% of
+the time over 291 ordinary Windows ones. It is settled: no path to medium, on
+a measurement rather than an argument. The same run found the largest defect
+this tool has had -- `no_imports` at medium on resource-only modules, which is
+half of what Windows ships -- and took the gate from 32.3% to 15.8%.
+
+What it could not settle is now specific rather than general.
+`registry_persistence_path` needs installers, so it needs a `Program Files`
+corpus; the YARA severity question needs an environment where yara-python
+builds. Both are listed above, because a decision waiting on a named artefact
+is in better shape than one waiting on a release.
 
 **What stays here is what genuinely needs both labels.** Precision, recall and
 the false negative cost of known-good filtering cannot be computed from a

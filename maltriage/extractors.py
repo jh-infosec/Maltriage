@@ -1658,7 +1658,32 @@ class PEExtractor(RandomAccessExtractor):
         # Gated on `imports_parsed` because an import table that could not be
         # followed is not an absent one, and this is the finding a forged
         # import RVA would otherwise buy at medium.
-        if not count and data.get("imports_parsed") and not data.get("is_driver"):
+        # A module with no entry point and no executable section carries no
+        # code, and the finding below is an argument about code: a binary with
+        # no imports must resolve them at runtime, which takes instructions to
+        # do. There are none here, so the premise does not hold.
+        #
+        # This is not a special case invented for Windows. It is the standard
+        # Windows localisation mechanism -- every `en-US\*.mui` is a
+        # resource-only module, and so are a large share of the DLLs beside
+        # them. Measured over a sample of System32, `no_imports` fired on 17.9%
+        # of ordinary files at medium and was the sole cause of flagging on 48
+        # of the 94 files the gate caught. It was the single largest
+        # contributor to a 32.3% false positive rate, against 0.6% on Linux.
+        #
+        # Reported at `info` rather than passed over in silence: a PE with no
+        # code is a fact an analyst wants, and without it the absence of every
+        # import-derived finding has no visible explanation.
+        sections = data.get("sections") or []
+        resource_only = bool(sections) and not data.get("entry_point") and not any(
+            s["code"] or s["executable"] for s in sections)
+        if resource_only:
+            out.append(mk_finding(self.name, "resource_only_module",
+                "no entry point and no executable section, so this module "
+                "carries resources rather than code", "info"))
+
+        if (not count and data.get("imports_parsed")
+                and not data.get("is_driver") and not resource_only):
             out.append(mk_finding(self.name, "no_imports",
                 "no imports at all, so this cannot reach the API it needs "
                 "without resolving it at runtime, the usual mark of a packed "

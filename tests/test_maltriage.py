@@ -15,6 +15,7 @@ alongside the CHANGELOG entry that describes it.
 """
 
 import ast
+import collections
 import io
 import json
 import math
@@ -54,7 +55,8 @@ from maltriage.extractors import (
     expected_random_entropy,
     shannon,
 )
-from maltriage.models import SCHEMA_VERSION, SEVERITIES, Report, mk_finding
+from maltriage.models import (SCHEMA_VERSION, SEVERITIES, SEVERITY_RANK, Report,
+                              mk_finding)
 from maltriage.extractors import default_extractors
 from maltriage.pipeline import analyse, analyse_directory
 from maltriage.config import (
@@ -4626,3 +4628,282 @@ def test_the_repository_is_utf8_and_not_merely_ascii():
     assert undefined & set(readme), (
         "the README's box-drawing characters are gone, which is fine, but "
         "then this test is pinning a defect that can no longer occur")
+
+
+# Corpus sources: labelling a directory you already have
+#
+# The layout tests above cover a corpus somebody assembled. These cover one
+# that already exists -- a system directory, a package cache -- where the
+# labels have to be given rather than read off a path, because copying two
+# gigabytes of Windows in order to rename its parent folder is a cost this
+# tool has no business imposing.
+
+
+def test_named_directories_carry_the_label_they_are_given(tmp_path):
+    ordinary = tmp_path / "System32"
+    samples = tmp_path / "zoo"
+    for directory in (ordinary, samples):
+        (directory / "nested").mkdir(parents=True)
+        (directory / "a.bin").write_bytes(b"x")
+        (directory / "nested" / "b.bin").write_bytes(b"x")
+
+    found = corpus_module.named_files({"benign": [ordinary], "malicious": [samples]})
+    assert sorted((label, path.name) for label, path in found) == [
+        ("benign", "a.bin"), ("benign", "b.bin"),
+        ("malicious", "a.bin"), ("malicious", "b.bin"),
+    ]
+    # Nothing about the directory's own name decided that.
+    assert "System32" not in {label for label, _ in found}
+
+
+def test_several_directories_may_share_a_label(tmp_path):
+    """System32 and SysWOW64 are one population in two places."""
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / f"{name}.bin").write_bytes(b"x")
+    found = corpus_module.named_files(
+        {"benign": [tmp_path / "one", tmp_path / "two"]})
+    assert [path.name for _, path in found] == ["one.bin", "two.bin"]
+
+
+def test_a_label_the_harness_does_not_know_is_refused(tmp_path):
+    """`--unknown` cannot reach here from the CLI, but the function is the
+    contract and a label invented by a caller would land in a rate table as
+    though it meant something."""
+    with pytest.raises(ValueError, match="unknown label"):
+        corpus_module.named_files({"probably_fine": [tmp_path]})
+
+
+def test_a_named_directory_that_is_not_one_is_refused(tmp_path):
+    (tmp_path / "file.bin").write_bytes(b"x")
+    with pytest.raises(NotADirectoryError):
+        corpus_module.named_files({"benign": [tmp_path / "file.bin"]})
+
+
+def test_a_sample_is_capped_per_label_and_not_overall(tmp_path):
+    items = ([("benign", tmp_path / f"b{i}") for i in range(50)]
+             + [("malicious", tmp_path / f"m{i}") for i in range(3)])
+    drawn = corpus_module.sample(items, limit=10)
+    counts = collections.Counter(label for label, _ in drawn)
+    # Ten of the fifty, and all three of the three: a limit is a ceiling, not
+    # a quota, or a small malicious set would be silently discarded.
+    assert counts == {"benign": 10, "malicious": 3}
+
+
+def test_a_sample_is_reproducible_and_not_the_first_n(tmp_path):
+    """The first files of a sorted system directory all begin with the same
+    letter, and on Windows that is a coherent group rather than an arbitrary
+    one: `api-ms-win-*` alone is hundreds of stub DLLs that are nothing like
+    the rest of System32."""
+    items = [("benign", tmp_path / f"{i:03d}.bin") for i in range(200)]
+    first = corpus_module.sample(items, limit=20)
+    assert first == corpus_module.sample(items, limit=20), "not reproducible"
+    assert first != items[:20], "the sample is just the first twenty"
+    assert first == sorted(first), "a sample should still scan in order"
+    assert len(set(first)) == 20
+
+
+def test_a_sample_larger_than_the_corpus_is_the_corpus(tmp_path):
+    items = [("benign", tmp_path / "a.bin")]
+    assert corpus_module.sample(items, limit=500) == items
+
+
+def test_a_limit_of_zero_is_refused():
+    with pytest.raises(ValueError, match="must be positive"):
+        corpus_module.sample([("benign", Path("a"))], limit=0)
+
+
+def test_a_sampled_result_says_what_it_was_sampled_from(tmp_path):
+    """Six months later the JSON is the only thing left, and a rate over 3 of
+    8 files is a different claim from a rate over 8."""
+    written = write_samples(tmp_path / "files")
+    result = corpus_module.scan_files(
+        corpus_module.named_files({"benign": [tmp_path / "files"]}), limit=3)
+
+    assert result.files == {"benign": 3}
+    assert result.available == {"benign": len(written)}
+    assert result.to_dict()["sampled_from"] == {"benign": len(written)}
+    assert "sampled from" in corpus_module.render(result)
+
+
+def test_a_full_run_does_not_claim_to_be_a_sample(tmp_path):
+    write_samples(tmp_path / "files")
+    result = corpus_module.scan_files(
+        corpus_module.named_files({"benign": [tmp_path / "files"]}))
+    assert result.available == result.files
+    assert "sampled_from" not in result.to_dict()
+    assert "sampled from" not in corpus_module.render(result)
+
+
+def test_scan_corpus_still_takes_a_root(tmp_path):
+    """The layout did not go anywhere; it grew an alternative."""
+    written = write_samples(tmp_path / "benign")
+    result = corpus_module.scan_corpus(tmp_path)
+    assert result.files == {"benign": len(written)}
+
+
+# The same, through the CLI
+
+
+def test_corpus_command_takes_named_directories(tmp_path, capsys):
+    write_samples(tmp_path / "anything")
+    code = cli.main(["corpus", "--benign", str(tmp_path / "anything")])
+    assert code == cli.EXIT_CLEAN
+    assert "gate (medium+)" in capsys.readouterr().out
+
+
+def test_corpus_command_takes_a_limit(tmp_path, capsys):
+    write_samples(tmp_path / "anything")
+    cli.main(["corpus", "--benign", str(tmp_path / "anything"), "--limit", "2"])
+    out = capsys.readouterr().out
+    assert "corpus: 2 benign" in out
+    assert "sampled from" in out
+
+
+def test_corpus_command_refuses_a_root_and_named_directories_together(tmp_path, capsys):
+    """They are two ways of saying where the files are, and naming both is
+    ambiguous rather than additive."""
+    write_samples(tmp_path / "benign")
+    code = cli.main(["corpus", str(tmp_path), "--benign", str(tmp_path / "benign"), "-q"])
+    assert code == cli.EXIT_USAGE
+    assert "not both" in capsys.readouterr().err
+
+
+def test_corpus_command_refuses_neither(capsys):
+    assert cli.main(["corpus", "-q"]) == cli.EXIT_USAGE
+    assert "names neither" in capsys.readouterr().err
+
+
+def test_corpus_command_refuses_a_limit_below_one(tmp_path, capsys):
+    write_samples(tmp_path / "anything")
+    code = cli.main(["corpus", "--benign", str(tmp_path / "anything"),
+                     "--limit", "0", "-q"])
+    assert code == cli.EXIT_USAGE
+    assert "number of files per label" in capsys.readouterr().err
+
+
+def test_corpus_command_reports_a_named_directory_that_is_missing(tmp_path, capsys):
+    code = cli.main(["corpus", "--benign", str(tmp_path / "nope"), "-q"])
+    assert code == cli.EXIT_USAGE
+    assert "no such directory" in capsys.readouterr().err
+
+
+def test_corpus_command_names_the_labels_it_accepts():
+    """`--benign` and `--malicious` are generated from LABELS, so a third
+    label cannot arrive with a flag missing."""
+    parser = cli.build_parser()
+    for label in corpus_module.LABELS:
+        args = parser.parse_args(["corpus", f"--{label}", "x"])
+        assert getattr(args, label) == [Path("x")]
+
+
+def test_a_symlink_is_not_a_second_file(tmp_path):
+    """A denominator that counts one file twice is the one thing a false
+    positive rate must not do. This matters most where the harness is now
+    pointed: a Windows system directory is full of hard links and reparse
+    points, and a Linux `/usr/lib` is mostly symlinks to sonames."""
+    directory = tmp_path / "files"
+    directory.mkdir()
+    real = directory / "libthing.so.1.2.3"
+    real.write_bytes(b"MZ" + b"\x00" * 64)
+    try:
+        (directory / "libthing.so.1").symlink_to(real)
+    except OSError:
+        pytest.skip("this platform will not create a symlink without privileges")
+
+    found = corpus_module.named_files({"benign": [directory]})
+    assert [path.name for _, path in found] == ["libthing.so.1.2.3"]
+
+    result = corpus_module.scan_files(found)
+    assert result.files == {"benign": 1}
+
+
+# Resource-only modules
+#
+# Measured on Windows, which is the only place this population exists in
+# quantity: `no_imports` fired on 17.9% of a System32 sample at medium and was
+# the sole cause of flagging on 48 of the 94 files the gate caught. Windows
+# ships thousands of resource-only modules -- every `en-US\*.mui` is one -- and
+# a module with no code cannot be a stub that resolves its imports at runtime,
+# which is the entire argument `no_imports` makes.
+
+
+def _resource_only_pe():
+    """A module carrying resources and no code, the way Windows ships them."""
+    return build_pe(sections=[(".rsrc", SECTION_RDATA, b"\x00" * 0x200)],
+                    entry_section=".rsrc", entry_point=0)
+
+
+@needs_pefile
+def test_a_resource_only_module_is_not_a_packed_stub(write):
+    report = analyse(write("thing.mui", _resource_only_pe()))
+    keys = {f["key"] for f in report.findings}
+    assert "no_imports" not in keys
+    assert "resource_only_module" in keys
+
+
+@needs_pefile
+def test_a_resource_only_module_says_so_rather_than_saying_nothing(write):
+    """Suppressing the finding without reporting the fact would leave the
+    absence of every import-derived finding unexplained."""
+    report = analyse(write("thing.mui", _resource_only_pe()))
+    finding = next(f for f in report.findings if f["key"] == "resource_only_module")
+    assert finding["severity"] == "info"
+    assert "resources rather than code" in finding["detail"]
+    # Info, so it cannot reach the gate on its own.
+    assert SEVERITY_RANK[report.severity] < SEVERITY_RANK[cli.GATE_SEVERITY]
+
+
+@needs_pefile
+def test_a_stub_with_code_and_no_imports_is_still_medium(write):
+    """The case the finding exists for. An executable section and an entry
+    point mean there is something that could resolve imports at runtime, which
+    is the whole argument -- so the exclusion must not reach it."""
+    body = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180)])
+    report = analyse(write("packed.exe", body))
+    by_key = {f["key"]: f for f in report.findings}
+    assert by_key["no_imports"]["severity"] == "medium"
+    assert "resource_only_module" not in by_key
+
+
+@needs_pefile
+def test_an_entry_point_defeats_the_exclusion(write):
+    """A module with no executable section but a non-zero entry point is not a
+    resource module, it is a malformed one, and hiding `no_imports` behind the
+    exclusion would be a way to carry code past the gate."""
+    body = build_pe(sections=[(".rsrc", SECTION_RDATA, b"\x00" * 0x200)],
+                    entry_section=".rsrc")
+    report = analyse(write("odd.dll", body))
+    keys = {f["key"] for f in report.findings}
+    assert "resource_only_module" not in keys
+    assert "no_imports" in keys
+
+
+@needs_pefile
+def test_a_resource_only_module_with_imports_is_ordinary(write):
+    """Resources plus an import table is a normal DLL that happens to have no
+    code section in this fixture. Nothing about it should be reported."""
+    body = build_pe(sections=[(".rsrc", SECTION_RDATA, b"\x00" * 0x200)],
+                    imports={"kernel32.dll": ["LoadLibraryA", "GetProcAddress",
+                                              "CreateFileW", "WriteFile",
+                                              "CloseHandle", "ExitProcess",
+                                              "GetLastError"]},
+                    entry_section=".rsrc", entry_point=0)
+    report = analyse(write("thing.dll", body))
+    keys = {f["key"] for f in report.findings}
+    assert "no_imports" not in keys and "few_imports" not in keys
+    # Still resource-only by shape, and still worth saying.
+    assert "resource_only_module" in keys
+
+
+@needs_pefile
+def test_code_without_an_entry_point_is_not_resource_only(write):
+    """A DLL with no `DllMain` has an entry point of zero and is entirely
+    ordinary. It still carries code, so it is not a resource module, and the
+    stub argument still applies to it."""
+    body = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180)],
+                    entry_point=0)
+    report = analyse(write("nodllmain.dll", body))
+    keys = {f["key"] for f in report.findings}
+    assert "resource_only_module" not in keys
+    assert "no_imports" in keys

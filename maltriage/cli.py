@@ -248,15 +248,36 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     # Checked before the scan rather than after it. A corpus run is minutes
     # long, and `--max-false-positive-rate 5` meaning five percent is the
     # mistake somebody will make.
-    limit = args.max_false_positive_rate
-    if limit is not None and not 0.0 <= limit <= 1.0:
+    ceiling = args.max_false_positive_rate
+    if ceiling is not None and not 0.0 <= ceiling <= 1.0:
         print(f"{APP_NAME}: --max-false-positive-rate is a fraction between "
-              f"0 and 1, not {limit}", file=sys.stderr)
+              f"0 and 1, not {ceiling}", file=sys.stderr)
         return EXIT_USAGE
 
-    if not args.root.is_dir():
-        print(f"{APP_NAME}: no such directory: {args.root}", file=sys.stderr)
+    if args.limit is not None and args.limit < 1:
+        print(f"{APP_NAME}: --limit is a number of files per label, "
+              f"not {args.limit}", file=sys.stderr)
         return EXIT_USAGE
+
+    # Two ways of saying where the files are, and naming both is ambiguous
+    # rather than additive: a root already carries labels, and the flags carry
+    # their own.
+    sources = {label: getattr(args, label) or []
+               for label in corpus_module.LABELS}
+    named = any(sources.values())
+    if bool(args.root) == named:
+        flags = " or ".join(f"--{label}" for label in corpus_module.LABELS)
+        ending = ("but not both" if args.root
+                  else "but this command names neither")
+        print(f"{APP_NAME}: name a corpus root, or {flags} directories, "
+              f"{ending}", file=sys.stderr)
+        return EXIT_USAGE
+
+    for directory in [args.root] if args.root else [
+            d for paths in sources.values() for d in paths]:
+        if not directory.is_dir():
+            print(f"{APP_NAME}: no such directory: {directory}", file=sys.stderr)
+            return EXIT_USAGE
 
     # A corpus run reaches thousands of files, and a parser that fails on a
     # third of them would print a third of them to stderr and bury the report
@@ -266,12 +287,19 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     if not args.verbose:
         logging.getLogger(__package__).setLevel(logging.ERROR)
 
-    result = corpus_module.scan_corpus(args.root, per_file=args.per_file)
+    items = (corpus_module.labelled_files(args.root) if args.root
+             else corpus_module.named_files(sources))
+    result = corpus_module.scan_files(items, per_file=args.per_file,
+                                      limit=args.limit)
 
     if not result.total_files:
-        labels = ", ".join(corpus_module.LABELS)
-        print(f"{APP_NAME}: no labelled files under {args.root} "
-              f"(expected subdirectories named: {labels})", file=sys.stderr)
+        if args.root:
+            labels = ", ".join(corpus_module.LABELS)
+            print(f"{APP_NAME}: no labelled files under {args.root} "
+                  f"(expected subdirectories named: {labels})", file=sys.stderr)
+        else:
+            print(f"{APP_NAME}: the directories you named hold no files",
+                  file=sys.stderr)
         return EXIT_USAGE
 
     if not args.quiet:
@@ -286,7 +314,7 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     # A threshold the caller stated. Checked against the benign set only, so
     # pointing this at a corpus with no benign files is a usage error rather
     # than a silent pass.
-    if limit is None:
+    if ceiling is None:
         return EXIT_CLEAN
 
     measured = result.false_positive_rate()
@@ -294,9 +322,9 @@ def cmd_corpus(args: argparse.Namespace) -> int:
         print(f"{APP_NAME}: --max-false-positive-rate needs benign files, "
               f"and this corpus has none", file=sys.stderr)
         return EXIT_USAGE
-    if measured > limit:
+    if measured > ceiling:
         print(f"{APP_NAME}: false positive rate {measured:.2%} exceeds the "
-              f"{limit:.2%} allowed", file=sys.stderr)
+              f"{ceiling:.2%} allowed", file=sys.stderr)
         return EXIT_FINDINGS
     return EXIT_CLEAN
 
@@ -339,7 +367,21 @@ def build_parser() -> argparse.ArgumentParser:
                     "named for what is in them (benign, malicious) and report "
                     "how often each finding key fires on each. A corpus of "
                     "benign files alone is enough for false positive rates.")
-    corpus.add_argument("root", type=Path)
+    corpus.add_argument("root", type=Path, nargs="?",
+                        help="a corpus root holding benign/ and malicious/ "
+                             "directories")
+    for label in corpus_module.LABELS:
+        corpus.add_argument(f"--{label}", type=Path, action="append",
+                            metavar="DIR",
+                            help=f"a directory of {label} files, labelled "
+                                 f"as given rather than by its name. Repeatable, "
+                                 f"and the alternative to copying a corpus you "
+                                 f"already have into one")
+    corpus.add_argument("--limit", type=int, metavar="N",
+                        help="scan at most N files of each label, drawn at "
+                             "random with a fixed seed so the sample can be "
+                             "redrawn. The result records what it was sampled "
+                             "from")
     corpus.add_argument("--json", type=Path, metavar="PATH",
                         help="write the full result here, including the "
                              "counterfactual")

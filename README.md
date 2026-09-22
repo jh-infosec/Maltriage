@@ -269,6 +269,20 @@ the gate, how many ordinary files promoting it would newly flag, and for every
 key at or above it, how many demoting it would stop flagging. Both marginal —
 counting only the files where nothing else already decides the outcome.
 
+For a corpus you already have rather than one you assembled, name the label
+instead of building the directory
+
+```bash
+maltriage corpus --benign /usr/bin --benign /usr/lib --limit 500
+```
+
+`--benign` and `--malicious` are repeatable and take the label as given, so a
+system directory can be measured in place. `--limit` scans at most that many
+files of each label, drawn at random with a fixed seed — the first files of a
+sorted system directory are a coherent group rather than an arbitrary one, and
+a sample nobody can redraw is a measurement nobody can check. A sampled result
+says what it was sampled from, in the output and in the JSON.
+
 ```bash
 maltriage corpus ./corpus --json corpus.json --max-false-positive-rate 0.01
 ```
@@ -299,11 +313,11 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The suite is **374 tests**, and how many run depends on which optional
+The suite is **399 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
 it is missing — the same rule the extractors follow. Two anchors, both
-verified: with everything installed, **374 passed, 0 skipped**; with neither
-pefile nor yara-python, **278 passed, 96 skipped**. Anything in between is
+verified: with everything installed, **399 passed, 0 skipped**; with neither
+pefile nor yara-python, **297 passed, 102 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
 lists them).
 

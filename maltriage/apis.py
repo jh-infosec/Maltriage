@@ -51,17 +51,27 @@ human because of that finding alone, and no API name clears it:
 
 So a category carries `info` or `low` and there is no path to medium.
 
-The harness arrived in v0.4.2 and did not settle this. Over 6,688 ordinary
-files -- system binaries, shared objects, Python source, documentation -- the
-capability findings fired **zero times**, exactly as over the 6,725 measured
-in v0.4. That is not a false positive rate of zero. None of those files is a
-Windows program, so what was measured is that a Win32 vocabulary does not fire
-on things that are not Win32 programs, which was already known and is a much
-smaller claim.
+**Settled in v0.4.3, and the answer is no, permanently.** Measured over a
+seeded sample of 291 files from `C:\\Windows\\System32` -- the most ordinary
+Windows code there is:
 
-What this severity is waiting on is therefore a corpus of ordinary Windows
-binaries, and not a release. That is written down where it can be acted on, in
-the roadmap, as an item.
+- `api_capability` fires on **23.7%** of them. Nearly one ordinary Windows
+  binary in four.
+- Promoting it to medium would newly flag 44 files that nothing else flags,
+  taking the gate from 15.8% to **30.9%**. It would roughly double the false
+  positive rate of the entire tool in one edit.
+
+v0.4 said "when the corpus can state the cost, that is the release that may
+change it". The cost is stated. Nothing here reaches medium, and the sentence
+above is no longer an argument that could be revisited by a better argument --
+it is a measurement, and it would take a different measurement to move it.
+
+The v0.4.2 run over 6,688 Linux files produced zero capability findings, which
+was never the answer: none of those files is a Windows program, so what it
+measured was that a Win32 vocabulary does not fire on things that are not
+Win32 programs. Both numbers are worth keeping. 0% on the wrong corpus and
+23.7% on the right one is the clearest statement this project has of why the
+corpus has to match the claim.
 
 
 ## `mitre` is recorded and not emitted
