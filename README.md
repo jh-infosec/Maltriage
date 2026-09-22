@@ -182,12 +182,15 @@ keep two lists in step, here is the shape, and the file has the detail.
 - **v0.2** executable structure: PE and ELF
 - **v0.3** YARA integration, a bundled structural rule set, rule authoring notes
 - **v0.4** a package layout, strings/IOCs, API capability detection, the
-  findings envelope, ATT&CK mapping and the shared secret engine (shipped);
-  reputation enrichment and offline mode
+  findings envelope, ATT&CK mapping, the shared secret engine and the corpus
+  harness (shipped); reputation enrichment and offline mode
 - **v0.5** archive recursion, with the bomb, traversal and time bounds that
   make it safe, plus known-good filtering
 - **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
-- **v0.7** the measurement release: corpus harness, precision and recall
+- **v0.7** the measurement release: precision and recall against a labelled
+  corpus, run diffing, and what known-good filtering costs in false negatives.
+  The harness itself shipped in v0.4.2, because six decisions were waiting on
+  it and nothing else was
 - **v0.8** feature vectors and a gradient boosting classifier
 - **v0.9** the adversarial release: attack that classifier, then harden it
 - **v1.0** HTML reports, a stable envelope, packaged distribution, CI
@@ -248,6 +251,36 @@ findings, what could not be run, and a content hash — and no path, no
 filename and no extraction data, so it does not leak the directory layout and
 username that every other output here does.
 
+Measure what the findings cost, against files you already know the nature of
+
+```bash
+maltriage corpus ./corpus --counterfactual
+```
+
+A corpus root holds directories named `benign` and `malicious`, and anything
+outside one is skipped rather than guessed at. **A corpus of benign files
+alone is enough**, and is the case this is built for: precision and recall
+need both labels, false positive rates need only one, and the false positive
+rate is what a severity decision turns on. What cannot be computed from what
+you supplied comes back as `null` rather than as a zero.
+
+`--counterfactual` is the part that answers a question: for every key below
+the gate, how many ordinary files promoting it would newly flag, and for every
+key at or above it, how many demoting it would stop flagging. Both marginal —
+counting only the files where nothing else already decides the outcome.
+
+```bash
+maltriage corpus ./corpus --json corpus.json --max-false-positive-rate 0.01
+```
+
+Exits non-zero if the gate flags more than 1% of the benign files, so a rate
+you measured once can be pinned in CI. Without that flag a corpus run always
+exits clean; it is a measurement, not a gate.
+
+The result carries counts and rates and no filenames. `--per-file` adds a
+record per file keyed by SHA-256, and is off unless asked for: a corpus
+directory is, by construction, a description of somebody's sample collection.
+
 Every `maltriage` above works as `python -m maltriage` if you would rather not
 install, or if the console script is not on your `PATH`.
 
@@ -266,11 +299,11 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The suite is **343 tests**, and how many run depends on which optional
+The suite is **374 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
 it is missing — the same rule the extractors follow. Two anchors, both
-verified: with everything installed, **343 passed, 0 skipped**; with neither
-pefile nor yara-python, **247 passed, 96 skipped**. Anything in between is
+verified: with everything installed, **374 passed, 0 skipped**; with neither
+pefile nor yara-python, **278 passed, 96 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
 lists them).
 
@@ -296,6 +329,21 @@ security taking an interest in it is a predictable outcome rather than a
 surprising one. Relocating the scratch space is the fix; adding an antivirus
 exclusion for it is not, because that is a permanent hole in the machine's
 coverage traded for a command-line flag.
+
+**If you develop on Linux and ship to Windows, run the suite once like this
+before you tag anything:**
+
+```bash
+LANG=C LC_ALL=C python -X utf8=0 -m pytest -q
+```
+
+That forces the interpreter to decode text files with an ASCII locale instead
+of UTF-8, which is the same class of failure a default Windows install
+produces with cp1252. Two of the v0.4.1 README tests shipped broken on Windows
+for a release because "verified from a clean clone" was verified on one
+operating system, and the file they read draws a diagram with box characters.
+Every text read and write in this repository now states `encoding="utf-8"`,
+and a test walks the source with `ast` and fails if a new one does not.
 
 ---
 

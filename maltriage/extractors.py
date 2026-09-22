@@ -24,7 +24,8 @@ from rather than what they do:
 v0.1.1 gave every extractor the path and let it read for itself. That cost
 three opens and two full reads of every sample, and made peak memory track
 sample size because entropy called `read_bytes()`. The single pass exists to
-make corpus-scale work possible in v0.7.
+make corpus-scale work possible, which since v0.4.2 is a thing that happens
+rather than a thing that is planned.
 
 A stream extractor must keep its own memory bounded. Buffering the chunks it
 is handed would reintroduce exactly the problem this design removes.
@@ -711,8 +712,11 @@ class StringsExtractor(StreamExtractor):
             # Low, not medium. An installer writing a Run key is an installer,
             # and `GATE_SEVERITY` is medium: a finding earns it only if a file
             # deserves a human because of that finding alone. Turning this
-            # into evidence is the classifier's job, once v0.7 can measure
-            # what it costs.
+            # into evidence is the classifier's job, once the cost is known.
+            # The corpus harness landed in v0.4.2 and cannot state it: this
+            # never fired over 6,688 ordinary Linux files, which says nothing
+            # about Windows ones. It waits on a Windows corpus, which the
+            # roadmap now carries as an item rather than as a release.
             out.append(mk_finding(self.name, "registry_persistence_path",
                 f"{'at least ' if capped else ''}{len(persistence)} registry "
                 f"path(s) that survive a reboot: "

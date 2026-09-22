@@ -12,8 +12,21 @@ feature that exists to make something run.
 
 Family signatures do not belong here. This project has no corpus to keep them
 honest, ships no samples, and a signature list nobody can measure rots into
-false confidence. That measurement arrives at v0.7; until then a rule has to
-justify itself by reasoning rather than by a hit rate.
+false confidence. A rule justifies itself by reasoning rather than by a hit
+rate, and that has not changed.
+
+What did change in v0.4.2 is that half of it is now measurable.
+`maltriage corpus <dir> --counterfactual` will tell you what a rule costs on
+ordinary files: point it at a directory of software you trust and read the
+`yara_match` line. The bundled set costs 0.03% -- two files in 6,688, both
+binutils, which embeds header magic for every format it parses and is right to
+match a rule about a header where one does not belong.
+
+**A rule's hit rate on real malware is still unmeasurable here**, and that is
+what a family signature would need. The corpus answers what a rule costs, not
+what it catches, so a rule that cannot argue for itself is not rescued by a
+low false positive rate. Costing nothing and doing nothing look identical from
+the benign side.
 
 Nor does anything the extractors already report. Packed section names,
 writable executable sections, overlays and import counts are the PE

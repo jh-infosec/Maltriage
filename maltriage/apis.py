@@ -46,11 +46,22 @@ human because of that finding alone, and no API name clears it:
   linked against a C runtime calls `LoadLibrary`.
 - In combination they are better evidence, but "better" is not the same as
   measurable, and the false positive rate of a capability cluster is exactly
-  what v0.7's corpus harness exists to establish. `registry_persistence_path`
-  is already held at low for this reason, and this is the same argument.
+  what the corpus harness exists to establish. `registry_persistence_path` is
+  already held at low for this reason, and this is the same argument.
 
-So a category carries `info` or `low` and there is no path to medium. When
-v0.7 can state the cost, that is the release that may change it.
+So a category carries `info` or `low` and there is no path to medium.
+
+The harness arrived in v0.4.2 and did not settle this. Over 6,688 ordinary
+files -- system binaries, shared objects, Python source, documentation -- the
+capability findings fired **zero times**, exactly as over the 6,725 measured
+in v0.4. That is not a false positive rate of zero. None of those files is a
+Windows program, so what was measured is that a Win32 vocabulary does not fire
+on things that are not Win32 programs, which was already known and is a much
+smaller claim.
+
+What this severity is waiting on is therefore a corpus of ordinary Windows
+binaries, and not a release. That is written down where it can be acted on, in
+the roadmap, as an item.
 
 
 ## `mitre` is recorded and not emitted

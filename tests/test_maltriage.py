@@ -14,6 +14,7 @@ alongside the CHANGELOG entry that describes it.
     pytest
 """
 
+import ast
 import io
 import json
 import math
@@ -35,6 +36,7 @@ from maltriage import secrets as secrets_module
 from maltriage import envelope as envelope_module
 from maltriage.envelope import to_envelope
 from maltriage import cli
+from maltriage import corpus as corpus_module
 from maltriage import extractors as extractors_module
 from maltriage.extractors import (
     EntropyExtractor,
@@ -424,7 +426,7 @@ def test_json_output_is_always_a_list(tmp_path):
     for directory in (one, many):
         out = tmp_path / f"{directory.name}.json"
         cli.main(["scan", str(directory), "--json", str(out), "-q"])
-        assert isinstance(json.loads(out.read_text()), list)
+        assert isinstance(json.loads(out.read_text(encoding="utf-8")), list)
 
 
 def test_missing_target_exits_cleanly(tmp_path, capsys):
@@ -1748,7 +1750,7 @@ def test_the_bundled_rules_are_text_and_carry_a_severity_each():
     for path in files:
         # Split on declarations at column zero, so prose in the file header
         # that happens to contain the word "rule" is not counted as one.
-        blocks = re.split(r"^rule\s+", path.read_text(), flags=re.MULTILINE)[1:]
+        blocks = re.split(r"^rule\s+", path.read_text(encoding="utf-8"), flags=re.MULTILINE)[1:]
         assert blocks, f"{path.name} declares no rules"
         for block in blocks:
             name = block.split()[0]
@@ -1771,7 +1773,7 @@ def test_no_bundled_rule_reaches_high():
     that lies about what it is, and a byte pattern is not in a position to
     establish deception."""
     for path in sorted(RULE_DIR.glob("*.yar")):
-        assert '"high"' not in path.read_text()
+        assert '"high"' not in path.read_text(encoding="utf-8")
 
 
 @needs_yara
@@ -3471,7 +3473,7 @@ def _every_finding_key() -> set[str]:
 
     Reading the source is unlovely, but the alternative is a hand-maintained
     second list, which is the thing this test exists to catch."""
-    source = Path(extractors_module.__file__).read_text()
+    source = Path(extractors_module.__file__).read_text(encoding="utf-8")
     keys = set(re.findall(r'mk_finding\(\s*self\.name,\s*"([a-z_]+)"', source))
     keys |= {f"{stem}_present" for stem in
              ("urls", "emails", "ipv4", "mutexes", "windows_paths",
@@ -3546,7 +3548,7 @@ def test_the_cli_writes_one_envelope_per_file(write, tmp_path, capsys):
     write("b.txt", b"ordinary text\n" * 8)
     out = tmp_path / "env.jsonl"
     cli.main(["scan", str(tmp_path), "--envelope", str(out), "-q"])
-    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert len(lines) == 2
     assert all(line["envelope_version"] == envelope_module.ENVELOPE_VERSION
                for line in lines)
@@ -3635,7 +3637,7 @@ def test_no_bundled_rule_declares_a_technique():
     This test is what makes that a decision rather than a thing nobody got
     round to. Adding `mitre` to a bundled rule should require deleting it."""
     source = (Path(extractors_module.__file__).parent / "rules"
-              / "structural.yar").read_text()
+              / "structural.yar").read_text(encoding="utf-8")
     assert "mitre" not in source
 
 
@@ -3728,11 +3730,46 @@ def test_a_token_inside_a_longer_string_is_not_a_candidate():
     assert secrets_module.scan(f"loading resource {token} from cache") == []
     assert secrets_module.scan(f"{token}.cache.tmp") == []
 
-    # `prefix-TOKEN` is deliberately not in that list. A hyphen is inside the
-    # token character class -- base64url uses it -- so that string is one
-    # token of forty-seven characters rather than a token with something in
-    # front of it, and reporting it is right.
-    assert secrets_module.scan(f"prefix-{token}")
+
+
+def test_a_hyphenated_prefix_does_not_split_the_token():
+    """`prefix-TOKEN` is deliberately not one of the cases above. A hyphen is
+    inside the token character class -- base64url uses it -- so that string is
+    one token of forty-seven characters rather than a token with something in
+    front of it, and reporting it is right.
+
+    This was `assert secrets_module.scan(f"prefix-{token}")` on a single
+    detected token, and it failed about one run in twenty. The helper
+    guarantees the *bare* token is nominated; gluing seven low-entropy
+    characters onto it produces a different string with a lower entropy ratio,
+    and roughly one detected token in twenty falls under the bar once it is
+    diluted. The guarantee did not survive the concatenation, and the test
+    assumed it had.
+
+    So the claim is split in two. The tokenisation is a fact and is asserted
+    as one. What the entropy tier then does with that token is a heuristic and
+    is measured, the way every other rate in this file is."""
+    token = _detected_token(40)
+    glued = f"prefix-{token}"
+
+    # The fact: one span, the whole string. This is what "the hyphen does not
+    # split it" means, and it does not depend on any draw.
+    assert secrets_module._TOKEN.findall(glued) == [glued]
+    assert len(glued) == 47
+
+    # The heuristic: measured at 95.0% over 2,558 detected tokens. The bar is
+    # 85%, which is about six standard deviations below that -- far enough
+    # that a failure here means the rule changed, not that the dice did.
+    detected = nominated = 0
+    for _ in range(200):
+        candidate = _random_token(40)
+        if not secrets_module.scan(candidate):
+            continue
+        detected += 1
+        if secrets_module.scan(f"prefix-{candidate}"):
+            nominated += 1
+    assert detected > 100, detected
+    assert nominated > detected * 0.85, (nominated, detected)
 
 
 def test_a_candidate_has_no_field_for_the_value():
@@ -4009,7 +4046,7 @@ def _readme_commands() -> list[str]:
     readme = Path(__file__).resolve().parent.parent / "README.md"
     if not readme.is_file():
         pytest.skip("README.md is not beside the test suite in this layout")
-    blocks = re.findall(r"```bash\n(.*?)```", readme.read_text(), re.S)
+    blocks = re.findall(r"```bash\n(.*?)```", readme.read_text(encoding="utf-8"), re.S)
     lines = []
     for block in blocks:
         for line in block.splitlines():
@@ -4033,8 +4070,21 @@ def test_every_command_the_readme_documents_is_one_this_tool_accepts():
 
     parser = cli.build_parser()
     for command in commands:
-        if command.startswith(("pip install", "git config", "python -m pytest")):
+        # A shell line may carry leading environment assignments and the
+        # interpreter its own flags. `LANG=C python -X utf8=0 -m pytest` is
+        # the locale run the README documents, and it is the same command as
+        # `python -m pytest`. Model what a shell does rather than matching one
+        # spelling of it, or the allowlist grows a literal per invocation.
+        command = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+", "", command)
+        if command.startswith(("pip install", "git config")):
             continue
+        tokens = shlex.split(command)
+        if tokens[:1] == ["python"] and "-m" in tokens:
+            # `-X utf8=0` sits between the interpreter and `-m`, so read the
+            # module name off `-m` rather than off a fixed position.
+            module = tokens[tokens.index("-m") + 1:tokens.index("-m") + 2]
+            if module == ["pytest"]:
+                continue
         for prefix in ("maltriage ", "python -m maltriage "):
             if command.startswith(prefix):
                 args = shlex.split(command[len(prefix):])
@@ -4056,7 +4106,7 @@ def test_the_extras_the_readme_names_are_declared():
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
     if not pyproject.is_file():
         pytest.skip("pyproject.toml is not beside the test suite in this layout")
-    declared = set(re.findall(r"^(\w+)\s*=\s*\[", pyproject.read_text(), re.M))
+    declared = set(re.findall(r"^(\w+)\s*=\s*\[", pyproject.read_text(encoding="utf-8"), re.M))
     for command in _readme_commands():
         for extra in re.findall(r"\.\[([\w,]+)\]", command):
             for name in extra.split(","):
@@ -4087,9 +4137,492 @@ def test_the_readme_walkthrough_runs(tmp_path, capsys):
         cli.main(["scan", str(demo), "--recursive", flag, str(path), "-q"])
         assert path.is_file() and path.stat().st_size > 0, flag
 
-    reports = json.loads(outputs["--json"].read_text())
+    reports = json.loads(outputs["--json"].read_text(encoding="utf-8"))
     assert isinstance(reports, list) and len(reports) == len(list(demo.iterdir()))
-    for line in outputs["--envelope"].read_text().splitlines():
+    for line in outputs["--envelope"].read_text(encoding="utf-8").splitlines():
         envelope = json.loads(line)
         assert envelope["envelope_version"] == envelope_module.ENVELOPE_VERSION
         assert "path" not in envelope["subject"]
+
+
+# Corpus harness
+#
+# The arithmetic tests build reports by hand rather than by scanning, because
+# a rate computed from real extractor output is a test of the extractors. The
+# numbers below were worked out on paper first and are written into the
+# assertions as literals; if the implementation and the paper disagree, one of
+# them is wrong and the test says which figure it expected.
+
+
+def _corpus_report(keys, size=100, errors=None):
+    """A report carrying exactly the given keys at the given severities."""
+    report = Report(path="/corpus/benign/thing.bin", filename="thing.bin",
+                    size_bytes=size)
+    for key, severity in keys.items():
+        report.findings.append(mk_finding("test", key, "synthetic", severity))
+    report.errors.update(errors or {})
+    return report
+
+
+#: Five benign files, hand-worked:
+#:   f1 {a medium}            flagged, a is the sole cause
+#:   f2 {a medium, b medium}  flagged, neither is the sole cause
+#:   f3 {c low}               not flagged
+#:   f4 {c low, a medium}     flagged, a is the sole cause
+#:   f5 {}                    not flagged
+#: so 3 of 5 benign files flag, a fires on 3 and alone-flags 2, c fires on 2
+#: and would newly flag 1 (f3 -- f4 is already flagged by a).
+_BENIGN_CORPUS = (
+    {"a": "medium"},
+    {"a": "medium", "b": "medium"},
+    {"c": "low"},
+    {"c": "low", "a": "medium"},
+    {},
+)
+
+#: Two malicious files: one the gate catches, one it does not.
+_MALICIOUS_CORPUS = ({"a": "medium"}, {"c": "low"})
+
+
+def _hand_corpus(malicious=False):
+    result = corpus_module.CorpusResult()
+    for keys in _BENIGN_CORPUS:
+        corpus_module._record(result, "benign", _corpus_report(keys), False)
+    if malicious:
+        for keys in _MALICIOUS_CORPUS:
+            corpus_module._record(result, "malicious", _corpus_report(keys), False)
+    return result
+
+
+def test_corpus_takes_its_labels_from_directory_names(tmp_path):
+    """A corpus root is also where people keep notes, hashes and the script
+    they downloaded the samples with. Anything outside a label directory is
+    skipped rather than guessed at."""
+    for name in ("benign", "malicious", "notes", "scripts/inner"):
+        (tmp_path / name).mkdir(parents=True)
+        (tmp_path / name / "file.bin").write_bytes(b"x")
+    (tmp_path / "benign" / "nested").mkdir()
+    (tmp_path / "benign" / "nested" / "deep.bin").write_bytes(b"x")
+    (tmp_path / "loose.bin").write_bytes(b"x")
+
+    found = corpus_module.labelled_files(tmp_path)
+    assert sorted((label, path.name) for label, path in found) == [
+        ("benign", "deep.bin"), ("benign", "file.bin"), ("malicious", "file.bin"),
+    ]
+
+
+def test_corpus_counts_a_key_once_per_file():
+    """A sample matching forty YARA rules is one file that matched rules. If
+    findings were counted instead of files, one noisy sample would dominate a
+    rate that is supposed to describe a corpus."""
+    report = Report(path="/x", filename="x", size_bytes=1)
+    for index in range(40):
+        report.findings.append(
+            mk_finding("yara", "yara_match", f"rule {index}", "medium"))
+
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", report, False)
+
+    assert result.keys["yara_match"].fired == {"benign": 1}
+    assert result.flagged == {"benign": 1}
+
+
+def test_corpus_rates_are_the_ones_worked_out_by_hand():
+    result = _hand_corpus()
+
+    assert result.files == {"benign": 5}
+    assert result.flagged == {"benign": 3}
+    assert result.false_positive_rate() == 0.6
+
+    assert result.keys["a"].fired == {"benign": 3}
+    assert result.keys["a"].rate("benign", result.files) == 0.6
+    assert result.keys["c"].rate("benign", result.files) == 0.4
+    # A key's severity is the worst it reached anywhere in the corpus.
+    assert result.keys["a"].severity == "medium"
+    assert result.keys["c"].severity == "low"
+
+
+def test_corpus_counterfactual_is_marginal_not_gross():
+    """The distinction the whole feature turns on. `a` fires on three benign
+    files, but two of them would stay flagged by something else, so demoting it
+    buys one file back -- not three. A gross count would have named it the most
+    expensive key in the corpus."""
+    result = _hand_corpus()
+    analysis = corpus_module.counterfactual(result)
+
+    lowering = analysis["lowering"]["a"]
+    assert lowering["benign_files_fired_on"] == 3
+    assert lowering["benign_files_it_alone_flags"] == 2
+    assert lowering["false_positive_rate_after"] == 0.2   # (3 - 2) / 5
+
+    # `b` fires on one file, which `a` also flags. Demoting it buys nothing.
+    assert analysis["lowering"]["b"]["benign_files_it_alone_flags"] == 0
+    assert analysis["lowering"]["b"]["false_positive_rate_after"] == 0.6
+
+    # `c` fires on two files, one of which is already flagged by `a`.
+    raising = analysis["raising"]["c"]
+    assert raising["benign_files_fired_on"] == 2
+    assert raising["benign_files_it_would_newly_flag"] == 1
+    assert raising["false_positive_rate_after"] == 0.8    # (3 + 1) / 5
+
+
+def test_corpus_counterfactual_puts_the_expensive_keys_first():
+    """The list is read top down by somebody deciding what to change."""
+    result = _hand_corpus()
+    analysis = corpus_module.counterfactual(result)
+    assert list(analysis["lowering"]) == ["a", "b"]
+
+
+def test_corpus_marginal_counts_ignore_malicious_files():
+    """A malicious file the gate catches is the tool working. Counting it
+    towards the cost of a key would make every good detection look expensive."""
+    benign_only = _hand_corpus()
+    with_malicious = _hand_corpus(malicious=True)
+
+    for key in ("a", "b", "c"):
+        assert (with_malicious.keys[key].sole_cause
+                == benign_only.keys[key].sole_cause), key
+        assert (with_malicious.keys[key].would_newly_flag
+                == benign_only.keys[key].would_newly_flag), key
+    # `a` did fire on a malicious file; it is the marginal counts that ignore it.
+    assert with_malicious.keys["a"].fired == {"benign": 3, "malicious": 1}
+
+
+def test_corpus_says_none_rather_than_zero_for_what_it_cannot_measure():
+    """A precision of zero over an empty malicious set is a lie with a decimal
+    point in it. The harness is built for benign-only corpora, so this is the
+    normal case rather than an edge one."""
+    result = _hand_corpus()
+    assert result.recall() is None
+    assert result.precision() is None
+    assert result.false_positive_rate() == 0.6
+
+    as_dict = result.to_dict()
+    assert as_dict["gate"]["recall"] is None
+    assert as_dict["gate"]["precision"] is None
+    # And the per-key rates for a label with no files are None, not zero.
+    assert as_dict["keys"]["a"]["rates"] == {"benign": 0.6}
+
+
+def test_corpus_precision_and_recall_need_both_labels():
+    result = _hand_corpus(malicious=True)
+    assert result.recall() == 0.5                  # 1 of 2 malicious flagged
+    assert result.precision() == 0.25              # 1 malicious of 4 flagged
+    assert result.false_positive_rate() == 0.6     # unchanged by the new label
+
+
+def test_corpus_counterfactual_is_unavailable_without_benign_files():
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "malicious", _corpus_report({"a": "medium"}), False)
+    analysis = corpus_module.counterfactual(result)
+    assert analysis["available"] is False
+    assert "reason" in analysis
+
+
+def test_corpus_counts_what_could_not_be_run():
+    """A corpus where the PE parser was absent measures a different tool. The
+    count has to survive into the report or the rates are quietly wrong."""
+    result = corpus_module.CorpusResult()
+    for _ in range(3):
+        corpus_module._record(
+            result, "benign",
+            _corpus_report({"a": "medium"}, errors={"pe": "boom"}), False)
+    corpus_module._record(result, "benign", _corpus_report({}), False)
+
+    assert result.incomplete == {"pe": 3}
+    assert result.to_dict()["incomplete"] == {"pe": 3}
+
+
+def test_corpus_unreadable_files_do_not_shrink_the_denominator(tmp_path, monkeypatch):
+    """A file that cannot be read is not a benign file that passed."""
+    (tmp_path / "benign").mkdir()
+    for name in ("one.bin", "two.bin"):
+        (tmp_path / "benign" / name).write_bytes(b"x")
+
+    def explode(path, *args, **kwargs):
+        if Path(path).name == "one.bin":
+            raise PermissionError("denied")
+        return _corpus_report({})
+
+    monkeypatch.setattr(corpus_module, "analyse", explode)
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.files == {"benign": 1}
+    assert result.incomplete == {"unreadable": 1}
+
+
+def test_corpus_gate_matches_the_one_the_cli_enforces():
+    """Two constants, on purpose -- the CLI imports this module, so this one
+    cannot import the CLI. Mirrored constants drift, which is a defect this
+    project has already fixed three times, so the drift is pinned here."""
+    assert corpus_module.GATE_SEVERITY == cli.GATE_SEVERITY
+
+
+# Corpus harness, against real output
+
+
+def test_corpus_over_the_bundled_samples(tmp_path):
+    """The synthetic samples are deliberately suspicious, so the rate this
+    produces is not a false positive rate for anything. What it checks is that
+    the harness survives real reports: every fixture kind, a PE the parser
+    rejects, and a file type nothing recognises."""
+    written = write_samples(tmp_path / "benign")
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.files == {"benign": len(written)}
+    assert result.total_bytes == sum(p.stat().st_size for p in written)
+    assert result.keys, "a corpus of deliberate samples produced no findings"
+    assert 0.0 < result.false_positive_rate() <= 1.0
+    assert result.throughput()["files_per_second"] > 0
+
+    for outcome in result.keys.values():
+        assert 0.0 < outcome.rate("benign", result.files) <= 1.0
+        assert outcome.sole_cause <= outcome.fired["benign"]
+        assert outcome.would_newly_flag <= outcome.fired["benign"]
+        # A key cannot be both -- one side of the gate or the other.
+        assert not (outcome.sole_cause and outcome.would_newly_flag)
+
+
+def test_corpus_result_carries_rates_and_not_filenames(tmp_path):
+    """A corpus report gets kept and compared against later runs, and a corpus
+    directory is by construction a description of somebody's sample
+    collection."""
+    written = write_samples(tmp_path / "benign")
+    result = corpus_module.scan_corpus(tmp_path)
+
+    serialised = json.dumps(result.to_dict())
+    assert "per_file" not in result.to_dict()
+    assert str(tmp_path) not in serialised
+    for path in written:
+        assert path.name not in serialised
+
+
+def test_corpus_per_file_is_opt_in_and_still_carries_no_path(tmp_path):
+    """`--per-file` exists for the moment you need to go and look at which file
+    did that. A hash identifies the file to somebody who already has it, which
+    a path does not."""
+    written = write_samples(tmp_path / "benign")
+    result = corpus_module.scan_corpus(tmp_path, per_file=True)
+
+    assert len(result.per_file) == len(written)
+    serialised = json.dumps(result.to_dict()["per_file"])
+    assert str(tmp_path) not in serialised
+    for path in written:
+        assert path.name not in serialised
+    for record in result.per_file:
+        assert record["label"] == "benign"
+        assert len(record["sha256"]) == 64
+        assert set(record) == {"label", "sha256", "size_bytes", "severity", "keys"}
+
+
+def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):
+    target = tmp_path / "file.bin"
+    target.write_bytes(b"x")
+    with pytest.raises(NotADirectoryError):
+        corpus_module.scan_corpus(target)
+
+
+def test_corpus_renders_without_a_corpus():
+    """An empty result renders rather than dividing by zero, because the way
+    somebody finds out they pointed it at the wrong directory is by reading
+    the output."""
+    text = corpus_module.render(corpus_module.CorpusResult())
+    assert "no labelled files" in text
+    assert "no benign files" in text
+    assert "no malicious files" in text
+
+
+def test_corpus_render_states_both_sides_of_the_counterfactual():
+    text = corpus_module.render_counterfactual(_hand_corpus())
+    assert "raising to the gate" in text and "lowering below the gate" in text
+    # The marginal figures, not the gross ones: `a` fires on 3 and unflags 2.
+    assert "fires on 3, unflags 2" in text
+    assert "20.0%" in text
+
+
+# Corpus harness, through the CLI
+
+
+def _corpus_dir(tmp_path):
+    write_samples(tmp_path / "benign")
+    return tmp_path
+
+
+def test_corpus_command_reports_and_exits_clean(tmp_path, capsys):
+    """A measurement that fails a build because it came back with a number
+    nobody asked a question about is a measurement people stop running."""
+    assert cli.main(["corpus", str(_corpus_dir(tmp_path))]) == cli.EXIT_CLEAN
+    out = capsys.readouterr().out
+    assert "gate (medium+)" in out
+    assert "no malicious files" in out
+    assert "counterfactual" not in out
+
+
+def test_corpus_command_prints_the_counterfactual_when_asked(tmp_path, capsys):
+    cli.main(["corpus", str(_corpus_dir(tmp_path)), "--counterfactual"])
+    out = capsys.readouterr().out
+    assert "counterfactual over" in out
+    assert "raising to the gate" in out
+
+
+def test_corpus_command_writes_json(tmp_path):
+    out = tmp_path / "corpus.json"
+    cli.main(["corpus", str(_corpus_dir(tmp_path)), "-q", "--json", str(out)])
+    written = json.loads(out.read_text(encoding="utf-8"))
+
+    assert written["gate"]["severity"] == cli.GATE_SEVERITY
+    assert written["counterfactual"]["available"] is True
+    assert "per_file" not in written
+    assert str(tmp_path) not in out.read_text(encoding="utf-8")
+
+
+def test_corpus_command_per_file_reaches_the_json(tmp_path):
+    out = tmp_path / "corpus.json"
+    cli.main(["corpus", str(_corpus_dir(tmp_path)), "-q", "--per-file",
+              "--json", str(out)])
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert len(written["per_file"]) == len(list((tmp_path / "benign").iterdir()))
+
+
+def test_corpus_command_enforces_a_stated_threshold(tmp_path, capsys):
+    """The bundled samples flag well above 5%, which is the point: the flag has
+    to be able to fail, or pinning a measured rate in CI proves nothing."""
+    root = str(_corpus_dir(tmp_path))
+    assert cli.main(["corpus", root, "-q",
+                     "--max-false-positive-rate", "0.05"]) == cli.EXIT_FINDINGS
+    assert "exceeds" in capsys.readouterr().err
+    assert cli.main(["corpus", root, "-q",
+                     "--max-false-positive-rate", "1.0"]) == cli.EXIT_CLEAN
+
+
+def test_corpus_command_writes_its_json_even_when_the_threshold_fails(tmp_path):
+    """The run that fails is the run you want the numbers from."""
+    out = tmp_path / "corpus.json"
+    code = cli.main(["corpus", str(_corpus_dir(tmp_path)), "-q", "--json",
+                     str(out), "--max-false-positive-rate", "0.0"])
+    assert code == cli.EXIT_FINDINGS
+    assert json.loads(out.read_text(encoding="utf-8"))["files"]["benign"] > 0
+
+
+def test_corpus_command_rejects_a_percentage_mistaken_for_a_fraction(tmp_path, capsys):
+    """`--max-false-positive-rate 5` meaning five percent is the mistake
+    somebody will make, and it would otherwise pass silently forever."""
+    root = str(_corpus_dir(tmp_path))
+    assert cli.main(["corpus", root, "-q",
+                     "--max-false-positive-rate", "5"]) == cli.EXIT_USAGE
+    assert "fraction between 0 and 1" in capsys.readouterr().err
+
+
+def test_corpus_command_rejects_a_threshold_with_nothing_to_measure(tmp_path, capsys):
+    """Malicious files only. Passing a false positive threshold here would be
+    a build that goes green because nothing was checked."""
+    (tmp_path / "malicious").mkdir()
+    (tmp_path / "malicious" / "x.bin").write_bytes(b"MZ" + b"\x00" * 64)
+    code = cli.main(["corpus", str(tmp_path), "-q",
+                     "--max-false-positive-rate", "0.05"])
+    assert code == cli.EXIT_USAGE
+    assert "needs benign files" in capsys.readouterr().err
+
+
+def test_corpus_command_says_what_a_label_directory_is(tmp_path, capsys):
+    """The likely mistake is pointing it at the directory of files rather than
+    at the root above the label directories, so the error names the labels."""
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "x.bin").write_bytes(b"x")
+    assert cli.main(["corpus", str(tmp_path), "-q"]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "benign" in err and "malicious" in err
+
+
+def test_corpus_command_rejects_a_missing_directory(tmp_path, capsys):
+    assert cli.main(["corpus", str(tmp_path / "nope"), "-q"]) == cli.EXIT_USAGE
+    assert "no such directory" in capsys.readouterr().err
+
+
+# Text encoding
+#
+# These exist because two tests shipped broken on Windows for a whole release.
+# `Path.read_text()` with no encoding uses the *locale* encoding, which is
+# UTF-8 on Linux and cp1252 on a default Windows install. This repository's
+# files are UTF-8, and `README.md` draws its architecture diagram with box
+# characters: `┐` is `e2 94 90`, and `0x90` is one of the five bytes cp1252
+# leaves undefined. So `read_text()` raises `UnicodeDecodeError` there and
+# nowhere else.
+#
+# The v0.4.1 note said the README tests were "verified from the public clone",
+# and they were -- on Linux, which is the whole point. A test that reads a file
+# is a test of that file *and of the environment's idea of what a file is*.
+
+
+def _text_io_calls(path):
+    """Every text-mode read or write in a source file, and whether it says
+    which encoding it means."""
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            name = node.func.id
+        else:
+            continue
+        if name not in ("read_text", "write_text", "open"):
+            continue
+        # Binary mode has no encoding to state, which is the correct way to
+        # read a sample and the reason the extractors are unaffected by any
+        # of this.
+        literals = [a.value for a in node.args if isinstance(a, ast.Constant)
+                    and isinstance(a.value, str)]
+        if any("b" in literal for literal in literals):
+            continue
+        stated = any(keyword.arg == "encoding" for keyword in node.keywords)
+        found.append((name, node.lineno, stated))
+    return found
+
+
+def _repo_sources():
+    root = Path(__file__).resolve().parent.parent
+    return sorted(list((root / "maltriage").rglob("*.py")) + [Path(__file__)])
+
+
+def test_every_text_read_and_write_states_its_encoding():
+    """The guard, rather than the fix. Adding `encoding="utf-8"` to the two
+    failing calls would have left thirty more waiting for the next person on
+    Windows to find one at a time."""
+    offences = [f"{path.name}:{line} {name}() does not state an encoding"
+                for path in _repo_sources()
+                for name, line, stated in _text_io_calls(path) if not stated]
+    assert not offences, (
+        "text I/O with no encoding uses the locale's, which differs between "
+        "Linux and Windows:\n  " + "\n  ".join(offences))
+
+
+def test_the_repository_is_utf8_and_not_merely_ascii():
+    """If every file here were ASCII the rule above would be untestable and
+    the defect would return the moment somebody typed an em dash. It is not:
+    this records which files actually carry the bytes, so a Windows run has
+    something to fail on if the encodings are ever dropped again."""
+    root = Path(__file__).resolve().parent.parent
+    carriers = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or ".git" in path.parts:
+            continue
+        if path.suffix not in (".py", ".md", ".toml", ".yar", ".txt"):
+            continue
+        raw = path.read_bytes()
+        raw.decode("utf-8")           # every text file here is UTF-8, no exceptions
+        if any(byte > 127 for byte in raw):
+            carriers[path.name] = sum(byte > 127 for byte in raw)
+
+    assert "README.md" in carriers, (
+        "the README no longer carries non-ASCII bytes, so the Windows decode "
+        "failure this suite exists to prevent can no longer be reproduced")
+    # The five bytes cp1252 does not define. A file containing one of these
+    # fails loudly on Windows; a file with other non-ASCII bytes decodes into
+    # mojibake silently, which is worse.
+    undefined = {0x81, 0x8D, 0x8F, 0x90, 0x9D}
+    readme = (root / "README.md").read_bytes()
+    assert undefined & set(readme), (
+        "the README's box-drawing characters are gone, which is fine, but "
+        "then this test is pinning a defect that can no longer occur")

@@ -11,8 +11,9 @@ so no byte is read twice and nothing seeks backwards.
 Five properties are deliberate and should survive future changes:
 
 1. One sequential read, bounded memory. The pipeline reads the sample exactly
-   once and nothing holds it whole. This is what makes the corpus harness in
-   v0.7 possible, and it is why a stream extractor must not buffer the chunks
+   once and nothing holds it whole. This is what makes the corpus harness
+   possible -- 461 MB in a single run since v0.4.2 -- and it is why a stream
+   extractor must not buffer the chunks
    it is handed. A random-access extractor in phase 3 may map the file and
    address bounded regions of it; the memory half of this property is
    absolute, the single-read half describes the pipeline's own pass.

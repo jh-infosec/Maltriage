@@ -152,7 +152,9 @@ order to correlate them. It was not taken. Each view is separately reportable,
 the correlation worth having -- a thin import table alongside many API strings
 -- is a `low` finding either way, and adding a phase to the pipeline to earn a
 `low` is not a trade. The data for that correlation is now present in both
-places, which is what v0.7 needs to decide whether it is worth anything.
+places, which is what the measurement release needs to decide whether it is
+worth anything -- and, since v0.4.2, what a Windows corpus would settle
+directly.
 
 The string view matches during extraction rather than in a findings pass over
 `report.data`, and that is not an optimisation. `strings_include_text` is off
@@ -333,11 +335,43 @@ which is the third kind doing what it was added for.
 The measurement release. Everything after this depends on being able to state
 precision and recall, so it comes before the classifier rather than after.
 
-- [ ] Corpus harness with labelled directories
-- [ ] Precision, recall and per-finding false positive rates
-- [ ] False negatives introduced by known-good filtering
+- [x] Corpus harness with labelled directories *(shipped in v0.4.2)*
+- [x] Per-finding false positive rates *(shipped in v0.4.2)*
+- [x] Throughput benchmarking *(shipped in v0.4.2)*
+- [ ] Precision and recall, which need a labelled malicious corpus
+- [ ] A corpus of ordinary Windows binaries
+- [ ] False negatives introduced by known-good filtering (needs v0.5)
 - [ ] Report diff between two runs
-- [ ] Throughput benchmarking
+
+**The harness moved out of this release, and the reason it had to is the
+useful part.** Six decisions across `apis.py`, `extractors.py`, `AUTHORING.md`
+and this file were recorded as deferred until something could measure them,
+and every one of them named this release -- which sits behind two feature
+releases neither of which needed the harness to start. A decision deferred to
+a release that has not begun is not deferred; it is abandoned with a citation
+attached. Two of the six are now settled, two more were settled by arithmetic
+that was previously an argument, and the remaining ones turned out not to be
+waiting on the harness at all.
+
+**What they were waiting on is a Windows corpus.** `api_capability` and
+`registry_persistence_path` fired zero times over 6,688 ordinary Linux files,
+which measures that a Win32 vocabulary does not fire on things that are not
+Win32 programs. That is the smaller claim v0.4 already made, and no quantity
+of ELF files will ever make it the larger one. The blocker is a corpus of
+ordinary Windows binaries, which is an item somebody can go and obtain, not a
+release number to point at. It is listed above as one.
+
+**What stays here is what genuinely needs both labels.** Precision, recall and
+the false negative cost of known-good filtering cannot be computed from a
+benign corpus, and this repository will not contain the other half. That is a
+constraint on the release rather than a gap in the harness: it reports `None`
+where a number would be a fabrication, and the release that supplies the
+missing half is the one that can turn those into figures.
+
+**Report diffing stays too, and is not a corpus feature.** Two runs of the
+same corpus after a rule change is the question it answers, and it needs a
+stable serialisation to diff -- which is `to_dict`, and which the harness now
+has.
 
 ---
 

@@ -8,6 +8,7 @@ Run locally:
     maltriage scan suspicious_file.bin
     maltriage scan ./samples --recursive --json-lines out.jsonl
     maltriage samples ./demo
+    maltriage corpus ./corpus --counterfactual
 
 Or without installing, from the repository root:
 
@@ -29,6 +30,7 @@ from .models import SEVERITY_RANK, Report, max_severity
 from .pipeline import analyse, analyse_directory
 from .fixtures import write_samples
 from .envelope import to_envelope
+from . import corpus as corpus_module
 
 APP_NAME = "maltriage"
 
@@ -213,10 +215,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # v0.1.0 wrote a bare object for a single file, so a consumer had to
     # branch on the shape of its own input.
     if args.json:
-        args.json.write_text(json.dumps([r.to_dict() for r in reports], indent=2))
+        args.json.write_text(
+            json.dumps([r.to_dict() for r in reports], indent=2), encoding="utf-8")
 
     if args.json_lines:
-        with args.json_lines.open("w") as fh:
+        with args.json_lines.open("w", encoding="utf-8") as fh:
             for report in reports:
                 fh.write(report.to_json(indent=None) + "\n")
 
@@ -226,12 +229,76 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # no path, no filename and no extraction data, so it does not leak the
     # directory layout and username that every other output here does.
     if args.envelope:
-        with args.envelope.open("w") as fh:
+        with args.envelope.open("w", encoding="utf-8") as fh:
             for report in reports:
                 fh.write(json.dumps(to_envelope(report)) + "\n")
 
     worst = max_severity([{"severity": r.severity} for r in reports])
     return EXIT_FINDINGS if SEVERITY_RANK[worst] >= SEVERITY_RANK[GATE_SEVERITY] else EXIT_CLEAN
+
+
+def cmd_corpus(args: argparse.Namespace) -> int:
+    """Measure the tool against files whose nature is already known.
+
+    Exits non-zero only when a `--max-false-positive-rate` was supplied and
+    exceeded. A corpus run is a measurement, and a measurement that fails a
+    build because it came back with a number nobody asked a question about is
+    a measurement people stop running.
+    """
+    # Checked before the scan rather than after it. A corpus run is minutes
+    # long, and `--max-false-positive-rate 5` meaning five percent is the
+    # mistake somebody will make.
+    limit = args.max_false_positive_rate
+    if limit is not None and not 0.0 <= limit <= 1.0:
+        print(f"{APP_NAME}: --max-false-positive-rate is a fraction between "
+              f"0 and 1, not {limit}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if not args.root.is_dir():
+        print(f"{APP_NAME}: no such directory: {args.root}", file=sys.stderr)
+        return EXIT_USAGE
+
+    # A corpus run reaches thousands of files, and a parser that fails on a
+    # third of them would print a third of them to stderr and bury the report
+    # that is the point of the command. The count is kept either way, in
+    # `result.incomplete`, which is the number that matters; -v restores the
+    # individual lines when it is the individual files you want.
+    if not args.verbose:
+        logging.getLogger(__package__).setLevel(logging.ERROR)
+
+    result = corpus_module.scan_corpus(args.root, per_file=args.per_file)
+
+    if not result.total_files:
+        labels = ", ".join(corpus_module.LABELS)
+        print(f"{APP_NAME}: no labelled files under {args.root} "
+              f"(expected subdirectories named: {labels})", file=sys.stderr)
+        return EXIT_USAGE
+
+    if not args.quiet:
+        print(corpus_module.render(result))
+        if args.counterfactual:
+            print()
+            print(corpus_module.render_counterfactual(result))
+
+    if args.json:
+        args.json.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+
+    # A threshold the caller stated. Checked against the benign set only, so
+    # pointing this at a corpus with no benign files is a usage error rather
+    # than a silent pass.
+    if limit is None:
+        return EXIT_CLEAN
+
+    measured = result.false_positive_rate()
+    if measured is None:
+        print(f"{APP_NAME}: --max-false-positive-rate needs benign files, "
+              f"and this corpus has none", file=sys.stderr)
+        return EXIT_USAGE
+    if measured > limit:
+        print(f"{APP_NAME}: false positive rate {measured:.2%} exceeds the "
+              f"{limit:.2%} allowed", file=sys.stderr)
+        return EXIT_FINDINGS
+    return EXIT_CLEAN
 
 
 def cmd_samples(args: argparse.Namespace) -> int:
@@ -264,6 +331,33 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress human output")
     scan.add_argument("-v", "--verbose", action="store_true")
     scan.set_defaults(func=cmd_scan)
+
+    corpus = sub.add_parser(
+        "corpus",
+        help="measure findings against a labelled corpus",
+        description="Run maltriage over a corpus root holding directories "
+                    "named for what is in them (benign, malicious) and report "
+                    "how often each finding key fires on each. A corpus of "
+                    "benign files alone is enough for false positive rates.")
+    corpus.add_argument("root", type=Path)
+    corpus.add_argument("--json", type=Path, metavar="PATH",
+                        help="write the full result here, including the "
+                             "counterfactual")
+    corpus.add_argument("--counterfactual", action="store_true",
+                        help="also print what raising or lowering each key "
+                             "would do to the gate")
+    corpus.add_argument("--per-file", action="store_true",
+                        help="include one record per file in --json. Off by "
+                             "default: a corpus report is kept and compared, "
+                             "and a corpus directory describes somebody's "
+                             "sample collection")
+    corpus.add_argument("--max-false-positive-rate", type=float, metavar="RATE",
+                        help="exit non-zero if the gate flags more than this "
+                             "share of benign files, as a fraction (0.05)")
+    corpus.add_argument("-q", "--quiet", action="store_true",
+                        help="suppress human output")
+    corpus.add_argument("-v", "--verbose", action="store_true")
+    corpus.set_defaults(func=cmd_corpus)
 
     samples = sub.add_parser("samples", help="write synthetic test files")
     samples.add_argument("directory", type=Path)

@@ -1,5 +1,167 @@
 # Changelog
 
+## Version 0.4.2 -- the corpus harness, three releases early
+
+The harness was v0.7's headline feature. It is here instead, because six
+decisions in this repository were recorded as *deferred until something can
+measure them*, and all six were deferred to the same release -- one that sits
+behind two feature releases. A decision deferred to a release that has not
+started is not deferred, it is abandoned with a citation.
+
+`maltriage corpus <root>` runs the tool over directories named for what is in
+them and reports what fired on what.
+
+**It is built for a corpus with no malicious files in it, rather than
+tolerating one.** This repository must never contain a sample, and a harness
+that waits for one would have waited forever. Precision and recall need both
+labels; false positive rates need only the benign half, and the benign half is
+what every open severity decision here actually turns on. Where a rate cannot
+be computed from what was supplied, the result carries `None` rather than a
+number: a precision of zero over an empty malicious set is a lie with a
+decimal point in it.
+
+**The counterfactual is the part that answers a question rather than reporting
+a number.** For every key below the gate: how many ordinary files would be
+newly flagged if it were promoted. For every key at or above it: how many
+would stop being flagged if it were demoted. Both are *marginal* -- they count
+only files where nothing else already decides the outcome. The first draft
+counted gross, and gross is worse than useless here: a key that fires on two
+hundred benign files but never on one that isn't already flagged is free to
+promote, and the gross count named it the most expensive key in the set.
+
+### Measured, over 6,688 ordinary files
+
+1,020 system binaries, 1,039 shared objects, 3,000 Python standard library
+source files and 1,629 documentation files. 461 MB, 82.9s, **5.6 MB/s and 81
+files/s** single-threaded -- the throughput baseline this project has never
+had.
+
+**The gate flags 0.6% of them.** Forty files. Two keys produce all forty:
+
+- `entropy_hotspot`, 38 files, and it is the sole cause on all 38. Demoting it
+  takes the gate to 0.0%. The population is specific and worth writing down:
+  Go binaries (`runc`, `containerd-shim`, `ctr`, `git-lfs`, `age`), character
+  set conversion tables (`IBM930`, `SJIS`, `BIG5`, `libJIS`), and crypto
+  libraries carrying embedded key material (`openssl`, `libsoftokn3`,
+  `libnssckbi`, `libfreeblpriv3`). Dense tables and compressed sections, which
+  is what the finding says it detects. It stays at medium: the finding is
+  correct, the rate is 1 file in 167, and the fix is a demotion rule for a
+  hotspot inside an ELF data section, not a lower severity.
+- `yara_match`, 2 files: `gdb` and `libbfd`. Binutils embeds header magic for
+  every format it parses, so a structural rule about a header where one does
+  not belong is right to fire. 0.03%.
+
+### What it settled
+
+- **`secret_candidate` stays at `low`.** It fires on 1.2% of ordinary files,
+  and promoting it would take the gate from 0.6% to **1.6%** -- nearly tripling
+  it, on 69 files nothing else flags. The v0.4 argument was that anything
+  higher makes every minified bundle a CI failure; the number now says so.
+- **Nothing the strings extractor reports may reach medium.** `urls_present`
+  fires on 35.7% of ordinary files, `unix_paths_present` on 34.7%,
+  `emails_present` on 26.3%. Promoting any one of them makes the gate useless
+  in a single step. This was reasoned in v0.4 and is now arithmetic.
+- **`high_file_entropy` stays at `low`**: 11.0%, and all 734 marginal.
+
+### What it cannot settle, which is the sharper finding
+
+`api_capability` fired **zero times** over all 6,688 files -- as it did over
+the 6,725 in v0.4. That is not the answer to whether a capability category may
+reach medium. This corpus has no Windows binaries in it, so it measures that a
+Win32 vocabulary does not fire on things that are not Win32 programs, which is
+the smaller claim v0.4 already made. `registry_persistence_path` never fired
+either, for the same reason.
+
+So the blocker on those decisions was never the harness. It is a corpus of
+ordinary Windows binaries, and that is now a named, obtainable item rather
+than a release number. The four decisions still open are open for a reason
+that can be acted on.
+
+### Also
+
+- `--max-false-positive-rate` exits non-zero when the gate flags more than a
+  stated share of benign files, so a measured rate can be pinned in CI. It
+  rejects a value outside 0 to 1 before the scan rather than after it, because
+  `--max-false-positive-rate 5` meaning five percent is the mistake somebody
+  will make, and it would otherwise pass silently forever.
+- Otherwise a corpus run exits clean. A measurement that fails a build because
+  it came back with a number nobody asked a question about is a measurement
+  people stop running.
+- The result carries counts and rates and no paths. `--per-file` adds one
+  record per file, keyed by SHA-256 and never by name, and is off unless asked
+  for: a corpus report is an artefact that gets kept and compared, and a corpus
+  directory is by construction a description of somebody's sample collection.
+- The raw result of the run above is **not committed**. It describes a machine
+  nobody else has, and a baseline file implying two runs are comparable when
+  the corpora differ is worse than no baseline. The numbers live here, where
+  they are read.
+
+### The README tests were broken on Windows, and had been for a release
+
+Found on the first Windows run of v0.4.2, in code v0.4.1 shipped:
+
+```
+UnicodeDecodeError: 'charmap' codec can't decode byte 0x90 in position 3570
+```
+
+`Path.read_text()` with no encoding uses the *locale's* encoding -- UTF-8 on
+Linux, cp1252 on a default Windows install. The README draws its architecture
+diagram with box characters, `┐` is `e2 94 90`, and `0x90` is one of the five
+bytes cp1252 leaves undefined. So two tests raised there and nowhere else.
+
+v0.4.1 said those tests were "verified from the public clone", and they were
+-- on Linux, which is exactly the point. A test that reads a file is also a
+test of the environment's idea of what a file is, and this project had been
+verifying one environment and shipping to two.
+
+- Every text read and write in the package and the suite now states
+  `encoding="utf-8"`. That is 18 call sites, not the 2 that failed: patching
+  only the failures would have left the rest waiting for the next person on
+  Windows to find them one at a time.
+- A test walks every source file with `ast` and fails on a `read_text`,
+  `write_text` or `open` in text mode that does not name an encoding. Binary
+  mode is exempt, which is how a sample is read and why no extractor was
+  affected.
+- A second test pins the reproduction itself: the README must still contain a
+  byte cp1252 does not define, or the first test is guarding a defect that can
+  no longer occur.
+- `README.md` now documents `LANG=C LC_ALL=C python -X utf8=0 -m pytest -q`,
+  which reproduces the whole class on Linux. Verified: it fails on the
+  unpatched call and passes on the patched one.
+
+### A third flaky test, found the way flaky tests are found
+
+`test_a_token_inside_a_longer_string_is_not_a_candidate` ended with
+`assert secrets_module.scan(f"prefix-{token}")` on a single token, and failed
+about **one run in twenty**. Measured, not estimated: over 3,000 draws, 2,558
+tokens were nominated on their own and 95.0% of those were still nominated
+with `prefix-` glued to the front.
+
+`_detected_token` guarantees the *bare* token is nominated. Gluing seven
+low-entropy characters onto it makes a different string with a lower entropy
+ratio, so about one in twenty falls under the bar. The guarantee did not
+survive the concatenation and the test assumed it had -- which is exactly the
+defect the v0.4 pass fixed in two other tests, in a shape that pass did not
+look for.
+
+The claim is now split. The tokenisation -- that a hyphen does not split the
+token, so the string is one span of 47 characters -- is a fact, asserted
+against `_TOKEN` and independent of any draw, and verified by removing the
+hyphen from the character class. What the entropy tier then does with that
+token is a heuristic, and is measured over 200 draws against an 85% bar, six
+standard deviations below the measured rate. Twenty-five consecutive runs of
+the secret engine tests, and four of the full suite, all clean.
+
+- 28 tests, each verified by reintroducing the defect it exists for: counting
+  findings instead of files, the gross counterfactual on both sides, a
+  precision of zero for an empty set, inferred labels, marginal counts polluted
+  by malicious files, a filename in the per-file record, an unreadable file
+  vanishing from the denominator, and four CLI exit paths. All fourteen
+  mutations were caught. **374 passed**, or 278 passed and 96 skipped with
+  neither pefile nor yara-python.
+
+---
+
 ## Version 0.4.1 -- the README is an interface
 
 A close-out rather than a feature. `__version__` and `pyproject.toml` both say
