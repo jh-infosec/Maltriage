@@ -85,6 +85,25 @@ A single undivided pass would be simpler and would leave the PE parser
 arriving in v0.2 unable to know it is looking at a PE before it starts. The
 split exists for that reason and for no other.
 
+**What `ctx` is for, and what it is not.** It carries facts an earlier phase
+established that a later one cannot establish for itself: the format family,
+the file size, and since v0.4.4 the byte range a PE's Authenticode signature
+occupies. That last one is the clearest case of the rule. The entropy pass is
+a stream — it cannot seek, so it cannot find the certificate table — and the
+PE extractor that could find it runs two phases later. But the security
+directory is the one data directory entry holding a *file offset* rather than
+an RVA, so it is readable from the header alone, and the header phase can hand
+it forward. Every signed binary would otherwise score its own signature as a
+high-entropy region, which it measurably did: 12.4% of a System32 sample.
+
+`ctx` is not a findings channel and not a way around `Extractor.findings`
+seeing only its own data. What travels through it is an observation, not a
+conclusion, and the extractor that consumes one still decides alone what it
+means. A value a sample controls must be validated by whoever publishes it:
+the certificate range is checked against the section table and the end of the
+file first, because an exclusion a sample can aim is an evasion rather than a
+refinement.
+
 ### One failure never loses a run
 
 Malformed headers are an anti-analysis technique, not an accident. An

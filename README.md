@@ -42,7 +42,9 @@ It never claims a file is malicious. It ranks a queue.
   anti-analysis technique rather than an accident
 - Cryptographic hashing off the shared pass, and optional fuzzy hashing
 - Format identification from magic bytes, no external dependencies
-- Whole-file and windowed Shannon entropy, scaled to the size of the sample
+- Whole-file and windowed Shannon entropy, scaled to the size of the sample,
+  and excluding a PE's Authenticode signature, which is high-entropy by
+  construction and is not the file's own content
 - PE structure: sections with per-section entropy, imports and imphash,
   exports, TLS callbacks, debug directory and PDB path, overlay, and
   certificate presence with the names embedded in it
@@ -313,11 +315,11 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The suite is **399 tests**, and how many run depends on which optional
+The suite is **412 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
 it is missing — the same rule the extractors follow. Two anchors, both
-verified: with everything installed, **399 passed, 0 skipped**; with neither
-pefile nor yara-python, **297 passed, 102 skipped**. Anything in between is
+verified: with everything installed, **412 passed, 0 skipped**; with neither
+pefile nor yara-python, **304 passed, 108 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
 lists them).
 

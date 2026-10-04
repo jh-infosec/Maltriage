@@ -197,6 +197,21 @@ class FileTypeExtractor(HeaderExtractor):
                 break
 
         ctx["family"] = family
+        # Published here because phase 1 is the only phase that runs before
+        # the entropy stream, and because this range is knowable from the
+        # header alone -- the security directory holds a file offset, not an
+        # RVA. `ctx` is the channel the pipeline already documents for this:
+        # "each sees what the previous one published".
+        # `ctx.get`, not `ctx[...]`: a caller may hand this extractor a bare
+        # context, and identifying the format is this extractor's job -- losing
+        # it because an optional key for somebody else's optimisation was
+        # absent would be a poor trade. Without a size there is no range, and
+        # the entropy pass then scores every byte, which is the safe direction.
+        size = ctx.get("size")
+        if family == "pe" and size:
+            found = certificate_range(header, size)
+            if found:
+                ctx["certificate_range"] = found
         return {
             "magic_label": label,
             "family": family,
@@ -353,6 +368,20 @@ class EntropyExtractor(StreamExtractor):
         self._hot = 0
         self._window_count = 0
         self._size = 0
+        self._fed = 0
+        # A PE's signature is not the PE's content. `FileTypeExtractor`
+        # publishes the range in phase 1; the bytes are dropped before they
+        # reach a window or the histogram, and `finish` reports what was
+        # skipped -- an entropy figure over a different set of bytes than the
+        # file has must say so, or it is a number nobody can reproduce.
+        self._exclude: tuple[int, int] | None = None
+        found = ctx.get("certificate_range")
+        if found:
+            # Validated by `certificate_range` against the section table and
+            # the end of the file before it reaches here, because an exclusion
+            # a sample can aim is an evasion rather than a refinement.
+            start, length = found
+            self._exclude = (start, start + length)
 
     def _add_to_totals(self, data: bytes) -> None:
         for value, count in enumerate(byte_counts(data)):
@@ -373,6 +402,18 @@ class EntropyExtractor(StreamExtractor):
             self._hot += 1
 
     def feed(self, chunk: bytes) -> None:
+        start = self._fed
+        self._fed += len(chunk)
+        if self._exclude is not None:
+            low, high = self._exclude
+            end = start + len(chunk)
+            if start < high and end > low:
+                # Cut the excluded span out of this chunk. Windows are cut
+                # from the remainder, so they no longer align with file
+                # offsets across the gap -- which costs nothing, because a
+                # window boundary was never a meaningful position in the file.
+                chunk = chunk[:max(0, low - start)] + (
+                    chunk[max(0, high - start):] if end > high else b"")
         self._size += len(chunk)
         self._pending += chunk
         while len(self._pending) >= self._window:
@@ -409,6 +450,13 @@ class EntropyExtractor(StreamExtractor):
                 if self._window_count else None
             ),
             "high_entropy_windows": self._hot,
+            "bytes_scanned": self._size,
+            "excluded": (
+                {"reason": "authenticode_certificate",
+                 "offset": self._exclude[0],
+                 "size": self._exclude[1] - self._exclude[0]}
+                if self._exclude is not None else None
+            ),
         }
 
     def findings(self, data: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -964,6 +1012,104 @@ def _is_ipv4(value: str) -> bool:
 
 
 # PE
+
+#: Index of the certificate table in the optional header's data directory.
+SECURITY_DIRECTORY = 4
+
+
+def certificate_range(header: bytes, size: int) -> tuple[int, int] | None:
+    """Where a PE keeps its Authenticode signature, from the header alone.
+
+    Returns `(offset, length)` as a byte range in the file, or `None` if this
+    is not a PE, is truncated, carries no signature, or claims one that cannot
+    be believed.
+
+    This is the one data directory entry that holds a *file offset* rather than
+    an RVA, which is what makes it readable without the section table -- and
+    therefore without the random-access phase. `FileTypeExtractor` publishes it
+    into `ctx` in phase 1 so the entropy pass, which is phase 2 and cannot
+    seek, knows which bytes are the file's own content and which are its
+    signature.
+
+    Measured over 291 files of `C:\\Windows\\System32`: signed files produced an
+    `entropy_hotspot` six to a hundred times more often than unsigned files of
+    the same size, and every signed file under 32 KB produced one. A DER-encoded
+    certificate cannot be anything but high entropy, it is not part of the
+    mapped image, and it is not the sample's content in the sense that finding
+    means. Scoring it as a hot region inside an otherwise quiet file is scoring
+    the envelope rather than the letter.
+
+    **Three checks, because a sample controls this field and the range decides
+    which bytes are never looked at.** The first draft required only that the
+    range end at the end of the file, and a directory rewritten to say
+    "offset 64, length everything" silenced the entropy scan over an entire
+    packed binary -- an exclusion a sample can aim is an evasion, not a
+    refinement. So the range must:
+
+    - lie past the last section's raw data. A certificate that overlaps the
+      mapped image is not a certificate; this is the same boundary the overlay
+      logic already uses, and it is knowable from the section table, which sits
+      in the header beside the directory that makes the claim.
+    - end exactly at the end of the file, which Authenticode requires and every
+      real signed binary honours.
+    - be non-empty and start inside the file.
+
+    A range failing any of them is no range, and the entropy pass then scores
+    every byte -- which is the safe direction to fail in.
+    """
+    try:
+        if header[:2] != b"MZ":
+            return None
+        pe_at = int.from_bytes(header[0x3C:0x40], "little")
+        if not pe_at or header[pe_at:pe_at + 4] != b"PE\x00\x00":
+            return None
+
+        section_count = int.from_bytes(header[pe_at + 6:pe_at + 8], "little")
+        optional_size = int.from_bytes(header[pe_at + 20:pe_at + 22], "little")
+        optional_at = pe_at + 24
+        magic = int.from_bytes(header[optional_at:optional_at + 2], "little")
+        if magic == 0x10B:      # PE32
+            count_at, directories_at = optional_at + 92, optional_at + 96
+        elif magic == 0x20B:    # PE32+
+            count_at, directories_at = optional_at + 108, optional_at + 112
+        else:
+            return None
+
+        if int.from_bytes(header[count_at:count_at + 4], "little") <= SECURITY_DIRECTORY:
+            return None
+        entry_at = directories_at + SECURITY_DIRECTORY * 8
+        entry = header[entry_at:entry_at + 8]
+        if len(entry) < 8:
+            # The header read stopped short of the directory. Say nothing
+            # rather than guess: a wrong range excludes real bytes from the
+            # scan, which is worse than excluding none.
+            return None
+        offset = int.from_bytes(entry[:4], "little")
+        length = int.from_bytes(entry[4:], "little")
+        if offset <= 0 or length <= 0 or offset >= size or offset + length != size:
+            return None
+
+        # Where the mapped image stops. A signature begins after it.
+        sections_at = optional_at + optional_size
+        image_end = 0
+        for index in range(section_count):
+            at = sections_at + index * 40
+            record = header[at:at + 40]
+            if len(record) < 40:
+                # The section table was cut off by the header read, so the
+                # last section's end is unknown and the check cannot be made.
+                return None
+            raw_size = int.from_bytes(record[16:20], "little")
+            raw_pointer = int.from_bytes(record[20:24], "little")
+            if raw_size and raw_pointer:
+                image_end = max(image_end, raw_pointer + raw_size)
+        if offset < image_end:
+            return None
+
+        return offset, length
+    except (IndexError, ValueError):
+        return None
+
 
 class ParserUnavailable(RuntimeError):
     """An optional parser an extractor needs is not installed.

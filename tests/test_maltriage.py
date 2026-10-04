@@ -4907,3 +4907,155 @@ def test_code_without_an_entry_point_is_not_resource_only(write):
     keys = {f["key"] for f in report.findings}
     assert "resource_only_module" not in keys
     assert "no_imports" in keys
+
+
+# The certificate is not the file's content
+#
+# Measured over 291 files of `C:\Windows\System32`, holding size constant:
+# signed files produced an `entropy_hotspot` six to a hundred times more often
+# than unsigned files of the same size, and every signed file under 32 KB
+# produced one. A DER-encoded Authenticode blob cannot be anything but high
+# entropy and is not part of the mapped image. Scoring it as a hot region
+# inside an otherwise quiet file scores the envelope rather than the letter.
+
+
+def _quiet_signed_pe(blob=None, body=None):
+    """A PE whose own bytes are dull and whose signature is not."""
+    return build_pe(sections=[(".text", SECTION_CODE, body or bytes(0x2000))],
+                    certificate=blob if blob is not None else os.urandom(0x1800))
+
+
+@needs_pefile
+def test_the_certificate_range_is_found_from_the_header_alone(write):
+    blob = os.urandom(0x1800)
+    body = _quiet_signed_pe(blob=blob)
+    found = extractors_module.certificate_range(body, len(body))
+    assert found is not None
+    offset, length = found
+    assert body[offset:offset + length] == blob
+    assert offset + length == len(body)
+
+
+def test_a_file_with_no_signature_has_no_certificate_range():
+    body = build_pe(sections=[(".text", SECTION_CODE, bytes(0x400))])
+    assert extractors_module.certificate_range(body, len(body)) is None
+
+
+def test_only_a_pe_has_a_certificate_range():
+    for body in (b"", b"MZ", b"\x7fELF" + bytes(64), b"not a pe at all" * 8):
+        assert extractors_module.certificate_range(body, len(body)) is None
+
+
+def test_a_certificate_overlapping_the_image_is_not_believed():
+    """The evasion this check exists for. A sample controls the directory, and
+    a range covering the whole file would silence the entropy scan over an
+    entire packed binary -- an exclusion a sample can aim is an evasion. The
+    first draft of this rule required only that the range end at the end of
+    the file, which `offset 64, length everything` satisfies."""
+    body = bytearray(_quiet_signed_pe())
+    pe_at = int.from_bytes(body[0x3C:0x40], "little")
+    struct.pack_into("<II", body, pe_at + 24 + 96 + 4 * 8, 64, len(body) - 64)
+    assert extractors_module.certificate_range(bytes(body), len(body)) is None
+
+
+def test_a_certificate_that_does_not_end_the_file_is_not_believed():
+    """Authenticode puts the table last. Bytes after it mean the range is
+    describing something else."""
+    body = _quiet_signed_pe() + b"appended"
+    assert extractors_module.certificate_range(body, len(body)) is None
+
+
+def test_a_truncated_header_yields_no_range(write):
+    """The section table is what the range is checked against. If the header
+    read stopped short of it the check cannot be made, and the safe direction
+    to fail in is scoring every byte."""
+    body = _quiet_signed_pe()
+
+    # Cut inside the section table, past the directory that makes the claim.
+    # A header short enough to lose the directory as well would be refused one
+    # step earlier and would not exercise this at all -- which is what the
+    # first version of this test did.
+    pe_at = int.from_bytes(body[0x3C:0x40], "little")
+    optional_size = int.from_bytes(body[pe_at + 20:pe_at + 22], "little")
+    sections_at = pe_at + 24 + optional_size
+    assert extractors_module.certificate_range(body[:sections_at + 20],
+                                               len(body)) is None
+    # And a cut before the directory, which fails earlier and must also be None.
+    assert extractors_module.certificate_range(body[:96], len(body)) is None
+
+    report = analyse(write("signed.exe", body),
+                     config={**DEFAULT_CONFIG, "header_bytes": sections_at + 20})
+    assert report.data["entropy"]["excluded"] is None
+    assert report.data["entropy"]["bytes_scanned"] == report.size_bytes
+
+
+@needs_pefile
+def test_a_signature_is_not_scored_as_a_hotspot(write):
+    report = analyse(write("signed.exe", _quiet_signed_pe()))
+    entropy = report.data["entropy"]
+
+    assert entropy["excluded"]["reason"] == "authenticode_certificate"
+    assert entropy["excluded"]["size"] == 0x1800
+    assert entropy["bytes_scanned"] == report.size_bytes - 0x1800
+    assert entropy["high_entropy_windows"] == 0
+    assert "entropy_hotspot" not in {f["key"] for f in report.findings}
+
+
+@needs_pefile
+def test_the_same_bytes_appended_as_an_overlay_still_score(write):
+    """The control. If this did not fire, the test above would be proving that
+    a random blob is unremarkable rather than that the exclusion works."""
+    blob = os.urandom(0x1800)
+    body = build_pe(sections=[(".text", SECTION_CODE, bytes(0x2000))], overlay=blob)
+    report = analyse(write("packed.exe", body))
+
+    assert report.data["entropy"]["excluded"] is None
+    assert report.data["entropy"]["high_entropy_windows"] > 0
+    assert "entropy_hotspot" in {f["key"] for f in report.findings}
+
+
+@needs_pefile
+def test_a_hot_region_inside_a_signed_file_still_fires(write):
+    """The exclusion must not blind the finding. A signed binary carrying a
+    packed payload in a section is exactly what this tool exists to notice."""
+    body = _quiet_signed_pe(body=bytes(0x1000) + os.urandom(0x1800) + bytes(0x1000))
+    report = analyse(write("signed-and-packed.exe", body))
+
+    assert report.data["entropy"]["excluded"] is not None
+    assert "entropy_hotspot" in {f["key"] for f in report.findings}
+
+
+@needs_pefile
+def test_an_aimed_exclusion_does_not_hide_a_payload(write):
+    """End to end, on the evasion: the directory claims the whole file, the
+    range is refused, and the payload is scored."""
+    body = bytearray(_quiet_signed_pe())
+    pe_at = int.from_bytes(body[0x3C:0x40], "little")
+    struct.pack_into("<II", body, pe_at + 24 + 96 + 4 * 8, 64, len(body) - 64)
+    report = analyse(write("evasive.exe", bytes(body)))
+
+    assert report.data["entropy"]["excluded"] is None
+    assert report.data["entropy"]["bytes_scanned"] == report.size_bytes
+    assert "entropy_hotspot" in {f["key"] for f in report.findings}
+
+
+def test_the_entropy_data_says_how_many_bytes_it_scored(write):
+    """An entropy figure computed over a different set of bytes than the file
+    contains must say so, or it is a number nobody can reproduce."""
+    body = build_pe(sections=[(".text", SECTION_CODE, bytes(0x400))])
+    data = analyse(write("plain.exe", body)).data["entropy"]
+    assert data["bytes_scanned"] == len(body)
+    assert data["excluded"] is None
+
+
+@needs_pefile
+def test_the_rendered_report_says_the_signature_was_skipped(write):
+    report = analyse(write("signed.exe", _quiet_signed_pe()))
+    line = next(l for l in cli.render_human(report).splitlines()
+                if l.strip().startswith("entropy"))
+    assert "skipping a 6,144B signature" in line
+
+
+def test_the_rendered_report_is_silent_when_nothing_was_skipped(write):
+    report = analyse(write("plain.bin", b"hello world" * 400))
+    assert "skipping" not in cli.render_human(report)

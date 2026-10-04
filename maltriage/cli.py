@@ -74,9 +74,14 @@ def render_human(report: Report) -> str:
                 f"({entropy['overall_ratio']} of random), file too small to window"
             )
         else:
+            excluded = entropy.get("excluded")
             lines.append(
                 f"  entropy  {entropy['overall']} overall, {entropy['window_max']} max "
                 f"window of {entropy['window_count']} x {entropy['window_size']}B"
+                # An entropy figure over a different set of bytes than the file
+                # holds has to say so on the line that reports it, not three
+                # screens away in the JSON.
+                + (f", skipping a {excluded['size']:,}B signature" if excluded else "")
             )
 
     # Read with `.get` throughout. A renderer that raises on a thin report

@@ -1,5 +1,114 @@
 # Changelog
 
+## Version 0.4.4 -- a signature is not the file's content
+
+v0.4.3 left `entropy_hotspot` as the largest remaining contributor to the
+gate: 12.4% of ordinary Windows files, sole cause of flagging on 28 of the 46
+the gate still caught. This release establishes what it was firing on and
+stops it.
+
+### The measurement came first, and it was not the obvious one
+
+The first hypothesis was size: signed files are bigger, bigger files have more
+windows, more windows mean more chances of a hot one. From the per-file record
+of the same 291-file System32 sample, holding size constant:
+
+| file size | signed, with hotspot | unsigned, with hotspot |
+|---|---|---|
+| under 32 KB | **6 of 6 (100%)** | 2 of 168 (1%) |
+| 32-128 KB | 5 of 8 (62%) | 2 of 39 (5%) |
+| 128-512 KB | 7 of 12 (58%) | 3 of 30 (10%) |
+| over 512 KB | 7 of 9 (78%) | 4 of 19 (21%) |
+
+Six to a hundred times the rate, in every bucket. It is not size. An
+Authenticode certificate is DER-encoded hashes and signatures, so it cannot be
+anything but high entropy; it is not part of the mapped image; and it is not
+the sample's content in the sense the finding means. A signed 20 KB DLL is
+mostly certificate by proportion, which is why the smallest bucket is 100%.
+Scoring it was scoring the envelope rather than the letter.
+
+### The phase problem, and why `ctx` was the answer
+
+`EntropyExtractor` is a stream: one forward pass, no seeking, no idea where
+anything is. The certificate range is parsed by the PE extractor, two phases
+later. The obvious fix asked an earlier phase to know something only a later
+one learns.
+
+It does not, as it turns out. **The security directory is the one data
+directory entry that holds a file offset rather than an RVA**, which is
+exactly what makes it readable without the section table and therefore without
+the random-access phase. `FileTypeExtractor` publishes the range into `ctx` in
+phase 1 -- the same channel it already uses for the format family, and the one
+`architecture.md` has described since v0.1.2 as "each sees what the previous
+one published" -- and the entropy stream drops those bytes before they reach a
+window or the histogram.
+
+No new phase, and no cross-extractor findings pass. The alternative was the
+correlation phase this project has declined twice, and it would have been the
+wrong shape anyway: this is an observation travelling forward, not a
+conclusion drawn from two extractors at once.
+
+### Writing it opened an evasion
+
+The first version trusted the range. A sample controls that field, so a PE
+whose security directory was rewritten to say *offset 64, length everything*
+made the entropy pass skip the whole file -- a packed binary going completely
+silent, which is worse than the false positive it was meant to fix.
+
+The second version required the range to end at the end of the file, which
+Authenticode requires. `offset 64, length size-64` satisfies that too. It
+survived.
+
+What works is structural: **a certificate that overlaps the mapped image is
+not a certificate.** The section table sits in the header beside the directory
+making the claim, so the last section's raw end is knowable in phase 1, and
+the range must begin past it. Three checks now -- past the image, ending at
+the file's end, non-empty -- and a range failing any of them excludes nothing,
+so the failure direction is "score every byte". There is a test that builds
+exactly that evasive PE and asserts the payload still scores.
+
+### What it reports
+
+- `entropy.excluded` names the reason, offset and size, or is `null`.
+- `entropy.bytes_scanned` says how many bytes produced the figures.
+- The human output appends `skipping a 6,144B signature` to the entropy line.
+  A number computed over a different set of bytes than the file holds has to
+  say so where it is reported, not three screens away in the JSON.
+
+### Predicted, not yet confirmed
+
+From the per-file data, the gate should land between **10.0% and 15.8%** on
+the same seeded System32 sample -- 10.0% if every hotspot on a signed file was
+the signature, higher if some signed files carry a genuine hot region as well.
+That run has not happened yet. It is recorded here as a prediction rather than
+left out, for the same reason v0.4.3 recorded the `extension_mismatch` guess
+that turned out to be wrong: a prediction nobody wrote down is not one that
+can be checked.
+
+What the suite does establish, independently of any corpus: a signed PE with a
+quiet body scores no hot windows, the same random blob appended as an *overlay*
+still does, a hot region inside a signed file still fires, and the evasive PE
+above is scored in full.
+
+### Also
+
+- `FileTypeExtractor` reads the file size with `ctx.get` rather than
+  `ctx[...]`. A caller handing it a bare context lost format identification
+  entirely -- a `KeyError` in the one extractor whose job is to say what the
+  file is, because an optional key for somebody else's optimisation was
+  absent. Caught by `test_family_detection`, which passes `{}`.
+- That bug also made a whole mutation run meaningless: seven mutations all
+  reported "caught", every one of them by my own broken test rather than by
+  the test that was supposed to catch it. A mutation run on a tree that is not
+  green proves nothing, and the run was repeated after the fix.
+- 15 tests, mutation-verified. One mutation survives and is left alone: a
+  missing size and a size of zero produce the same behaviour, which makes it
+  an equivalent mutant rather than a gap.
+- **412 passed**, or 304 passed and 108 skipped with neither pefile nor
+  yara-python.
+
+---
+
 ## Version 0.4.3 -- the Windows corpus, and what it cost to find out
 
 v0.4.2 could not answer four deferred decisions because it had no Windows
