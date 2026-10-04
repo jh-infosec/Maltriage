@@ -7,7 +7,7 @@ a detector. It answers "which of these names did you see", and the two
 extractors that call it decide what to say about the answer.
 
 That split is why this lives in its own module rather than inside an
-extractor. The same names are wanted in two places -- the PE import table,
+extractor. The same names are wanted in two places - the PE import table,
 where they are symbols the loader will resolve, and the extracted strings,
 where they are text the sample will feed to `GetProcAddress` at runtime. A
 copy in each extractor would be two vocabularies drifting apart, which is the
@@ -23,8 +23,8 @@ resolve it, the file will call it, and nothing else in the file looks like it.
 A string is text. `CreateRemoteThread` appearing in a binary is good evidence
 the binary intends to call it, but the same bytes appear in a debugger, in
 this project's own test suite, and in any document that discusses malware. A
-name that is also an ordinary English word -- `Sleep`, `connect`, `send`,
-`system` -- appears in text that has nothing to do with an API at all, and a
+name that is also an ordinary English word - `Sleep`, `connect`, `send`,
+`system` - appears in text that has nothing to do with an API at all, and a
 vocabulary that matches those turns every README in a corpus into a finding.
 
 So the vocabulary is filtered for the string view. `STRING_AMBIGUOUS` names
@@ -32,7 +32,7 @@ match in imports and never in strings. This is also why the registry is
 Windows-only for now: the POSIX equivalents worth naming are almost all
 ordinary words, and the ELF extractor reads `DT_NEEDED` library names but not
 `.dynsym` function names, so a POSIX vocabulary would today be matched
-against strings alone -- exactly the view it is least safe in.
+against strings alone - exactly the view it is least safe in.
 
 
 ## Nothing here reaches medium
@@ -52,7 +52,7 @@ human because of that finding alone, and no API name clears it:
 So a category carries `info` or `low` and there is no path to medium.
 
 **Settled in v0.4.3, and the answer is no, permanently.** Measured over a
-seeded sample of 291 files from `C:\\Windows\\System32` -- the most ordinary
+seeded sample of 291 files from `C:\\Windows\\System32` - the most ordinary
 Windows code there is:
 
 - `api_capability` fires on **23.7%** of them. Nearly one ordinary Windows
@@ -104,7 +104,7 @@ INFO = "info"
 # `names` are canonical: the ANSI/wide suffix is left off, because `matches`
 # strips one trailing `A` or `W` when a direct lookup misses. A name that
 # genuinely ends in one of those letters is written out in full and found by
-# the direct lookup before the strip is ever reached -- `CryptUnprotectData`
+# the direct lookup before the strip is ever reached - `CryptUnprotectData`
 # is the case that makes this the right way round rather than normalising
 # everything on the way in.
 #
@@ -131,7 +131,7 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
         "label": "dynamic API resolution",
         "severity": INFO,
         "mitre": "T1027.007",
-        # Ubiquitous on its own -- every C runtime does this -- so it earns a
+        # Ubiquitous on its own - every C runtime does this - so it earns a
         # finding only alongside a second name, and never above info. Its
         # value is as context for a binary whose import table is thin.
         "names": (
@@ -231,7 +231,7 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
             # more. They are libc, not Win32, and measuring the vocabulary
             # against 1610 Linux system binaries put them in 115 of them and
             # produced 20 of the 21 findings the whole run generated. They are
-            # correct matches -- those binaries do resolve names -- and
+            # correct matches - those binaries do resolve names - and
             # useless ones, which is the distinction this project keeps
             # between data and a finding. They belong to the POSIX vocabulary
             # that arrives with ELF symbol parsing, where the caller is an
@@ -263,7 +263,7 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
 # One entry, because the vocabulary is Windows-only and Windows API names are
 # overwhelmingly camel-case compounds that occur nowhere else. `Sleep` is the
 # exception, and it is a real anti-analysis API rather than one that could be
-# dropped to avoid the problem -- sleeping past a sandbox's observation window
+# dropped to avoid the problem - sleeping past a sandbox's observation window
 # is the oldest evasion there is. The set exists for the POSIX vocabulary that
 # arrives with ELF symbol parsing, where `connect`, `send`, `system`, `fork`
 # and `socket` will each need an entry.
@@ -302,7 +302,7 @@ def _canonical(name: str) -> str:
     Unicode-aware: U+212A KELVIN SIGN lowercases to `k`, so `GetKeyState`
     canonicalises to `getkeystate` and matches `GetKeyState`. Both callers
     decode through `ascii`/`replace` before reaching here, so nothing can
-    exploit that today -- but the guard is one line and the POSIX vocabulary
+    exploit that today - but the guard is one line and the POSIX vocabulary
     this module is waiting on will arrive through a different path.
 
     Not the suffix strip: that is a fallback applied at lookup time only when
@@ -359,7 +359,7 @@ def _lookup(index: dict[str, tuple[str, ...]], candidate: str
 
     The underscored form is not a second guess at the same thing. `DnsQuery`
     is a macro, and what a binary actually imports is `DnsQuery_A` or
-    `DnsQuery_W` -- so without this the registry's `DnsQuery` entry could
+    `DnsQuery_W` - so without this the registry's `DnsQuery` entry could
     never fire on a real import table. Registering both spellings instead
     would have been worse than useless: they would count as two names towards
     a category threshold, and one API would clear a bar meant for two.
@@ -535,8 +535,8 @@ def display(canonical: str) -> str:
 
     It used to be `SPELLING.get(canonical, canonical)`, which made the
     guarantee true only because every caller happened to pass a key that came
-    out of `_lookup`. Handed anything else it returned it verbatim -- ANSI
-    escapes included -- so the docstring above it was a claim about the
+    out of `_lookup`. Handed anything else it returned it verbatim - ANSI
+    escapes included - so the docstring above it was a claim about the
     callers rather than about this function, and one refactor away from being
     false. A `KeyError` here is a bug in this module, never a hostile sample:
     the pipeline isolates it, records it under `<extractor>.findings`, and

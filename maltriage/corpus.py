@@ -18,7 +18,7 @@ Anything in a directory not named for a label is ignored rather than guessed
 at, because a corpus whose ground truth is inferred is not ground truth.
 
 That layout is for a corpus you are assembling. For one you already have --
-a system directory, a package cache, a software library -- name the label
+a system directory, a package cache, a software library - name the label
 instead of building the directory:
 
     maltriage corpus --benign C:\\Windows\\System32 --limit 500
@@ -212,7 +212,7 @@ def files_under(label: str, directory: Path) -> list[tuple[str, Path]]:
 
     Symbolic links are skipped. On Windows a large system directory is full of
     reparse points and hard links, and following them measures the same file
-    twice under two names -- which inflates a denominator quietly, which is the
+    twice under two names - which inflates a denominator quietly, which is the
     one thing a false positive rate must not do.
     """
     return [(label, path) for path in sorted(directory.rglob("*"))
@@ -261,7 +261,7 @@ def sample(items: list[tuple[str, Path]], limit: int,
 
     Random rather than the first `limit`, because the first files of a sorted
     system directory all begin with the same letter, and on Windows that is a
-    coherent group rather than an arbitrary one -- `api-ms-win-*` alone is
+    coherent group rather than an arbitrary one - `api-ms-win-*` alone is
     hundreds of stub DLLs that are nothing like the rest.
 
     Seeded, because a sample nobody can redraw is a measurement nobody can
@@ -384,7 +384,7 @@ def counterfactual(result: CorpusResult) -> dict[str, Any]:
 
     This is the half of the harness that answers a question rather than
     reporting a number. Six decisions in this project are recorded as deferred
-    until the corpus can state a cost -- whether a capability may reach
+    until the corpus can state a cost - whether a capability may reach
     medium, whether a persistence path is held too low, whether a rule may
     declare its own severity. Each of them is the same question: if this key
     were at the gate, how many ordinary files would it flag that are not

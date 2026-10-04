@@ -551,7 +551,7 @@ def test_peak_memory_does_not_track_sample_size(write):
         """The transient memory one run costs, isolated two ways.
 
         Warm first, because a first run allocates caches a second does not --
-        compiled patterns, numpy's import, interned tables -- and charging
+        compiled patterns, numpy's import, interned tables - and charging
         those to whichever sample went first measures the order of the calls.
 
         Then subtract the memory already live at the start, because
@@ -1226,7 +1226,7 @@ def test_parsing_a_pe_does_not_copy_it_into_memory(write):
         # chunk, so both have reached the ceiling and the comparison measures
         # growth rather than the approach to it. A 1 MB section never fills
         # that chunk, so pairing it with an 8 MB one measured the ceiling and
-        # called the difference linear -- visibly so without numpy, where the
+        # called the difference linear - visibly so without numpy, where the
         # standard-library histogram costs more per chunk.
         small = peak_for("small.exe", 8_000_000)
         large = peak_for("large.exe", 24_000_000)
@@ -1908,7 +1908,7 @@ def test_a_rule_set_that_does_not_finish_is_reported_not_read_as_no_matches(writ
                                                                            monkeypatch):
     """maltriage's one standing gap is a parser that hangs rather than raises.
     yara takes a timeout and raises on it, so this is the first extractor that
-    closes it for itself — and a timeout has to reach the report, because "did
+    closes it for itself - and a timeout has to reach the report, because "did
     not finish" and "found nothing" are different answers."""
     class TimesOut:
         def match(self, *args, **kwargs):
@@ -2000,7 +2000,7 @@ def test_a_match_bomb_does_not_cost_memory_in_proportion_to_the_sample(write):
 def test_a_rule_cannot_write_the_sample_to_stdout(write, capfd):
     """YARA's `console` module writes to the process's own stdout when nothing
     captures it. A rule could therefore dump the sample to the terminal, under
-    `--quiet`, without a byte of it appearing in the report — the one channel
+    `--quiet`, without a byte of it appearing in the report - the one channel
     that defeated "the extractor never reads matched_data"."""
     marker = b"SECRETBYTES-do-not-print"
     rules = write("console.yar", b'''
@@ -2018,7 +2018,7 @@ rule dump { meta: severity = "info" condition: for all i in (0..23) : ( console.
 @needs_yara
 def test_a_rule_file_cannot_include_its_way_out_of_the_rules_directory(write):
     """An include is resolved relative to the rule file and confined to
-    nothing, so `include "/etc/passwd"` was opened and parsed — and YARA
+    nothing, so `include "/etc/passwd"` was opened and parsed - and YARA
     quotes offending tokens back in its syntax errors, which puts arbitrary
     file content in reach of the report."""
     rules = write("escape.yar", b'include "/etc/passwd"\nrule r { condition: true }')
@@ -2038,7 +2038,7 @@ def test_a_rule_file_cannot_include_its_way_out_of_the_rules_directory(write):
 @needs_yara
 def test_an_unusable_rule_path_is_reported_rather_than_skipped(write, tmp_path):
     """Every one of these produced a report claiming a full YARA run while the
-    configured rules never executed, with nothing but a log line on stderr —
+    configured rules never executed, with nothing but a log line on stderr - 
     which is not in the artefact that gets stored and piped."""
     unreadable = tmp_path / "locked"
     unreadable.mkdir()
@@ -2055,7 +2055,7 @@ def test_an_unusable_rule_path_is_reported_rather_than_skipped(write, tmp_path):
 @needs_yara
 def test_naming_the_bundled_directory_does_not_double_every_finding(write):
     """Configured paths add to the bundled set rather than replacing it, so
-    naming it is a natural thing to write — and it emitted every match twice,
+    naming it is a natural thing to write - and it emitted every match twice,
     including the medium the CI gate reads."""
     config = {**DEFAULT_CONFIG, "yara_rule_paths": [str(RULE_DIR)]}
     report = analyse(write("carrier.pdf", _carrier(build_pe())), config=config)
@@ -2070,7 +2070,7 @@ def test_naming_the_bundled_directory_does_not_double_every_finding(write):
 def test_a_changed_rule_set_is_recompiled_rather_than_answered_from_cache(write):
     """`analyse_directory` hands one extractor instance to every file, so the
     compile cache needs a key. Without one it answered with whichever rule set
-    it saw first, while reporting the files it was asked for — a stale result
+    it saw first, while reporting the files it was asked for - a stale result
     presented as a current one, which is worse than recompiling."""
     first = write("first.yar", b'rule alpha { meta: severity = "low" strings: $a = "alpha" condition: $a }')
     second = write("second.yar", b'rule bravo { meta: severity = "low" strings: $b = "bravo" condition: $b }')
@@ -2137,7 +2137,7 @@ def test_the_scan_budget_is_spent_across_the_rule_set_not_per_file(write, monkey
 @needs_yara
 def test_two_broken_rule_files_with_the_same_name_both_reach_the_output(write, tmp_path):
     """The renderer keyed its lines on the extractor and the note's first
-    token, so two files called bad.yar collapsed to one line — understating
+    token, so two files called bad.yar collapsed to one line - understating
     how thin the report is, which is what the block exists to prevent."""
     for name, token in (("one", "alpha_missing"), ("two", "bravo_missing")):
         directory = tmp_path / name
@@ -2580,7 +2580,7 @@ def test_section_names_agree_with_an_independent_parser_on_a_real_binary(write):
 
 
 def test_a_section_table_that_cannot_be_read_is_reported_not_assumed_absent(write):
-    """`e_shentsize = 0` -- one two-byte field -- made `_sections` return an
+    """`e_shentsize = 0` - one two-byte field - made `_sections` return an
     empty list without raising, so nothing was recorded. The file still runs,
     because the kernel never reads section headers, and the report said
     `stripped: true` about a binary with a full symbol table while the entropy
@@ -2705,7 +2705,7 @@ def test_an_executable_stack_is_low_and_not_a_loadable_segment(write):
     """PT_GNU_STACK is a flags-only marker rather than a mapping, and
     `gcc -z execstack` sets it on request. Counting it as a writable
     executable segment called an ordinary build "a loadable segment mapped
-    writable and executable" -- both halves untrue, at medium."""
+    writable and executable" - both halves untrue, at medium."""
     body = build_elf(sections=[(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x200)],
                      segments=[(PT_LOAD, PF_R | PF_X, [".text"]),
                                (0x6474E551, PF_R | PF_W | PF_X, [])])
@@ -2739,7 +2739,7 @@ def test_a_nobits_section_does_not_break_the_layout_the_builder_produces(write):
     segment's file size and memory size are measured in different spaces.
     Computing both from file offsets produced a PT_LOAD whose memory size
     stopped short of its own contents and an entry point outside every
-    loadable segment -- a false medium from a builder whose docstring calls
+    loadable segment - a false medium from a builder whose docstring calls
     its output structurally valid."""
     body = build_elf(sections=[(".bss", SHT_NOBITS, SECTION_DATA_ELF, b"\x00" * 0x10000),
                                (".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 64)],
@@ -2781,7 +2781,7 @@ def test_single_byte_csi_is_stripped_as_well_as_the_two_byte_form(write):
     """0x9B is the single-byte form of the CSI introducer that `ESC [` spells
     in two, so a string carrying it repaints a terminal without containing an
     ESC at all. It survived the one path that decodes to `str` before
-    sanitising -- a certificate common name read as UTF-16."""
+    sanitising - a certificate common name read as UTF-16."""
     assert extractors_module.safe_text("a\x9b2Jb") == "a2Jb"
     assert extractors_module.safe_text("a\x1b[2Jb") == "a[2Jb"
     assert extractors_module.safe_text("a\x7f\x00\x08b") == "ab"
@@ -2793,7 +2793,7 @@ def test_a_terminated_dynamic_table_is_not_reported_as_truncated(write):
     """Stopping at DT_NULL is the table ending; stopping at the cap is the
     extractor giving up. Reporting the first as the second made every
     ordinary binary announce a truncated dynamic table, which is the same
-    kind of false statement the flag exists to prevent -- just pointing the
+    kind of false statement the flag exists to prevent - just pointing the
     other way."""
     data = _elf_data(write("a.elf", build_elf(needed=["libc.so.6"], soname="a.so")))
     assert data["dynamic_truncated"] is False
@@ -2854,7 +2854,7 @@ def test_string_results_do_not_depend_on_the_chunk_size(write, chunk_bytes):
         "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"]
     # Five ASCII runs: the URL, the registry path, the 9000 A's, MZAPPDATAROAM
     # and the tail. Two wide runs: the evil.dll path, and the one formed by
-    # the last A pairing with the NUL that follows it -- which is exactly the
+    # the last A pairing with the NUL that follows it - which is exactly the
     # kind of accident a boundary-sensitive scanner would report differently
     # at different chunk sizes, so it is left in on purpose.
     assert (data["ascii_count"], data["wide_count"]) == (5, 2)
@@ -3051,7 +3051,7 @@ def test_a_name_that_really_ends_in_a_is_not_stripped():
 
     Asserting only that the real name resolves was not enough. It survived a
     reordering that tried the stripped form first and fell back to the direct
-    one, because no real entry collides with `cryptunprotectdat` -- the test
+    one, because no real entry collides with `cryptunprotectdat` - the test
     passed while the ordering the docstring describes was gone. A vocabulary
     built to collide is what actually pins it."""
     assert apis.match_symbol("CryptUnprotectData") == (
@@ -3066,7 +3066,7 @@ def test_a_name_that_really_ends_in_a_is_not_stripped():
 def test_the_underscored_ansi_spelling_reaches_the_entry():
     """`DnsQuery` is a macro. What a binary imports is `DnsQuery_A` or
     `DnsQuery_W`, so without the underscored fallback the registry's entry
-    could never fire on a real import table -- and registering both spellings
+    could never fire on a real import table - and registering both spellings
     instead would let one API count as two names towards a threshold meant
     for two APIs."""
     for spelling in ("DnsQuery_A", "DnsQuery_W", "DnsQuery"):
@@ -3174,8 +3174,8 @@ def test_a_run_longer_than_the_token_limit_is_not_taken_apart():
 @needs_pefile
 def test_an_ordinal_import_is_listed_and_claims_no_capability(write):
     """An import by ordinal has no name to match. `apis.match_symbol("#42")`
-    returning nothing proved almost nothing -- no plausible bug makes a string
-    sharing no substring with the vocabulary match -- so this drives the real
+    returning nothing proved almost nothing - no plausible bug makes a string
+    sharing no substring with the vocabulary match - so this drives the real
     path instead: the symbol has to reach `imports` and not `api_names`."""
     class _Imported:
         name, ordinal = None, 42
@@ -3255,7 +3255,7 @@ def test_api_names_survive_the_retained_cap_and_the_text_switch(write):
     """The reason this is matched during extraction rather than in a findings
     pass over `report.data`. `strings_include_text` is off by default and the
     retained list stops at its cap, so a later pass would see nothing on a
-    normal run -- while the packed sample this is for is exactly the one with
+    normal run - while the packed sample this is for is exactly the one with
     hundreds of thousands of strings."""
     body = b"".join(b"\x00filler%05d" % n for n in range(500))
     body += b"\x00VirtualAllocEx\x00WriteProcessMemory\x00"
@@ -3359,7 +3359,7 @@ def _envelope(path, config=None):
 
 def test_the_envelope_carries_no_path_and_no_filename(write):
     """The envelope is the output most likely to be handed to somebody else,
-    and `Report.path` is a resolved absolute path -- the safety checklist
+    and `Report.path` is a resolved absolute path - the safety checklist
     records it as carrying the directory layout and the username of the
     machine that produced it. A filename is little better: a document is often
     named after the person it is about."""
@@ -3403,8 +3403,8 @@ def test_what_could_not_be_run_crosses_the_envelope(write):
 
 
 def test_an_examined_file_with_nothing_found_is_still_an_envelope():
-    """Empty findings with severity info is a message -- "this was examined
-    and nothing was found" -- and is not the same as no envelope. Built from
+    """Empty findings with severity info is a message - "this was examined
+    and nothing was found" - and is not the same as no envelope. Built from
     a report directly, because the point is what the emitter does with an
     empty findings list rather than which fixture happens to produce one."""
     report = Report(path="/somewhere/private/a.bin", filename="a.bin",
@@ -3700,7 +3700,7 @@ def test_a_known_format_is_medium_and_a_candidate_is_low(write):
 def test_no_secret_reaches_the_report_by_any_path(write):
     """The rule the engine exists under. It covers findings and `report.data`
     alike, because `--json` writes the data and a report is stored, piped and
-    shared -- a tool that recovers a credential into an artefact has turned a
+    shared - a tool that recovers a credential into an artefact has turned a
     detection into a leak."""
     token = _random_token(44)
     body = (b"\x00AKIAIOSFODNN7EXAMPLE\x00password=hunter2correct\x00"
@@ -3722,7 +3722,7 @@ def test_no_candidate_in_a_report_carries_a_field_it_should_not(write):
 
     `test_a_candidate_has_no_field_for_the_value` pins `Candidate.as_dict`,
     and adding a `text` key to the dictionary *after* that call passed the
-    whole suite -- the leak test only looked for the specific secrets it had
+    whole suite - the leak test only looked for the specific secrets it had
     planted, so a field carrying anything else went unnoticed. What has to be
     pinned is the shape of what reaches the report, not the shape of what one
     function returns."""
@@ -3752,7 +3752,7 @@ def test_a_token_inside_a_longer_string_is_not_a_candidate():
 
 def test_a_hyphenated_prefix_does_not_split_the_token():
     """`prefix-TOKEN` is deliberately not one of the cases above. A hyphen is
-    inside the token character class -- base64url uses it -- so that string is
+    inside the token character class - base64url uses it - so that string is
     one token of forty-seven characters rather than a token with something in
     front of it, and reporting it is right.
 
@@ -3776,7 +3776,7 @@ def test_a_hyphenated_prefix_does_not_split_the_token():
     assert len(glued) == 47
 
     # The heuristic: measured at 95.0% over 2,558 detected tokens. The bar is
-    # 85%, which is about six standard deviations below that -- far enough
+    # 85%, which is about six standard deviations below that - far enough
     # that a failure here means the rule changed, not that the dice did.
     detected = nominated = 0
     for _ in range(200):
@@ -3881,8 +3881,8 @@ def test_an_alphabet_table_is_not_a_secret():
 
 def test_a_known_format_must_be_a_whole_token():
     """`AKIA` plus sixteen uppercase characters occurs inside longer runs of
-    uppercase in ordinary binaries -- measured, it fired on `wget` and
-    `xkbprint` -- and a known-format match is medium, which is a non-zero exit
+    uppercase in ordinary binaries - measured, it fired on `wget` and
+    `xkbprint` - and a known-format match is medium, which is a non-zero exit
     on somebody's build."""
     assert secrets_module.scan("AKIAIOSFODNN7EXAMPLE")
     assert secrets_module.scan("XXAKIAIOSFODNN7EXAMPLEYY") == []
@@ -3911,7 +3911,7 @@ def test_a_real_random_token_is_still_found():
     being looked for. Recall over precision is this project's stated trade, so
     this is the number that has to stay high."""
     found = sum(1 for _ in range(400) if secrets_module.scan(_random_token(40)))
-    # Measured at about 85%, and steady from 32 characters to 48 -- the
+    # Measured at about 85%, and steady from 32 characters to 48 - the
     # threshold scales, so recall does not fall away as tokens get longer.
     # What is lost is mostly tokens that happened not to score above
     # `secrets_entropy_ratio`, which is the tier admitting it is a heuristic.
@@ -3980,7 +3980,7 @@ def test_a_wide_string_does_not_steal_the_byte_before_it(write):
 
     Both readings are correct regexes over those bytes and the engine takes
     the leftmost, which is why this is fixed with a lookbehind rather than by
-    filtering matches -- `finditer` returns non-overlapping matches, so
+    filtering matches - `finditer` returns non-overlapping matches, so
     rejecting the run that starts at `g` would not then find the one inside
     it."""
     key = "AKIAIOSFODNN7EXAMPLE"
@@ -4022,7 +4022,7 @@ def test_a_wide_string_is_found_wherever_it_sits(write):
 def test_the_guard_byte_survives_every_chunk_boundary(write):
     """A lookbehind has nothing to look at when a match begins at offset zero
     of a buffer, so the fix would have made the result depend on where the
-    chunks fell -- the one thing this scanner exists to prevent. Every buffer
+    chunks fell - the one thing this scanner exists to prevent. Every buffer
     is prefixed with the byte that preceded it instead.
 
     Sizes 1, 2 and 3 matter most: they split the UTF-16 pairs and land a
@@ -4080,8 +4080,8 @@ def test_every_command_the_readme_documents_is_one_this_tool_accepts():
     it was broken and the whole suite was green, because the commands in a
     README are an interface with nothing behind them.
 
-    This is that something. It does not run the commands -- the next test does
-    -- it checks that each one is a form this project actually offers, and
+    This is that something. It does not run the commands - the next test does
+    - it checks that each one is a form this project actually offers, and
     that the arguments parse."""
     commands = _readme_commands()
     assert len(commands) > 5, commands
@@ -4136,7 +4136,7 @@ def test_the_extras_the_readme_names_are_declared():
 def test_the_readme_walkthrough_runs(tmp_path, capsys):
     """The commands in order, for real: generate the samples, scan them, and
     write each of the three output formats. A clean clone was verified by hand
-    before this existed, which is exactly the problem -- by hand is a thing
+    before this existed, which is exactly the problem - by hand is a thing
     that happens once."""
     demo = tmp_path / "demo"
     assert cli.main(["samples", str(demo)]) == 0
@@ -4189,7 +4189,7 @@ def _corpus_report(keys, size=100, errors=None):
 #:   f4 {c low, a medium}     flagged, a is the sole cause
 #:   f5 {}                    not flagged
 #: so 3 of 5 benign files flag, a fires on 3 and alone-flags 2, c fires on 2
-#: and would newly flag 1 (f3 -- f4 is already flagged by a).
+#: and would newly flag 1 (f3 - f4 is already flagged by a).
 _BENIGN_CORPUS = (
     {"a": "medium"},
     {"a": "medium", "b": "medium"},
@@ -4263,7 +4263,7 @@ def test_corpus_rates_are_the_ones_worked_out_by_hand():
 def test_corpus_counterfactual_is_marginal_not_gross():
     """The distinction the whole feature turns on. `a` fires on three benign
     files, but two of them would stay flagged by something else, so demoting it
-    buys one file back -- not three. A gross count would have named it the most
+    buys one file back - not three. A gross count would have named it the most
     expensive key in the corpus."""
     result = _hand_corpus()
     analysis = corpus_module.counterfactual(result)
@@ -4370,7 +4370,7 @@ def test_corpus_unreadable_files_do_not_shrink_the_denominator(tmp_path, monkeyp
 
 
 def test_corpus_gate_matches_the_one_the_cli_enforces():
-    """Two constants, on purpose -- the CLI imports this module, so this one
+    """Two constants, on purpose - the CLI imports this module, so this one
     cannot import the CLI. Mirrored constants drift, which is a defect this
     project has already fixed three times, so the drift is pinned here."""
     assert corpus_module.GATE_SEVERITY == cli.GATE_SEVERITY
@@ -4397,7 +4397,7 @@ def test_corpus_over_the_bundled_samples(tmp_path):
         assert 0.0 < outcome.rate("benign", result.files) <= 1.0
         assert outcome.sole_cause <= outcome.fired["benign"]
         assert outcome.would_newly_flag <= outcome.fired["benign"]
-        # A key cannot be both -- one side of the gate or the other.
+        # A key cannot be both - one side of the gate or the other.
         assert not (outcome.sole_cause and outcome.would_newly_flag)
 
 
@@ -4568,7 +4568,7 @@ def test_corpus_command_rejects_a_missing_directory(tmp_path, capsys):
 # nowhere else.
 #
 # The v0.4.1 note said the README tests were "verified from the public clone",
-# and they were -- on Linux, which is the whole point. A test that reads a file
+# and they were - on Linux, which is the whole point. A test that reads a file
 # is a test of that file *and of the environment's idea of what a file is*.
 
 
@@ -4649,7 +4649,7 @@ def test_the_repository_is_utf8_and_not_merely_ascii():
 # Corpus sources: labelling a directory you already have
 #
 # The layout tests above cover a corpus somebody assembled. These cover one
-# that already exists -- a system directory, a package cache -- where the
+# that already exists - a system directory, a package cache - where the
 # labels have to be given rather than read off a path, because copying two
 # gigabytes of Windows in order to rename its parent folder is a cost this
 # tool has no business imposing.
@@ -4839,7 +4839,7 @@ def test_a_symlink_is_not_a_second_file(tmp_path):
 # Measured on Windows, which is the only place this population exists in
 # quantity: `no_imports` fired on 17.9% of a System32 sample at medium and was
 # the sole cause of flagging on 48 of the 94 files the gate caught. Windows
-# ships thousands of resource-only modules -- every `en-US\*.mui` is one -- and
+# ships thousands of resource-only modules - every `en-US\*.mui` is one - and
 # a module with no code cannot be a stub that resolves its imports at runtime,
 # which is the entire argument `no_imports` makes.
 
@@ -4874,7 +4874,7 @@ def test_a_resource_only_module_says_so_rather_than_saying_nothing(write):
 def test_a_stub_with_code_and_no_imports_is_still_medium(write):
     """The case the finding exists for. An executable section and an entry
     point mean there is something that could resolve imports at runtime, which
-    is the whole argument -- so the exclusion must not reach it."""
+    is the whole argument - so the exclusion must not reach it."""
     body = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180)])
     report = analyse(write("packed.exe", body))
     by_key = {f["key"]: f for f in report.findings}
@@ -4965,7 +4965,7 @@ def test_only_a_pe_has_a_certificate_range():
 def test_a_certificate_overlapping_the_image_is_not_believed():
     """The evasion this check exists for. A sample controls the directory, and
     a range covering the whole file would silence the entropy scan over an
-    entire packed binary -- an exclusion a sample can aim is an evasion. The
+    entire packed binary - an exclusion a sample can aim is an evasion. The
     first draft of this rule required only that the range end at the end of
     the file, which `offset 64, length everything` satisfies."""
     body = bytearray(_quiet_signed_pe())
@@ -4989,7 +4989,7 @@ def test_a_truncated_header_yields_no_range(write):
 
     # Cut inside the section table, past the directory that makes the claim.
     # A header short enough to lose the directory as well would be refused one
-    # step earlier and would not exercise this at all -- which is what the
+    # step earlier and would not exercise this at all - which is what the
     # first version of this test did.
     pe_at = int.from_bytes(body[0x3C:0x40], "little")
     optional_size = int.from_bytes(body[pe_at + 20:pe_at + 22], "little")

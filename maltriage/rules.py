@@ -136,7 +136,7 @@ def compile_rules(paths: list[Path], allow_includes: bool = False
     `include` is disabled unless `yara_allow_includes` turns it on. An include
     is resolved relative to the rule file and is not confined to the rules
     directory, so `include "/etc/passwd"` is opened and parsed, and YARA
-    quotes offending tokens in its syntax errors — which puts a rule file in
+    quotes offending tokens in its syntax errors - which puts a rule file in
     reach of the whole filesystem and of the report. A bundled set does not
     need includes, and a rules directory fed from somewhere else is exactly
     the case that should not have them by default.
@@ -172,7 +172,7 @@ class YaraExtractor(RandomAccessExtractor):
     Findings carry offsets and never bytes. A rule that matches a credential
     pattern would otherwise put the credential into a report that gets stored,
     piped and shared, which turns a detection into a leak. The extractor never
-    reads `matched_data`, so there is no flag to leave switched on — and
+    reads `matched_data`, so there is no flag to leave switched on - and
     `console_callback` is installed for the same reason, because YARA's
     `console` module writes to the process's own stdout when nothing captures
     it, which put sample bytes on the terminal from inside a rule, under
@@ -204,7 +204,7 @@ class YaraExtractor(RandomAccessExtractor):
         Compilation is the expensive part of a yara run and the samples are
         the cheap part, which is why `analyse_directory` builds its extractors
         once and hands the same instances to every file. This is the first
-        extractor for which that reuse is worth anything — and the first that
+        extractor for which that reuse is worth anything - and the first that
         therefore needs to notice when the thing it cached has changed.
         """
         # Both inputs to the compile, not just one. Keying on the files alone
@@ -291,7 +291,7 @@ class YaraExtractor(RandomAccessExtractor):
         # A rule that declares an ATT&CK id this project does not recognise is
         # a rule whose author should be told. Dropping it silently would leave
         # the author believing the mapping works, which is the failure this
-        # channel exists for -- and a mistyped id in somebody's rule set is
+        # channel exists for - and a mistyped id in somebody's rule set is
         # far likelier than a deliberate one.
         for match in matches[:limit]:
             for technique in match.get("mitre_unknown") or []:
@@ -320,7 +320,7 @@ class YaraExtractor(RandomAccessExtractor):
                 # Whether `count` is a total. Under fast matching libyara
                 # stops after the first occurrence of a string, so a bomb with
                 # seven hundred thousand hits reported `count: 1` and
-                # `truncated: false` -- and `truncated` is the field whose
+                # `truncated: false` - and `truncated` is the field whose
                 # whole job is to say that nothing was left out.
                 "complete": complete and len(instances) <= limit,
             })
@@ -342,7 +342,7 @@ class YaraExtractor(RandomAccessExtractor):
         """ATT&CK ids a rule declared, split into recognised and not.
 
         A rule is a much narrower statement than a finding key, so a rule
-        author can be specific where the registry cannot -- which is what
+        author can be specific where the registry cannot - which is what
         makes this the extensible half of the mapping, in the same way the
         rule set itself is extensible.
 

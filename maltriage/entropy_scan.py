@@ -57,13 +57,13 @@ class EntropyExtractor(StreamExtractor):
         self._pending = bytearray()
         self._totals = [0] * BYTE_VALUES
         # Running aggregates, not a list. Every figure this extractor
-        # reports about its windows -- the maximum, the mean and the count --
+        # reports about its windows - the maximum, the mean and the count --
         # is computable in constant space, and keeping one float per window
         # instead made peak memory linear in sample size. It went unnoticed
         # from v0.1.2 because a float is small: 2441 of them for a 20 MB
         # sample is 80 KB, invisible next to a 1 MB read chunk. The stream
-        # phase has no size ceiling -- `max_parse_bytes` bounds the parse
-        # phase, not this one -- so at 100 GB the same list is 400 MB.
+        # phase has no size ceiling - `max_parse_bytes` bounds the parse
+        # phase, not this one - so at 100 GB the same list is 400 MB.
         self._window_max: float | None = None
         self._window_total = 0.0
         self._hot = 0
@@ -73,7 +73,7 @@ class EntropyExtractor(StreamExtractor):
         # A PE's signature is not the PE's content. `FileTypeExtractor`
         # publishes the range in phase 1; the bytes are dropped before they
         # reach a window or the histogram, and `finish` reports what was
-        # skipped -- an entropy figure over a different set of bytes than the
+        # skipped - an entropy figure over a different set of bytes than the
         # file has must say so, or it is a number nobody can reproduce.
         self._exclude: tuple[int, int] | None = None
         found = ctx.get("certificate_range")
@@ -111,7 +111,7 @@ class EntropyExtractor(StreamExtractor):
             if start < high and end > low:
                 # Cut the excluded span out of this chunk. Windows are cut
                 # from the remainder, so they no longer align with file
-                # offsets across the gap -- which costs nothing, because a
+                # offsets across the gap - which costs nothing, because a
                 # window boundary was never a meaningful position in the file.
                 chunk = chunk[:max(0, low - start)] + (
                     chunk[max(0, high - start):] if end > high else b"")

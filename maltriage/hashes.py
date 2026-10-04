@@ -2,7 +2,7 @@
 Cryptographic hashing off the shared pass, and optional fuzzy hashing.
 
 Two extractors of two different kinds, kept together because they answer the
-same question -- what is this file, as an identifier somebody else can match --
+same question - what is this file, as an identifier somebody else can match --
 and because the second is the first one's footnote.
 """
 

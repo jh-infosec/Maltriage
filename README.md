@@ -249,7 +249,7 @@ maltriage scan ./samples --recursive --envelope out.jsonl
 ```
 
 This is the one output that is safe to hand to somebody else. It carries the
-findings, what could not be run, and a content hash — and no path, no
+findings, what could not be run, and a content hash - and no path, no
 filename and no extraction data, so it does not leak the directory layout and
 username that every other output here does.
 
@@ -268,7 +268,7 @@ you supplied comes back as `null` rather than as a zero.
 
 `--counterfactual` is the part that answers a question: for every key below
 the gate, how many ordinary files promoting it would newly flag, and for every
-key at or above it, how many demoting it would stop flagging. Both marginal —
+key at or above it, how many demoting it would stop flagging. Both marginal - 
 counting only the files where nothing else already decides the outcome.
 
 For a corpus you already have rather than one you assembled, name the label
@@ -280,7 +280,7 @@ maltriage corpus --benign /usr/bin --benign /usr/lib --limit 500
 
 `--benign` and `--malicious` are repeatable and take the label as given, so a
 system directory can be measured in place. `--limit` scans at most that many
-files of each label, drawn at random with a fixed seed — the first files of a
+files of each label, drawn at random with a fixed seed - the first files of a
 sorted system directory are a coherent group rather than an arbitrary one, and
 a sample nobody can redraw is a measurement nobody can check. A sampled result
 says what it was sampled from, in the output and in the JSON.
@@ -317,7 +317,7 @@ python -m pytest -q
 
 The suite is **414 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
-it is missing — the same rule the extractors follow. Two anchors, both
+it is missing - the same rule the extractors follow. Two anchors, both
 verified: with everything installed, **414 passed, 0 skipped**; with neither
 pefile nor yara-python, **305 passed, 109 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
@@ -338,13 +338,26 @@ reach. The module form uses the interpreter you already named.
 python -m pytest -q --basetemp=./_tmp
 ```
 
-That is pytest's own temp directory being unreadable, not a maltriage failure —
+That is pytest's own temp directory being unreadable, not a maltriage failure - 
 the traceback ends in `_pytest/pathlib.py`, before any code in this repository
 runs. The suite writes synthetic executables into that directory, so endpoint
 security taking an interest in it is a predictable outcome rather than a
 surprising one. Relocating the scratch space is the fix; adding an antivirus
 exclusion for it is not, because that is a permanent hole in the machine's
 coverage traded for a command-line flag.
+
+**If your antivirus reports detections under `AppData\Local\Temp\pytest-of-*`,
+they are this suite's fixtures.** The synthetic PEs are built in-process and
+contain no code, but they are deliberately odd: writable executable sections,
+packed section names, no imports, high-entropy regions, and one PE wearing a
+`.pdf` extension. That is the shape a heuristic engine scores, and a commercial
+engine agreeing with maltriage about these files is the system working rather
+than failing.
+
+Quarantine them; they are disposable. Do not add an exclusion for the Temp
+tree, for the reason just given. `pyproject.toml` sets
+`tmp_path_retention_policy = "failed"`, so a passing test's directory is
+deleted immediately and only the ones worth opening survive.
 
 **If you develop on Linux and ship to Windows, run the suite once like this
 before you tag anything:**

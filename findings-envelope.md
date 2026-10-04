@@ -20,7 +20,7 @@ tracks what three tools have agreed to say to each other.
 
 ## Why it exists
 
-Three tools produce findings about things — maltriage about files,
+Three tools produce findings about things - maltriage about files,
 claude-recon-agent about hosts and web applications, Shadowfax about actors and
 sessions. Each has its own report format and should keep it. What they need in
 common is a way to hand a finding to something that did not produce it, so that
@@ -84,12 +84,12 @@ to know which emitter to blame.
 
 What the findings are about.
 
-- `id` (required) — a content address, `"<algorithm>:<hex>"`. The algorithm is
+- `id` (required) - a content address, `"<algorithm>:<hex>"`. The algorithm is
   in the string rather than in a sibling field so that the id is a single
   comparable token.
-- `kind` (required) — `"file"`, and later `"host"`, `"endpoint"`, `"actor"`.
+- `kind` (required) - `"file"`, and later `"host"`, `"endpoint"`, `"actor"`.
   The consumer needs this before it can decide what an id means.
-- `size_bytes`, `media_type` (optional) — descriptive, never authoritative.
+- `size_bytes`, `media_type` (optional) - descriptive, never authoritative.
   maltriage's `media_type` is its own family string (`pe`, `elf`, `pdf`),
   which is a claim from magic bytes and not a MIME type.
 
@@ -115,47 +115,47 @@ The highest severity among `findings`, repeated at the top so a consumer can
 triage a stream without walking every finding. One of `info`, `low`, `medium`,
 `high`.
 
-An empty `findings` array with `severity: "info"` is a meaningful message —
-"this was examined and nothing was found" — and is not the same as no envelope
+An empty `findings` array with `severity: "info"` is a meaningful message - 
+"this was examined and nothing was found" - and is not the same as no envelope
 at all.
 
 ### `findings` (required, array)
 
 May be empty. Each entry:
 
-- **`key`** (required) — a stable, bounded identifier for the kind of finding.
+- **`key`** (required) - a stable, bounded identifier for the kind of finding.
   Bounded is the load-bearing word: a consumer must be able to enumerate the
   keys an emitter can produce. This is why maltriage files every YARA match
   under `yara_match` and every capability under `api_capability` rather than
-  promoting the rule or category into the key — a key set that grows when
+  promoting the rule or category into the key - a key set that grows when
   somebody adds a rules file is not one a dashboard can count on.
 
-- **`source`** (required) — which component of the emitter produced it. In
+- **`source`** (required) - which component of the emitter produced it. In
   maltriage this is the extractor name. It lets a consumer suppress a noisy
   source without suppressing a whole tool.
 
-- **`severity`** (required) — `info`, `low`, `medium` or `high`. **Severity is
+- **`severity`** (required) - `info`, `low`, `medium` or `high`. **Severity is
   the emitter's opinion and the consumer is entitled to override it.** It is
   calibrated against the emitter's own gate, not against a shared scale: what
   maltriage calls medium means "a human should look at this file", which is
   not what Shadowfax's medium means about an actor.
 
-- **`validated`** (required, boolean) — see below.
+- **`validated`** (required, boolean) - see below.
 
-- **`discriminator`** (optional, string) — which instance of the key. The YARA
+- **`discriminator`** (optional, string) - which instance of the key. The YARA
   rule name, the capability category, the section name. Present when the key
   alone does not identify what was found, absent when it does. This is what
   makes a bounded key set survivable: the detail that would otherwise want its
   own key goes here, where a consumer can group by it without needing to know
   it in advance.
 
-- **`summary`** (required, string) — one sentence a person can read. Prose, and
+- **`summary`** (required, string) - one sentence a person can read. Prose, and
   the only prose in the finding.
 
-- **`evidence`** (required, array) — the observations the finding rests on, as
+- **`evidence`** (required, array) - the observations the finding rests on, as
   `{"name": ..., "value": ...}`. May be empty.
 
-- **`mitre`** (optional, array of strings) — ATT&CK technique ids.
+- **`mitre`** (optional, array of strings) - ATT&CK technique ids.
 
 ### `incomplete` (required, array)
 
@@ -176,7 +176,7 @@ free to; one that does not have it cannot tell the difference.
 **`validated` is true when the emitter did work that could have falsified the
 claim.**
 
-The obvious reading — "did the emitter compute this rather than assume it" —
+The obvious reading - "did the emitter compute this rather than assume it" - 
 is useless, because nearly every finding reads a field, and a boolean that is
 true twelve times in thirteen carries no information. The test above
 discriminates, because it asks about the counterfactual: was there a version of
@@ -193,21 +193,21 @@ entropy could have come back low. The timestamp could have been after the
 floor. The rule could have failed to match.
 
 It is not a confidence score and not a quality rating. A `false` finding is
-often the more interesting one — a PDB path naming a build machine is
+often the more interesting one - a PDB path naming a build machine is
 `validated: false` and worth more to an analyst than most `true` findings. It
 tells a consumer what kind of claim it is holding, so that a consumer choosing
 to trust a subset can choose on something principled.
 
 ### maltriage's classification
 
-`false` — the finding's substance is a string the subject supplied:
+`false` - the finding's substance is a string the subject supplied:
 
 `signature_present` (signer names transcribed out of a certificate blob, and
 nothing verifies a chain), `build_id_present`, `runpath_set`, `rpath_set`,
 `urls_present`, `emails_present`, `mutexes_present`, `windows_paths_present`,
 `unix_paths_present`, `registry_path_present`.
 
-`true` — everything else, because something was compared, counted, walked or
+`true` - everything else, because something was compared, counted, walked or
 computed. Three worth naming because they look like transcription and are not:
 
 - `ipv4_present` passes every candidate through an octet-range check that
@@ -232,7 +232,7 @@ chain". It is always `false`, because nothing in this project verifies chains.
 That field and this one mean entirely unrelated things and both appear in the
 same pipeline. This document keeps the name because `validated` is the right
 word for what it describes and the certificate field is inside
-`report.data`, which does not cross the envelope — so the two never appear in
+`report.data`, which does not cross the envelope - so the two never appear in
 the same document. **A future emitter that does put certificate data into
 `evidence` must not name that value `validated`.**
 
@@ -266,7 +266,7 @@ credential, never the secret.**
 
 An envelope is stored, piped, shared and ingested, and putting a recovered
 credential into one turns a detection into a leak. maltriage already holds this
-rule in two places — YARA match context is offsets and never bytes, with no
+rule in two places - YARA match context is offsets and never bytes, with no
 configuration switch, and the secret engine at v0.4 is specified to return the
 offset, the length and the rule name and not the string. The envelope inherits
 it, and inherits the part that matters most: **there is no configuration option
@@ -281,7 +281,7 @@ correct. A URL finding's evidence is a count, not the URLs.
 The envelope carries findings, not extraction output. A consumer wanting the
 section table should ask the emitter for its native report.
 
-This does not forbid an evidence value that also appears in `report.data` —
+This does not forbid an evidence value that also appears in `report.data` - 
 naming an observation is what evidence is. It forbids the shortcut of attaching
 the data wholesale and calling it evidence.
 
@@ -312,14 +312,14 @@ finding would be a lie told at scale.
 it is the tool's only `high`: there is no benign reason for a PE to be called
 `invoice.pdf`. Every other key was considered and refused, and the refusals are
 recorded in `maltriage/attack.py` because each is a case somebody will
-reflexively want to map -- packer sections, writable executable sections, Run
+reflexively want to map - packer sections, writable executable sections, Run
 keys, zero compile timestamps, inferred capabilities.
 
 A YARA rule may declare techniques in its `meta`. A rule is a much narrower
 statement than a finding key, so a rule author can be specific where a
 per-key table cannot. None of the bundled rules does: they describe the shape
 of a file, ATT&CK describes behaviour, and shape does not survive the benign
-case -- `embedded_pe_header` fires on any ZIP carrying an executable.
+case - `embedded_pe_header` fires on any ZIP carrying an executable.
 
 An id that is not in the registry never reaches an envelope. `mk_finding`
 raises on one, and a rule that declares one has it reported against the rule

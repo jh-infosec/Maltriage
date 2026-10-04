@@ -71,7 +71,7 @@ class StringsExtractor(StreamExtractor):
     bytes, because the loop costs about a minute on a 200 MB sample and the
     regex costs under a second. A run crossing a chunk boundary is carried
     forward, and the tests pin that the result does not depend on the chunk
-    size -- which is the property that broke first when this was written.
+    size - which is the property that broke first when this was written.
 
     Extraction only. These strings are data; deciding that one looks like a
     credential is the v0.4 secret engine's job and deciding that one names a
@@ -105,14 +105,14 @@ class StringsExtractor(StreamExtractor):
         self._secret_cap = config_int(config, "secrets_max_candidates", 32)
         # Candidates, never the strings behind them. Capped because a file can
         # hold any number of them and this list is the one accumulator here
-        # that a sample controls the size of -- the API set is bounded by a
+        # that a sample controls the size of - the API set is bounded by a
         # vocabulary, this is not.
         self._secrets: list[Any] = []
         self._secrets_dropped = 0
         # Bounded by the registry, not by the sample: this can never hold more
         # than the vocabulary, whatever the file does. It is the only
         # accumulator in this extractor that needs no cap, and the reason is
-        # worth stating -- what goes in comes from `apis`, not from the bytes.
+        # worth stating - what goes in comes from `apis`, not from the bytes.
         self._api: set[str] = set()
 
     def feed(self, chunk: bytes) -> None:
@@ -131,7 +131,7 @@ class StringsExtractor(StreamExtractor):
         # placement is the whole point of doing it in the extractor. The
         # retained list stops at `strings_max_retained`, and `text` is off by
         # default, so a findings pass over `report.data` would see a truncated
-        # subset on a verbose run and nothing at all on a normal one -- while
+        # subset on a verbose run and nothing at all on a normal one - while
         # the packed sample this is meant to catch is exactly the one with
         # hundreds of thousands of strings. Every string is matched; only what
         # matched is kept.
@@ -184,7 +184,7 @@ class StringsExtractor(StreamExtractor):
         # list is drawn from the registry's fixed vocabulary, so it is text
         # this project wrote about a file rather than text taken out of one.
         # That is what makes it safe to publish unconditionally, and it is
-        # also why it needs no truncation flag -- unlike every other list in
+        # also why it needs no truncation flag - unlike every other list in
         # this extractor, it cannot grow with the sample.
         data["api_names"] = sorted(apis.display(n) for n in self._api)
         data["api_capabilities"] = apis.categorise(self._api, view="string")
@@ -307,7 +307,7 @@ class StringsExtractor(StreamExtractor):
                 f"{', '.join(others[:3])}", "info"))
 
         # A name in the string table is weaker evidence than the same name in
-        # an import table -- text is text -- but it is the only evidence there
+        # an import table - text is text - but it is the only evidence there
         # is when a sample resolves its imports at runtime, which is the case
         # worth catching. The registry holds the severities; none reaches
         # medium.
@@ -414,8 +414,8 @@ class _RunScanner:
         # file: nothing precedes the first byte, and a run may begin there.
         self.prior = 0
         # Absolute position in the file of the next byte `feed` has not seen.
-        # A run's offset is what makes a secret finding actionable -- "there
-        # is a credential in this 40 MB file" is not a finding -- and it is
+        # A run's offset is what makes a secret finding actionable - "there
+        # is a credential in this 40 MB file" is not a finding - and it is
         # the one thing a scanner working a chunk at a time has to be told to
         # remember, because every position it computes is relative to a buffer
         # that will not exist a moment later.
@@ -429,7 +429,7 @@ class _RunScanner:
                 index -= 1
             return index
         # A UTF-16LE run is (printable, NUL) pairs, so its prefixes are whole
-        # pairs optionally followed by a lone printable byte -- the half pair
+        # pairs optionally followed by a lone printable byte - the half pair
         # a boundary can split.
         if index and 0x20 <= buffer[index - 1] <= 0x7E:
             index -= 1
@@ -470,7 +470,7 @@ class _RunScanner:
 
         if self.skipping:
             # Inside a run already emitted at its full length. Discard the
-            # rest of it, and stop skipping the moment it ends -- which the
+            # rest of it, and stop skipping the moment it ends - which the
             # first version never did, so an unrelated later string was
             # thrown away as though it were a tail.
             consumed, half = self._leading_run_end(chunk)
@@ -498,7 +498,7 @@ class _RunScanner:
         # the guard must be printable, which needs an empty carry, and the
         # only branch that produces both is the skipping path. I could not
         # build an input that reaches it, and mutation testing confirms no
-        # test fails without this line -- which is exactly why it says so here
+        # test fails without this line - which is exactly why it says so here
         # rather than pretending to be pinned.
         tail = max(self._continuable_from(buffer), 1)
         self.prior = buffer[tail - 1]

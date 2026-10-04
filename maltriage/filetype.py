@@ -54,11 +54,11 @@ class FileTypeExtractor(HeaderExtractor):
         ctx["family"] = family
         # Published here because phase 1 is the only phase that runs before
         # the entropy stream, and because this range is knowable from the
-        # header alone -- the security directory holds a file offset, not an
+        # header alone - the security directory holds a file offset, not an
         # RVA. `ctx` is the channel the pipeline already documents for this:
         # "each sees what the previous one published".
         # `ctx.get`, not `ctx[...]`: a caller may hand this extractor a bare
-        # context, and identifying the format is this extractor's job -- losing
+        # context, and identifying the format is this extractor's job - losing
         # it because an optional key for somebody else's optimisation was
         # absent would be a poor trade. Without a size there is no range, and
         # the entropy pass then scores every byte, which is the safe direction.

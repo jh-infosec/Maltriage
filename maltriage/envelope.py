@@ -11,7 +11,7 @@ code has to enforce:
 
 **It is lossy on purpose.** `report.data` does not cross. Neither does
 `report.path`, which is a resolved absolute path and therefore carries the
-directory layout and the username of the machine that produced it -- and the
+directory layout and the username of the machine that produced it - and the
 envelope is the artefact most likely to be handed to somebody else, so it is
 the one that must not carry that. Subjects are identified by content hash and
 by nothing else.
@@ -47,7 +47,7 @@ ENVELOPE_VERSION = "0.1"
 #: Everything not listed here is true, because something was compared,
 #: counted, walked or computed and could have come back the other way. See
 #: `findings-envelope.md` for the three that look like transcription and are
-#: not -- `ipv4_present` rejects out-of-range octets, `registry_persistence_
+#: not - `ipv4_present` rejects out-of-range octets, `registry_persistence_
 #: path` is a membership test, and `api_capability` counts against a
 #: threshold.
 TRANSCRIBED = frozenset({
@@ -67,7 +67,7 @@ TRANSCRIBED = frozenset({
 def _validated(finding: dict[str, Any], report: Report) -> bool:
     """Whether the emitter did work that could have falsified this claim.
 
-    The obvious test -- did the emitter compute it rather than assume it -- is
+    The obvious test - did the emitter compute it rather than assume it - is
     useless, because nearly every finding reads a field and a boolean that is
     true twelve times in thirteen carries no information. This one asks the
     counterfactual instead: was there a version of this file for which the
@@ -93,7 +93,7 @@ def to_envelope(report: Report) -> dict[str, Any]:
         # A content address, algorithm included in the string so the id is a
         # single comparable token. Absent only if hashing itself failed, in
         # which case `incomplete` says so and the subject cannot be correlated
-        # -- which is the honest answer rather than a fabricated one.
+        # - which is the honest answer rather than a fabricated one.
         "id": f"sha256:{sha256}" if sha256 else None,
         "kind": "file",
         "size_bytes": report.size_bytes,

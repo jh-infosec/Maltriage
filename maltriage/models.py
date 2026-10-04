@@ -40,13 +40,13 @@ def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
     `evidence` is a list of `{"name": ..., "value": ...}`. The rule for what
     belongs, from `findings-envelope.md`: an observation is something the
     subject would have to change for the value to change. And it never carries
-    what was found -- an offset, a length, a count or a name from this
+    what was found - an offset, a length, a count or a name from this
     project's own vocabulary, never the matched bytes, the extracted string or
     the credential. There is no configuration switch to relax that, for the
     reason v0.3 gave about YARA match context: the person most likely to
     enable one is the person debugging a rule that matches secrets.
 
-    `discriminator` says which instance of `key` this is -- the rule name, the
+    `discriminator` says which instance of `key` this is - the rule name, the
     capability category, the section. It is what lets the key set stay bounded
     while the findings underneath it are not.
 
@@ -56,7 +56,7 @@ def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
     likely to aggregate without reading the finding underneath it, so an id
     that does not exist must not be able to reach a report by way of a typo.
     Whether a finding *deserves* a technique is a separate question and a much
-    harder one -- `attack.py` records the rule and the findings it disqualifies.
+    harder one - `attack.py` records the rule and the findings it disqualifies.
     """
     if severity not in SEVERITY_RANK:
         raise ValueError(f"unknown severity '{severity}', expected one of {SEVERITIES}")

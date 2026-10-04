@@ -1,6 +1,6 @@
 # Changelog
 
-## Version 0.4.5 -- one module per format
+## Version 0.4.5 - one module per format
 
 `extractors.py` was 3,091 lines: a quarter of the project, eight extractors
 for six formats, in one file. It is now eight modules, and `extractors.py` is
@@ -19,7 +19,7 @@ the extractor set plus the names everything imports.
 
 **Timed rather than prompted.** v0.5 adds an archive parser and v0.6 adds two
 document parsers. Each would have made this same work larger, and a file that
-grows by a format per release is not a file anybody chose -- it is one nobody
+grows by a format per release is not a file anybody chose - it is one nobody
 got around to dividing.
 
 ### Nothing changed behaviour, and that was checked three ways
@@ -36,8 +36,8 @@ modules differs from the original only in the module headers.
 `extractors.py` re-exports every name the project and its suite import, for
 the reason `entropy.py` did when the secret engine took its arithmetic: a
 refactor that forces every caller to learn a new layout has spent its own
-benefit. What it does not re-export is the format constants -- `SHT_NOBITS`,
-`SCN_MEM_EXECUTE`, `DIRECTORY_DEBUG` and the rest -- which were only reachable
+benefit. What it does not re-export is the format constants - `SHT_NOBITS`,
+`SCN_MEM_EXECUTE`, `DIRECTORY_DEBUG` and the rest - which were only reachable
 because they shared a file with everything else, and now live with their
 format.
 
@@ -47,7 +47,7 @@ format.
 `extractors_module.compile_rules` rebinds a name in the facade; the code that
 calls it looks up its own module global and never sees the patch. Those tests
 would have passed while testing nothing. They now patch the module that owns
-the name -- `rules_module`, `pe_module`, `elf_module` -- and one of them
+the name - `rules_module`, `pe_module`, `elf_module` - and one of them
 caught itself immediately: the compile-once test reported "compiled 0 times
 for 8 files" the moment the patch stopped landing.
 
@@ -63,7 +63,7 @@ read end to end lately.
 The key-coverage test needed the same attention: it reads the source for
 `mk_finding(self.name, "...")` calls, and after the split it would have read
 `extractors.py`, found no keys at all, and passed vacuously. It now walks
-every module in the package and asserts it found more than twenty -- the
+every module in the package and asserts it found more than twenty - the
 failure mode a test that greps for its own subject always has.
 
 ### Also
@@ -74,7 +74,7 @@ failure mode a test that greps for its own subject always has.
 
 ---
 
-## Version 0.4.4 -- a signature is not the file's content
+## Version 0.4.4 - a signature is not the file's content
 
 v0.4.3 left `entropy_hotspot` as the largest remaining contributor to the
 gate: 12.4% of ordinary Windows files, sole cause of flagging on 28 of the 46
@@ -112,9 +112,9 @@ It does not, as it turns out. **The security directory is the one data
 directory entry that holds a file offset rather than an RVA**, which is
 exactly what makes it readable without the section table and therefore without
 the random-access phase. `FileTypeExtractor` publishes the range into `ctx` in
-phase 1 -- the same channel it already uses for the format family, and the one
+phase 1 - the same channel it already uses for the format family, and the one
 `architecture.md` has described since v0.1.2 as "each sees what the previous
-one published" -- and the entropy stream drops those bytes before they reach a
+one published" - and the entropy stream drops those bytes before they reach a
 window or the histogram.
 
 No new phase, and no cross-extractor findings pass. The alternative was the
@@ -126,7 +126,7 @@ conclusion drawn from two extractors at once.
 
 The first version trusted the range. A sample controls that field, so a PE
 whose security directory was rewritten to say *offset 64, length everything*
-made the entropy pass skip the whole file -- a packed binary going completely
+made the entropy pass skip the whole file - a packed binary going completely
 silent, which is worse than the false positive it was meant to fix.
 
 The second version required the range to end at the end of the file, which
@@ -136,8 +136,8 @@ survived.
 What works is structural: **a certificate that overlaps the mapped image is
 not a certificate.** The section table sits in the header beside the directory
 making the claim, so the last section's raw end is knowable in phase 1, and
-the range must begin past it. Three checks now -- past the image, ending at
-the file's end, non-empty -- and a range failing any of them excludes nothing,
+the range must begin past it. Three checks now - past the image, ending at
+the file's end, non-empty - and a range failing any of them excludes nothing,
 so the failure direction is "score every byte". There is a test that builds
 exactly that evasive PE and asserts the payload still scores.
 
@@ -152,7 +152,7 @@ exactly that evasive PE and asserts the payload still scores.
 ### Predicted, not yet confirmed
 
 From the per-file data, the gate should land between **10.0% and 15.8%** on
-the same seeded System32 sample -- 10.0% if every hotspot on a signed file was
+the same seeded System32 sample - 10.0% if every hotspot on a signed file was
 the signature, higher if some signed files carry a genuine hot region as well.
 That run has not happened yet. It is recorded here as a prediction rather than
 left out, for the same reason v0.4.3 recorded the `extension_mismatch` guess
@@ -168,7 +168,7 @@ above is scored in full.
 
 - `FileTypeExtractor` reads the file size with `ctx.get` rather than
   `ctx[...]`. A caller handing it a bare context lost format identification
-  entirely -- a `KeyError` in the one extractor whose job is to say what the
+  entirely - a `KeyError` in the one extractor whose job is to say what the
   file is, because an optional key for somebody else's optimisation was
   absent. Caught by `test_family_detection`, which passes `{}`.
 - That bug also made a whole mutation run meaningless: seven mutations all
@@ -183,7 +183,7 @@ above is scored in full.
 
 ---
 
-## Version 0.4.3 -- the Windows corpus, and what it cost to find out
+## Version 0.4.3 - the Windows corpus, and what it cost to find out
 
 v0.4.2 could not answer four deferred decisions because it had no Windows
 binaries to answer them with. This release points the harness at
@@ -221,7 +221,7 @@ that counts one file twice is the one thing a false positive rate must not do.
 
 ### `api_capability` is settled, after three releases of deferral
 
-It fires on **23.7%** of ordinary Windows binaries -- 69 of 291. Promoting it
+It fires on **23.7%** of ordinary Windows binaries - 69 of 291. Promoting it
 to medium would newly flag 44 files nothing else flags and take the gate from
 15.8% to **30.9%**.
 
@@ -238,8 +238,8 @@ why a corpus must match the claim being made about it.
 
 52 of 291 files, and the sole cause of flagging on 48 of the 94 the gate
 caught. The cause is a population that does not exist on Linux: Windows ships
-thousands of **resource-only modules** -- every `en-US\*.mui`, and a large
-share of the DLLs beside them -- with no entry point, no executable section
+thousands of **resource-only modules** - every `en-US\*.mui`, and a large
+share of the DLLs beside them - with no entry point, no executable section
 and no imports.
 
 The finding's own argument excludes them. It says a binary with no imports
@@ -280,8 +280,8 @@ Over the same sample, now at 15.8%:
 
 - `entropy_hotspot`, 12.4%, sole cause on 28. Demoting it would reach 6.2%.
   On Linux it cost 0.6%. Twenty times the rate on Windows is a fact about
-  Windows binaries -- compressed resources, embedded media, Authenticode
-  blobs -- and not yet a fact about the finding. Unmeasured: whether those
+  Windows binaries - compressed resources, embedded media, Authenticode
+  blobs - and not yet a fact about the finding. Unmeasured: whether those
   hotspots land inside the certificate the file is signed with, which would
   be a mechanical exclusion rather than a severity change. `signature_present`
   fires on 12.0%, which is close enough to 12.4% to be worth checking and far
@@ -291,7 +291,7 @@ Over the same sample, now at 15.8%:
 
 ### What was measured and did not settle anything
 
-- `registry_persistence_path` costs 0.3% here -- two files, promoting newly
+- `registry_persistence_path` costs 0.3% here - two files, promoting newly
   flags two. That reads as affordable and is the wrong corpus to read it from:
   Run keys live in installers, not in System32. It stays at low until a
   `Program Files` corpus says otherwise.
@@ -319,16 +319,16 @@ Over the same sample, now at 15.8%:
 - Predictions recorded before the run, for the record: `extension_mismatch`
   would light up on `.mui` and `.cpl`. It fired **zero** times.
 - 26 tests, each mutation-verified, including one that pins that a DLL with
-  code and no `DllMain` -- entry point zero, which is ordinary -- is not
+  code and no `DllMain` - entry point zero, which is ordinary - is not
   treated as a resource module. **399 passed.**
 
 ---
 
-## Version 0.4.2 -- the corpus harness, three releases early
+## Version 0.4.2 - the corpus harness, three releases early
 
 The harness was v0.7's headline feature. It is here instead, because six
 decisions in this repository were recorded as *deferred until something can
-measure them*, and all six were deferred to the same release -- one that sits
+measure them*, and all six were deferred to the same release - one that sits
 behind two feature releases. A decision deferred to a release that has not
 started is not deferred, it is abandoned with a citation.
 
@@ -347,7 +347,7 @@ decimal point in it.
 **The counterfactual is the part that answers a question rather than reporting
 a number.** For every key below the gate: how many ordinary files would be
 newly flagged if it were promoted. For every key at or above it: how many
-would stop being flagged if it were demoted. Both are *marginal* -- they count
+would stop being flagged if it were demoted. Both are *marginal* - they count
 only files where nothing else already decides the outcome. The first draft
 counted gross, and gross is worse than useless here: a key that fires on two
 hundred benign files but never on one that isn't already flagged is free to
@@ -357,7 +357,7 @@ promote, and the gross count named it the most expensive key in the set.
 
 1,020 system binaries, 1,039 shared objects, 3,000 Python standard library
 source files and 1,629 documentation files. 461 MB, 82.9s, **5.6 MB/s and 81
-files/s** single-threaded -- the throughput baseline this project has never
+files/s** single-threaded - the throughput baseline this project has never
 had.
 
 **The gate flags 0.6% of them.** Forty files. Two keys produce all forty:
@@ -378,7 +378,7 @@ had.
 ### What it settled
 
 - **`secret_candidate` stays at `low`.** It fires on 1.2% of ordinary files,
-  and promoting it would take the gate from 0.6% to **1.6%** -- nearly tripling
+  and promoting it would take the gate from 0.6% to **1.6%** - nearly tripling
   it, on 69 files nothing else flags. The v0.4 argument was that anything
   higher makes every minified bundle a CI failure; the number now says so.
 - **Nothing the strings extractor reports may reach medium.** `urls_present`
@@ -389,7 +389,7 @@ had.
 
 ### What it cannot settle, which is the sharper finding
 
-`api_capability` fired **zero times** over all 6,688 files -- as it did over
+`api_capability` fired **zero times** over all 6,688 files - as it did over
 the 6,725 in v0.4. That is not the answer to whether a capability category may
 reach medium. This corpus has no Windows binaries in it, so it measures that a
 Win32 vocabulary does not fire on things that are not Win32 programs, which is
@@ -428,7 +428,7 @@ Found on the first Windows run of v0.4.2, in code v0.4.1 shipped:
 UnicodeDecodeError: 'charmap' codec can't decode byte 0x90 in position 3570
 ```
 
-`Path.read_text()` with no encoding uses the *locale's* encoding -- UTF-8 on
+`Path.read_text()` with no encoding uses the *locale's* encoding - UTF-8 on
 Linux, cp1252 on a default Windows install. The README draws its architecture
 diagram with box characters, `┐` is `e2 94 90`, and `0x90` is one of the five
 bytes cp1252 leaves undefined. So two tests raised there and nowhere else.
@@ -464,12 +464,12 @@ with `prefix-` glued to the front.
 `_detected_token` guarantees the *bare* token is nominated. Gluing seven
 low-entropy characters onto it makes a different string with a lower entropy
 ratio, so about one in twenty falls under the bar. The guarantee did not
-survive the concatenation and the test assumed it had -- which is exactly the
+survive the concatenation and the test assumed it had - which is exactly the
 defect the v0.4 pass fixed in two other tests, in a shape that pass did not
 look for.
 
-The claim is now split. The tokenisation -- that a hyphen does not split the
-token, so the string is one span of 47 characters -- is a fact, asserted
+The claim is now split. The tokenisation - that a hyphen does not split the
+token, so the string is one span of 47 characters - is a fact, asserted
 against `_TOKEN` and independent of any draw, and verified by removing the
 hyphen from the character class. What the entropy tier then does with that
 token is a heuristic, and is measured over 200 draws against an 85% bar, six
@@ -486,7 +486,7 @@ the secret engine tests, and four of the full suite, all clean.
 
 ---
 
-## Version 0.4.1 -- the README is an interface
+## Version 0.4.1 - the README is an interface
 
 A close-out rather than a feature. `__version__` and `pyproject.toml` both say
 0.4.1; v0.4 itself is not finished, because reputation enrichment and offline
@@ -500,7 +500,7 @@ suite. 343 passed.
 
 **The README now has tests behind it.** It documented `python cli.py scan ...`
 for two releases after the package layout moved `cli.py` inside `maltriage/`,
-and every command in it was broken while the suite stayed green -- because the
+and every command in it was broken while the suite stayed green - because the
 commands in a README are an interface with nothing behind them. Three tests
 close that:
 
@@ -522,7 +522,7 @@ nor yara-python.
 
 ---
 
-## Version 0.4 -- a package, and strings
+## Version 0.4 - a package, and strings
 
 Two things, and the first exists to make the rest of v0.4 possible. Three
 components on the roadmap are shared with claude-recon-agent and Shadowfax,
@@ -539,7 +539,7 @@ solve.
   core still has none
 - `config.py` and `fixtures.py`, split out of `sample_data.py`. Every
   extractor needs the config accessors and none of them needs a PE builder,
-  so a module named for its fixtures was the wrong home -- the docstrings had
+  so a module named for its fixtures was the wrong home - the docstrings had
   been apologising for it since v0.1.2
 - `StringsExtractor`: printable ASCII and UTF-16LE strings taken off the
   shared pass, with URL, email, IPv4, registry path, mutex and absolute path
@@ -570,11 +570,11 @@ solve.
 - `evidence` and `discriminator`, optional arguments to `mk_finding`, omitted
   from the result when not given. Supplied at six finding sites so far;
   everywhere else the envelope emits an empty evidence list, and the spec says
-  what that means -- the emitter has not been taught this key yet, not that
+  what that means - the emitter has not been taught this key yet, not that
   there was nothing to say
 - `attack.py`, the shared ATT&CK registry: technique ids with their names and
   tactics, and the rule for when one may be attached. A registry rather than a
-  mapping -- it says what `T1036.008` is called, not which findings earn it
+  mapping - it says what `T1036.008` is called, not which findings earn it
 - `mitre`, a third optional argument to `mk_finding`, validated against the
   registry so an id that does not exist cannot reach a report by way of a typo
 - A `mitre` key in a YARA rule's `meta`, comma separated. An id this build does
@@ -595,9 +595,9 @@ solve.
 
 ### Measured
 
-The capability vocabulary was run over 6725 real files -- 1610 Linux system
+The capability vocabulary was run over 6725 real files - 1610 Linux system
 binaries and shared objects, 2959 Python standard library source files, and
-2156 documentation files -- to find out what it fires on when nothing is
+2156 documentation files - to find out what it fires on when nothing is
 wrong. Twenty-one files produced a finding, and twenty of those came from
 `gethostbyname` and `getaddrinfo`.
 
@@ -615,7 +615,7 @@ Prose does. After both changes the whole 6725 produced **no capability
 findings at all**.
 
 That rule is also, measured on a 100 MB sample with 2.8 million strings,
-about a third of the cost of matching -- the extractor goes from 5.28s to
+about a third of the cost of matching - the extractor goes from 5.28s to
 7.21s with it and to 8.44s without. The cheaper path and the more accurate
 one turned out to be the same path, which is not usually how that goes.
 
@@ -673,7 +673,7 @@ In order of what each removed:
   length, so the rule costs almost nothing.
 
 That leaves **3.3% of binaries, 0% of source files and 0.3% of documentation**,
-at a cost of about 15% of genuinely random tokens -- and the recall is steady
+at a cost of about 15% of genuinely random tokens - and the recall is steady
 from 32 characters to 48, which is what the scaling was for.
 
 Two known-tier corrections came out of the same measurement.
@@ -689,8 +689,8 @@ random token is always detected, and one in seven is not. A test that fails
 sometimes is worse than one that does not exist: it teaches whoever sees it to
 re-run rather than to read.
 
-`entropy.py` was split out of `extractors.py` in the process -- the engine
-needed the same maths and could not import a module that imports it -- and
+`entropy.py` was split out of `extractors.py` in the process - the engine
+needed the same maths and could not import a module that imports it - and
 `expected_random_entropy` now takes an alphabet size, because a base64 token
 cannot reach eight bits per character however random it is.
 
@@ -706,7 +706,7 @@ space because each is a case somebody will reflexively want to map:
 - **`known_packer_section`, `writable_executable_section`,
   `virtual_size_mismatch`, `no_imports`** are the shape of a packer.
   `T1027.002` describes software packing accurately, which is exactly the
-  problem -- the technique is right and the inference is not, because packing
+  problem - the technique is right and the inference is not, because packing
   is the normal state of most installers and UPX is a legitimate tool.
 - **`registry_persistence_path`** looks like `T1547.001`, and an installer
   writing a Run key is an installer. It is already held at `low` for that
@@ -757,14 +757,14 @@ prevent. It carries `report.errors` across as `{source, reason}`.
 and absolute, and the safety checklist records it as carrying the directory
 layout and the username of the machine that produced it. This is the output
 most likely to be handed to somebody else, so it is the one that must not
-carry it -- and a filename is little better, because a document is often named
+carry it - and a filename is little better, because a document is often named
 after the person it is about. The cost is accepted: a directory scan produces
 envelopes that only a hash distinguishes, and correlating one back to a file is
 the caller's job, the caller being the party entitled to know the path.
 
 **A name collision worth knowing about.** A maltriage report already has a
 field called `validated`, on the certificate, meaning "was this Authenticode
-signature verified against a chain" -- always false, because nothing here
+signature verified against a chain" - always false, because nothing here
 verifies chains. It and the envelope's `validated` are unrelated. They never
 meet, because the certificate field is inside `report.data` and `report.data`
 does not cross, but an emitter that later puts certificate data into `evidence`
@@ -782,7 +782,7 @@ the tests and the measurement had both missed.
 
 **`display()` did not guarantee what its docstring claimed.** It was
 `SPELLING.get(canonical, canonical)`, so an unrecognised key came back
-verbatim -- ANSI escapes and all. The claim that no sample-derived text can
+verbatim - ANSI escapes and all. The claim that no sample-derived text can
 reach a report through this module was therefore true of the two callers
 rather than of the function, and one refactor away from being false. It now
 raises on a key it did not write.
@@ -792,7 +792,7 @@ match.** `_TOKEN` capped a token at 64 characters, so `j` * 64 followed by
 `VirtualAllocEx@16` matched while `j` * 63 followed by the same text did not:
 the padding filled exactly one token and left the API name starting the next.
 Whether a name was found depended on its offset modulo 64, and the case that
-found it was the wrong one -- it is `PreloadLibraryPath` arriving by a
+found it was the wrong one - it is `PreloadLibraryPath` arriving by a
 different route. Tokens are now whole identifiers at any length.
 
 **`DnsQuery` could never have fired.** It is a macro; a binary imports
@@ -813,7 +813,7 @@ one. Unknown views now raise.
 
 **Two tests were weaker than their docstrings.** `test_an_ordinal_import_
 matches_nothing` asserted that `"#42"` matches nothing, which no plausible bug
-could break -- it now drives an ordinal-only import through the real path
+could break - it now drives an ordinal-only import through the real path
 instead. And the `CryptUnprotectData` test survived a reordering that tried
 the stripped form first, because nothing in the real vocabulary collides with
 `cryptunprotectdat`; it now pins the ordering against a vocabulary built to
@@ -830,7 +830,7 @@ Where an ASCII string's NUL terminator sits against a UTF-16 string, the wide
 pattern reached one byte too far left: the last character of `config\x00` plus
 that NUL is itself a valid `(printable, NUL)` pair, so a wide `AKIA...` behind
 it came out as `gAKIA...`. Known-format secret patterns require whole-token
-boundaries -- without them `aws_access_key_id` fired on `wget` -- so a stolen
+boundaries - without them `aws_access_key_id` fired on `wget` - so a stolen
 leading character puts a letter in front of the token and the guard refuses the
 match. The credential disappeared and the report looked clean.
 
@@ -845,7 +845,7 @@ inside the rejected span.
 
 **Every buffer now carries the byte that preceded it.** A lookbehind has
 nothing to look at when a match starts at offset zero of a buffer, so the fix
-on its own would have made the result depend on where the chunks fell -- the
+on its own would have made the result depend on where the chunks fell - the
 one thing this scanner exists to prevent. The guard byte cannot seed a match of
 its own: it is only printable when the carry is non-empty, and a non-empty
 carry always begins with a printable byte rather than the NUL a pair would
@@ -875,7 +875,7 @@ The strings extractor is the first stream extractor added since v0.1.2, and
 the chunk-boundary invariant is the one it broke.
 
 **Results depended on `read_chunk_bytes`.** The carry kept a run only when the
-regex had matched and the match reached the end of the buffer -- but a
+regex had matched and the match reached the end of the buffer - but a
 fragment shorter than the minimum length can never match `{6,}`, so it was
 dropped and the next buffer restarted inside the run. `MZAPPDATAROAM` split at
 a 4096-byte boundary was reported as `PPDATAROAM`. A UTF-16 continuation that
@@ -895,8 +895,8 @@ buffer starting on the NUL half of a pair.
 **The entropy extractor had been linear in sample size since v0.1.2.** It kept
 one float per window to compute a maximum, a mean and a count, all three of
 which are computable in constant space. It went unnoticed because a float is
-small -- 2441 of them for a 20 MB sample is 80 KB, invisible beside a 1 MB
-read chunk -- and because the test that should have caught it compared a
+small - 2441 of them for a 20 MB sample is 80 KB, invisible beside a 1 MB
+read chunk - and because the test that should have caught it compared a
 200 KB sample with a 20 MB one. The stream phase has no size ceiling, so the
 same list is 400 MB at 100 GB.
 
@@ -909,7 +909,7 @@ The rest:
   2048, so an absent value silently doubled the ceiling
 - A capped indicator list stated its length as a total: "128 URL(s)" when
   there were 400. It now says "at least", and every cap reaches `parse_errors`
-  and the CLI, including the one that matters most -- that when the retained
+  and the CLI, including the one that matters most - that when the retained
   list is full the indicators were drawn from a subset
 - `architecture.md` still described the flat layout it had just stopped having
 
@@ -935,12 +935,12 @@ Both memory tests were also measuring the wrong thing. They compared a small
 sample with a large one, which conflates "grows with the sample" with "reaches
 its ceiling": a bounded retained list is a fixed cost a small file never pays.
 They now compare two sizes that have both saturated every ceiling, warm each
-path before measuring, and subtract the memory already live -- because
+path before measuring, and subtract the memory already live - because
 `get_traced_memory` reports the whole process and these tests run after two
 hundred others that hold their own fixtures.
 
 
-## Version 0.3.1 -- ELF
+## Version 0.3.1 - ELF
 
 The last unshipped piece of v0.2's design, arriving after v0.3 because that is
 when it was built rather than because it belongs there.
@@ -950,7 +950,7 @@ fixed-layout records that `struct` reads, and there is no equivalent of
 pefile's accumulated knowledge of malformed real-world files to buy. The rule
 `architecture.md` states is to pay a dependency where the format is genuinely
 hostile, not where it is merely binary. So there is no optional import, no
-missing-parser error, and it works on a bare checkout -- and every bound is
+missing-parser error, and it works on a bare checkout - and every bound is
 this module's own.
 
 ### Added
@@ -986,7 +986,7 @@ Eight defects from the fuzzing pass, each now with a regression test. Two are
 worth reading even if the others are not.
 
 **Section names were wrong on 3181 of 3185 real binaries.** GNU ld tail-merges
-`.shstrtab`, so most names are interior offsets -- `.rela.plt\0` also serves
+`.shstrtab`, so most names are interior offsets - `.rela.plt\0` also serves
 `.plt` at +5. Resolving only the offsets that follow a NUL meant
 `nonstandard_section_name` fired on essentially every ELF in existence, which
 is a finding carrying no information, and a crafted `sh_name` pointing into
@@ -1007,7 +1007,7 @@ before sanitising.
 
 The rest:
 
-- `e_shentsize = 0` -- one two-byte field -- made the section table read as
+- `e_shentsize = 0` - one two-byte field - made the section table read as
   empty with nothing recorded. The file still runs, because the kernel never
   reads section headers, so the report said `stripped: true` about a binary
   with a full symbol table while the entropy and packer-name findings vanished
@@ -1031,13 +1031,13 @@ The rest:
 - `build_elf` measured a segment's file size and memory size in the same
   space, so a file containing an SHT_NOBITS section got a `p_memsz` that
   stopped short of its own contents and an entry point outside every loadable
-  segment -- a false medium from a builder whose docstring calls its output
+  segment - a false medium from a builder whose docstring calls its output
   structurally valid
 - `e_shstrndx` pointing at a NOBITS section decoded names out of whatever sat
   at offset zero, which is the ELF header, and reported `\x7fELF\x02\x01\x01`
   as a section name
-- SHN_XINDEX -- the legal way to have more sections than `e_shnum` can express
-  -- was read literally as no section table at all, which is a medium
+- SHN_XINDEX - the legal way to have more sections than `e_shnum` can express
+  - was read literally as no section table at all, which is a medium
 
 ### Notes
 
@@ -1052,7 +1052,7 @@ medium is a false CI failure, and a finding set nobody has pointed at real
 software is a finding set nobody has tested.
 
 
-## Version 0.3 -- pattern matching
+## Version 0.3 - pattern matching
 
 YARA. The release where the extractor set stops being fixed by the code: a
 rules directory is an extension point anybody can add to, and an extension
@@ -1115,8 +1115,8 @@ rather than the sample.
 - A four-byte string against a crafted sample produced libyara's cap of a
   million match objects: 220 MB from a 4 MB file. Fast matching records the
   first occurrence of each string instead. libyara ignores fast mode for any
-  string whose condition reads that string's count, offset or length -- `#a`
-  is one of the commonest idioms in public rule sets -- so `yara_max_scan_bytes`
+  string whose condition reads that string's count, offset or length - `#a`
+  is one of the commonest idioms in public rule sets - so `yara_max_scan_bytes`
   bounds the one thing the extractor genuinely controls
 - Under fast matching a string reported `count: 1` and `truncated: false` for
   seven hundred thousand hits. `truncated` is the field whose whole job is to
@@ -1126,15 +1126,15 @@ rather than the sample.
   Now off unless `yara_allow_includes` says otherwise
 - The compile cache was keyed on nothing, so a reused extractor answered with
   whichever rule set it saw first while reporting the files it had been asked
-  for -- a stale result presented as a current one. It now keys on the rule
+  for - a stale result presented as a current one. It now keys on the rule
   files and on `yara_allow_includes`, because both are inputs to the compile
 - An unusable `yara_rule_paths` entry vanished silently: a nonexistent path, a
   `Path` where a string was expected, a device file, an unreadable directory.
   The report claimed a full run while the configured rules never executed
 - A dangling symlink or a directory named `sub.yar` inside a rules directory
   disappeared the same way
-- Naming the bundled directory in `yara_rule_paths` -- a natural thing to
-  write, since configured paths add to the bundled set -- emitted every match
+- Naming the bundled directory in `yara_rule_paths` - a natural thing to
+  write, since configured paths add to the bundled set - emitted every match
   twice, including the medium the CI gate reads
 - The timeout bounded each rule file, and the number of rule files is a
   directory listing rather than a bound. It is now a budget spent across the
@@ -1166,7 +1166,7 @@ limit, and neither is reachable from the bundled set. The mitigation is rule
 discipline, which is documentation, and it lives in `AUTHORING.md`.
 
 
-## Version 0.2 -- executable structure
+## Version 0.2 - executable structure
 
 PE parsing. The first release whose extractors gate on the header phase,
 which is what that phase was built for, and the first that produces fields a

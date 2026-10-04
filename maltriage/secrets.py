@@ -5,7 +5,7 @@ Three detectors over one string, and they exist in that order because they
 catch different things. **Known patterns catch what a rule exists for.**
 **Entropy catches what no rule exists for**, which is the case that actually
 matters, because a company's own API key format has no public matcher and
-never will. **Context catches the value that is neither** -- an ordinary
+never will. **Context catches the value that is neither** - an ordinary
 looking string that a name beside it says is a password.
 
 maltriage runs this over extracted strings, claude-recon-agent over JavaScript
@@ -18,7 +18,7 @@ be shared, after `apis.py`, and the reason the package layout landed first.
 
 A `Candidate` carries an offset, a length, an entropy and the name of the rule
 that fired. It has no field for the string, and neither does anything this
-module returns. That is not a default to be overridden -- **there is no
+module returns. That is not a default to be overridden - **there is no
 configuration switch**, for the reason v0.3 gave about YARA match context: the
 person most likely to enable one is the person debugging a rule that matches
 secrets.
@@ -69,8 +69,8 @@ TIER_SEVERITY = {KNOWN: "medium", CONTEXT: "low", ENTROPY: "low"}
 #: `private_key_block` matches the PEM header and nothing else, because the
 #: strings extractor splits on newlines and the base64 body is therefore a
 #: different string. Every TLS library on a machine contains that header as a
-#: parser literal -- measured, `libmbedcrypto` alone accounts for ten matches
-#: -- so at `medium` it would gate a build on the presence of OpenSSL.
+#: parser literal - measured, `libmbedcrypto` alone accounts for ten matches
+#: - so at `medium` it would gate a build on the presence of OpenSSL.
 #: Correlating the header with a body needs to read a region rather than a
 #: string, which is v0.5's business.
 RULE_SEVERITY = {"private_key_block": "low"}
@@ -112,7 +112,7 @@ class Candidate:
 
 #: Guards on every known pattern. `AKIA` followed by sixteen uppercase
 #: characters occurs inside longer runs of uppercase in ordinary binaries --
-#: measured, it fired on `wget` and `xkbprint` -- and a known-format match is
+#: measured, it fired on `wget` and `xkbprint` - and a known-format match is
 #: `medium`, which is a non-zero exit on somebody's build. A credential is a
 #: whole token, so requiring it to be one costs nothing and removed both.
 _EDGE_LEFT = r"(?<![A-Za-z0-9])"
@@ -152,7 +152,7 @@ _KNOWN_RULES: tuple[tuple[str, re.Pattern], ...] = (
 # Context
 #
 # A name beside a value. This is the tier that fires on prose, so the value has
-# to survive `_is_placeholder` before it counts -- `password=changeme` in a
+# to survive `_is_placeholder` before it counts - `password=changeme` in a
 # sample configuration is not a credential, and neither is
 # `api_key=<your key here>`.
 
@@ -196,7 +196,7 @@ def _reads_like_words(text: str) -> bool:
 
     The measurement that produced this rule: after every other exclusion, the
     entropy tier still fired on one binary in five, and the matches were all
-    symbol names -- `SECKEY_DestroyPrivateKey`, `CERT_DecodeAltNameExtension`,
+    symbol names - `SECKEY_DestroyPrivateKey`, `CERT_DecodeAltNameExtension`,
     `u_getIntPropertyValue_74`. Mixed case, digits, underscores, dense enough
     to score as random, and obviously not credentials to a human.
 
@@ -268,7 +268,7 @@ def _is_placeholder(value: str) -> bool:
     if _SCREAMING_SNAKE.match(stripped):
         # `client_secret=YOUR_CLIENT_SECRET`. An upper-snake value beside a
         # secret-ish name is an environment variable being named, not a
-        # credential being set -- it is the shape of the thing that will later
+        # credential being set - it is the shape of the thing that will later
         # hold the credential.
         return True
     return bool(_TEMPLATE.search(stripped))
@@ -298,7 +298,7 @@ def _is_uninteresting_token(text: str) -> bool:
     if len(set(text)) == len(text):
         # Every character distinct, which is an enumeration and not a draw. A
         # base64 alphabet table is the common case and appears verbatim in
-        # anything that encodes -- but the argument is general: forty
+        # anything that encodes - but the argument is general: forty
         # characters drawn at random from sixty-four repeat one with
         # probability about 0.999999, so not repeating is evidence the token
         # was written out rather than generated.
@@ -325,8 +325,8 @@ def scan(text: str, base: int = 0, min_length: int = 24,
     """Every candidate secret in one string, described without quoting it.
 
     `base` is where `text` starts in the subject and `stride` is how many
-    bytes each of its characters occupies -- two for the UTF-16 half of an
-    extracted string table -- so the offsets come back absolute and land on
+    bytes each of its characters occupies - two for the UTF-16 half of an
+    extracted string table - so the offsets come back absolute and land on
     the byte an analyst would seek to.
 
     The three tiers are tried in order and a span is claimed once: a known
@@ -397,7 +397,7 @@ def looks_like_secret(text: str) -> bool:
     """Whether `text` on its own would be reported.
 
     The entry point for a caller filtering values rather than scanning a
-    document -- ShadowClip's `SECRET_FILTER` is the case this exists for. It
+    document - ShadowClip's `SECRET_FILTER` is the case this exists for. It
     answers about the whole string, so a sentence that happens to contain a
     token is not a secret by this test.
     """

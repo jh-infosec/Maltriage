@@ -38,3 +38,12 @@ maltriage = ["rules/*.yar", "rules/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Delete a test's temp directory as soon as it passes. pytest keeps the last
+# three runs by default, and this suite writes several hundred synthetic
+# executables per run: deliberately odd PEs with writable executable sections,
+# packed section names, no imports and high-entropy regions. That is the exact
+# shape a heuristic antivirus engine scores, so the leftovers get quarantined
+# out from under the next run. Keeping only the failures keeps the resting
+# population near zero and leaves the directories somebody would actually want
+# to open.
+tmp_path_retention_policy = "failed"

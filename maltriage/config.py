@@ -11,7 +11,7 @@ report the digest of an empty file with no error raised anywhere.
 
 Split out of `sample_data` in v0.4. Every extractor needs these accessors and
 none of them needs a PE builder, so a module named for its fixtures was the
-wrong home -- and the shared secret engine, which is not a fixture consumer at
+wrong home - and the shared secret engine, which is not a fixture consumer at
 all, would have had to import one to read a threshold.
 """
 
@@ -124,7 +124,7 @@ DEFAULT_CONFIG = {
     "strings_min_length": 6,
 
     # One string, and the number kept across both ASCII and UTF-16 together.
-    # The product is the worst case this extractor can hold -- 2 MiB -- which
+    # The product is the worst case this extractor can hold - 2 MiB - which
     # is the same order as one read chunk rather than a multiple of it. The
     # counts keep rising after the retained list is full, so the report still
     # says how many there were, and `parse_errors` says the indicator lists
@@ -157,7 +157,7 @@ DEFAULT_CONFIG = {
     # How many distinct names a capability needs before it is worth a finding.
     # Two, because one is not a pattern: every name in the registry is called
     # by legitimate software, and a lone `GetTickCount` is a timer. Below the
-    # threshold nothing is lost -- the names are in `report.data` either way,
+    # threshold nothing is lost - the names are in `report.data` either way,
     # which is the difference between an observation and a finding.
     "api_min_names_per_capability": 2,
 
@@ -165,7 +165,7 @@ DEFAULT_CONFIG = {
     # apart into tokens. A symbol reference is short: bare, stdcall-decorated
     # or inside a mangled C++ signature. A run longer than this that mentions
     # an API name is prose, and reporting the manual as an injector teaches
-    # nobody anything. Also the cost bound -- this is the expensive path on a
+    # nobody anything. Also the cost bound - this is the expensive path on a
     # sample with millions of strings.
     "api_max_token_scan_bytes": 128,
 
@@ -246,8 +246,8 @@ DEFAULT_CONFIG = {
         "packed", ".packed", ".midgetpack", ".gnu_debugdata_upx",
     ],
 
-    # Names a mainstream toolchain emits. Prefixed families -- `.debug*`,
-    # `.rela*`, `.rel*`, `.note*`, `.gnu*` -- are handled by prefix in the
+    # Names a mainstream toolchain emits. Prefixed families - `.debug*`,
+    # `.rela*`, `.rel*`, `.note*`, `.gnu*` - are handled by prefix in the
     # extractor rather than enumerated here, because they are open sets.
     "elf_standard_sections": [
         "", ".text", ".data", ".rodata", ".bss", ".init", ".fini",

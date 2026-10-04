@@ -89,7 +89,7 @@ split exists for that reason and for no other.
 established that a later one cannot establish for itself: the format family,
 the file size, and since v0.4.4 the byte range a PE's Authenticode signature
 occupies. That last one is the clearest case of the rule. The entropy pass is
-a stream — it cannot seek, so it cannot find the certificate table — and the
+a stream - it cannot seek, so it cannot find the certificate table - and the
 PE extractor that could find it runs two phases later. But the security
 directory is the one data directory entry holding a *file offset* rather than
 an RVA, so it is readable from the header alone, and the header phase can hand
@@ -184,7 +184,7 @@ that setup.
 ### extractors.py, and the modules under it
 
 The extraction engine. Until v0.4.5 every extractor lived in `extractors.py`,
-which reached 3,091 lines -- a quarter of the project, eight extractors for
+which reached 3,091 lines - a quarter of the project, eight extractors for
 six formats. It is now one module per format, and `extractors.py` is the set
 plus the names everything imports:
 
@@ -205,8 +205,8 @@ that grows by a format per release is not a file anybody chose.
 
 **`extractors.py` still exports every name the project imports**, because a
 refactor that makes every caller learn a new layout has spent its own benefit.
-What it does not re-export is the format constants -- `SHT_NOBITS`,
-`SCN_MEM_EXECUTE`, `DIRECTORY_DEBUG` -- which were only visible because they
+What it does not re-export is the format constants - `SHT_NOBITS`,
+`SCN_MEM_EXECUTE`, `DIRECTORY_DEBUG` - which were only visible because they
 shared a file with everything else and now live with their format.
 
 The move was verified three ways: the suite, which passed 412 on both sides;
@@ -217,7 +217,7 @@ only in the module headers.
 
 A test that monkeypatches an extractor's internals must patch the module that
 owns the name, not `extractors.py`. Patching the re-exporting facade rebinds a
-different name and the test passes while testing nothing -- which happened to
+different name and the test passes while testing nothing - which happened to
 four tests during this split, and is the reason the suite's own
 `test_no_two_tests_share_a_name` exists beside it.
 
@@ -241,7 +241,7 @@ environment would be worse than being slow.
 Current extractors: `filetype` and `hashes` and `entropy` from v0.1, `pe` and
 `fuzzy` from v0.2, `yara` from v0.3, `elf` from v0.3.1, `strings` from v0.4.
 
-Finding keys, which are a bounded and stable set on purpose — the findings
+Finding keys, which are a bounded and stable set on purpose - the findings
 envelope at v0.4 describes them as one, and a consumer groups, filters and
 counts on them:
 
@@ -311,7 +311,7 @@ the design be simple.
 **Nothing a sample writes leaves this module.** The matcher is given text from
 a sample and returns keys from its own table. What reaches `report.data` and a
 finding's detail is the registry's spelling, never the sample's, so a
-capability list needs no `safe_text` and no length cap -- and cannot grow with
+capability list needs no `safe_text` and no length cap - and cannot grow with
 the file, because it cannot hold more than the vocabulary. It is the only
 accumulator in the extraction engine that needs no ceiling, and that is a
 consequence of where the strings come from rather than a decision.
@@ -368,7 +368,7 @@ rule for when maltriage may attach one.
 A registry rather than a mapping. It says what `T1036.008` is called; it does
 not say which findings earn it, because that decision belongs where the
 finding is constructed. What it does enforce is that an id which is not in the
-table cannot reach a report -- `mk_finding` raises on one, and a YARA rule that
+table cannot reach a report - `mk_finding` raises on one, and a YARA rule that
 declares one has it reported against the rule name.
 
 The module's docstring carries the list of findings that were considered and
@@ -387,7 +387,7 @@ The only thing worth restating here is why `report.errors` does cross, as
 could not be run, because a report that looks clean while omitting the
 analysis nobody performed is the failure mode this codebase has spent five
 releases closing. An envelope without that field would reintroduce it at the
-exact boundary where the reader is least able to notice -- a consumer
+exact boundary where the reader is least able to notice - a consumer
 ingesting envelopes from three tools has no way to know that one of them
 declined to parse.
 
@@ -436,8 +436,8 @@ bounds its own time. Nothing else does.
 defaults, and the TLS callback walk is capped because its terminator is a
 value the file supplies. None of that bounds *time*. The isolation guarantee
 covers a parser that raises; a parser that spins on a crafted file will spin.
-Closing it needs a mechanism the pipeline does not have — a subprocess, a
-watchdog, or an alarm — and that is a change to how extractors run rather
+Closing it needs a mechanism the pipeline does not have - a subprocess, a
+watchdog, or an alarm - and that is a change to how extractors run rather
 than a threshold to add.
 
 ### Every string in a report came out of the sample
@@ -591,7 +591,7 @@ claim, and it was rejected.
 `pefile.PE(name=...)` maps the file with `mmap` and `MAP_PRIVATE`. It never
 reads the sample into the process. Resident memory is bounded by the pages
 the parser actually touches, which for a triage parse is the headers, the
-section table and the directories it resolves — kilobytes on a sample of any
+section table and the directories it resolves - kilobytes on a sample of any
 size. Passing bytes instead, with `pefile.PE(data=...)`, requires deciding in
 advance how many bytes to hand it, and every choice is wrong: too few and
 imports past the cutoff silently vanish, too many and peak memory tracks

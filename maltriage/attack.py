@@ -8,7 +8,7 @@ This is a registry, not a mapping. It says what `T1036.008` is called and
 which tactic it belongs to; it does not say which findings earn it. That
 decision is made where the finding is constructed, by naming a constant from
 here, because the same technique must mean the same thing in maltriage,
-claude-recon-agent and Shadowfax -- and three repositories each writing their
+claude-recon-agent and Shadowfax - and three repositories each writing their
 own id strings is the drift that a shared component exists to prevent.
 `mk_finding` validates against this table, so an id that is not in it cannot
 reach a report at all.
@@ -20,7 +20,7 @@ reach a report at all.
 
 maltriage does not claim a file is malicious. It ranks a queue. A technique id
 is a claim about adversary behaviour, and it is the field a consumer is most
-likely to aggregate without reading the finding underneath it -- so an
+likely to aggregate without reading the finding underneath it - so an
 inflated one does more damage than an absent one. A dashboard counting
 "T1055: Process Injection, 400 hits" that turns out to mean "400 installers
 had a writable executable section" is worse than a dashboard with no ATT&CK
@@ -35,8 +35,8 @@ reflexively want to map:
   the shape of a packer, and packing is the normal state of most installers.
   `T1027.002` describes software packing accurately, which is exactly the
   problem: the technique is right and the inference is not.
-- **`known_packer_section`** is stronger -- a section named `UPX0` is packing
-  and not a guess -- and is still refused, for the same reason. UPX is a
+- **`known_packer_section`** is stronger - a section named `UPX0` is packing
+  and not a guess - and is still refused, for the same reason. UPX is a
   legitimate tool used legitimately far more often than not.
 - **`registry_persistence_path`** looks like `T1547.001`, and an installer
   writing a Run key is an installer. It is held at `low` in the extractor for
@@ -53,7 +53,7 @@ this project's only `high`: content under a lying extension is near-unambiguous
 deception. There is no benign reason for a PE to be called `invoice.pdf`.
 
 The other source is a YARA rule that declares its own technique in `meta`.
-That is deliberate -- a rule is a much narrower statement than a finding key,
+That is deliberate - a rule is a much narrower statement than a finding key,
 so a rule author can be specific where this table cannot, and the mapping
 becomes extensible in exactly the way the rules already are.
 """
@@ -104,8 +104,8 @@ def validate(techniques: Iterable[Any]) -> list[str]:
 
     Unknown ids are dropped rather than raising, because one caller is a YARA
     rule's `meta` and a rule set is somebody else's input. The caller is
-    expected to report what was dropped -- silently discarding it would be the
-    failure this project guards against everywhere else -- and
+    expected to report what was dropped - silently discarding it would be the
+    failure this project guards against everywhere else - and
     `unknown` below is what it reports.
     """
     out: list[str] = []

@@ -43,7 +43,7 @@ def certificate_range(header: bytes, size: int) -> tuple[int, int] | None:
     be believed.
 
     This is the one data directory entry that holds a *file offset* rather than
-    an RVA, which is what makes it readable without the section table -- and
+    an RVA, which is what makes it readable without the section table - and
     therefore without the random-access phase. `FileTypeExtractor` publishes it
     into `ctx` in phase 1 so the entropy pass, which is phase 2 and cannot
     seek, knows which bytes are the file's own content and which are its
@@ -61,7 +61,7 @@ def certificate_range(header: bytes, size: int) -> tuple[int, int] | None:
     which bytes are never looked at.** The first draft required only that the
     range end at the end of the file, and a directory rewritten to say
     "offset 64, length everything" silenced the entropy scan over an entire
-    packed binary -- an exclusion a sample can aim is an evasion, not a
+    packed binary - an exclusion a sample can aim is an evasion, not a
     refinement. So the range must:
 
     - lie past the last section's raw data. A certificate that overlaps the
@@ -73,7 +73,7 @@ def certificate_range(header: bytes, size: int) -> tuple[int, int] | None:
     - be non-empty and start inside the file.
 
     A range failing any of them is no range, and the entropy pass then scores
-    every byte -- which is the safe direction to fail in.
+    every byte - which is the safe direction to fail in.
     """
     try:
         if header[:2] != b"MZ":
@@ -378,8 +378,8 @@ class PEExtractor(RandomAccessExtractor):
         changes.
 
         A section granted less than the entropy floor is not scored at all.
-        Scoring 64 bytes of a 16 MB section produces a ratio above 1.0 — the
-        reference model is out of range below about 128 bytes — and that is a
+        Scoring 64 bytes of a 16 MB section produces a ratio above 1.0 - the
+        reference model is out of range below about 128 bytes - and that is a
         `medium` finding bought with a forged size field.
         """
         cap = config_int(config, "pe_region_entropy_bytes", 16777216)
@@ -779,7 +779,7 @@ class PEExtractor(RandomAccessExtractor):
         # do. There are none here, so the premise does not hold.
         #
         # This is not a special case invented for Windows. It is the standard
-        # Windows localisation mechanism -- every `en-US\*.mui` is a
+        # Windows localisation mechanism - every `en-US\*.mui` is a
         # resource-only module, and so are a large share of the DLLs beside
         # them. Measured over a sample of System32, `no_imports` fired on 17.9%
         # of ordinary files at medium and was the sole cause of flagging on 48

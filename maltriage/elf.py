@@ -160,8 +160,8 @@ class ElfExtractor(RandomAccessExtractor):
                                    e_shnum, e_shstrndx, size, config), [])
 
         # A header that claims a table the extractor could not read is not the
-        # same fact as a header that claims none, and `e_shentsize = 0` -- one
-        # two-byte field -- used to produce the first while the report stated
+        # same fact as a header that claims none, and `e_shentsize = 0` - one
+        # two-byte field - used to produce the first while the report stated
         # the second. The file still runs: the kernel never reads section
         # headers. So `stripped` said "no symbol table" about a binary with a
         # full one, and the entropy and packer-name findings vanished without
@@ -385,7 +385,7 @@ class ElfExtractor(RandomAccessExtractor):
         fields = struct.unpack(fmt, bytes(data[start:start + expected]))
         kind, table_offset, table_size = fields[1], fields[4], fields[5]
         # A NOBITS section describes no file bytes, so following its offset
-        # decodes section names out of whatever happens to be there -- the ELF
+        # decodes section names out of whatever happens to be there - the ELF
         # header itself, in the case that found this.
         if kind == SHT_NOBITS or table_offset >= size:
             return b"", False
@@ -554,7 +554,7 @@ class ElfExtractor(RandomAccessExtractor):
         # PT_LOAD only. PT_GNU_STACK is a flags-only marker rather than a
         # mapping, and `gcc -z execstack` sets it on request, so counting it
         # here called an ordinary build "a loadable segment mapped writable
-        # and executable" -- both halves untrue, at medium, in somebody's CI.
+        # and executable" - both halves untrue, at medium, in somebody's CI.
         wx = [s for s in segments
               if s["type"] == PT_LOAD and s["writable"] and s["executable"]]
         if wx:

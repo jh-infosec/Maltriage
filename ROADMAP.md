@@ -87,7 +87,7 @@ by the code: a rules directory is an extension point anybody can add to.
 Every match files under the single finding key `yara_match`, with the rule
 name in the detail and the data rather than promoted to a key. Rules are
 user-extensible, and a key set that grows with somebody's rules directory is
-not one a dashboard can count on — nor one the findings envelope at v0.4 can
+not one a dashboard can count on - nor one the findings envelope at v0.4 can
 describe as bounded. The rule name is the envelope's `discriminator`, which
 makes this the first release with a real use for that field.
 
@@ -134,9 +134,9 @@ Offline mode is the switch that disables it, and means nothing until it
 exists. They are one item.
 
 **The package layout comes first, and it is not the packaged distribution at
-v1.0.** Four components are now planned as shared — the secret engine, the
+v1.0.** Four components are now planned as shared - the secret engine, the
 ATT&CK registry, the archive path-locking primitive at v0.5, and the HTML
-renderer at v1.0 — and `architecture.md` records under "Flat module layout"
+renderer at v1.0 - and `architecture.md` records under "Flat module layout"
 that modules import each other by bare name and the project is not suitable
 for installation as a library. Sharing a component with three repositories
 that cannot import it produces three copies that drift, which is the problem
@@ -149,22 +149,22 @@ extractor reports what the import table names, the strings extractor reports
 what appears as text. `Extractor.findings` sees only its own data by design,
 and the temptation here was to add a pass that sees all of `report.data` in
 order to correlate them. It was not taken. Each view is separately reportable,
-the correlation worth having -- a thin import table alongside many API strings
+the correlation worth having - a thin import table alongside many API strings
 -- is a `low` finding either way, and adding a phase to the pipeline to earn a
 `low` is not a trade. The data for that correlation is now present in both
 places, which is what the measurement release needs to decide whether it is
-worth anything -- and, since v0.4.2, what a Windows corpus would settle
+worth anything - and, since v0.4.2, what a Windows corpus would settle
 directly.
 
 The string view matches during extraction rather than in a findings pass over
 `report.data`, and that is not an optimisation. `strings_include_text` is off
 by default and the retained list stops at `strings_max_retained`, so a later
-pass would see nothing on a default run -- while the packed sample this exists
+pass would see nothing on a default run - while the packed sample this exists
 to catch is exactly the one with hundreds of thousands of strings.
 
 POSIX names are absent, and waiting on ELF symbol parsing rather than on a
 decision. `DT_NEEDED` gives library names, not function names, so a POSIX
-vocabulary today would be matched against strings alone -- and `connect`,
+vocabulary today would be matched against strings alone - and `connect`,
 `send`, `system`, `fork` and `socket` are ordinary English words. That is the
 view they are least safe in, so they wait for the one where they are safest.
 
@@ -185,7 +185,7 @@ Severity, decided now rather than during implementation. Nothing reaches
 extension is near-unambiguous deception, and a credential in a file is not
 deception. A confirmed match against a known format is `medium`, because a
 human should look at that file on its own. A high-entropy string with no
-matching rule is `low` — it is a candidate, and `GATE_SEVERITY` is medium, so
+matching rule is `low` - it is a candidate, and `GATE_SEVERITY` is medium, so
 anything higher makes every minified bundle a CI failure.
 
 **The engine never returns the secret.** Findings carry the offset, the
@@ -242,7 +242,7 @@ at and no file: the spec was written in conversation and never committed. It
 exists now, as envelope version 0.1, and is a draft for the other two emitters
 to argue with rather than a contract they are bound by. Both that document and this roadmap want maltriage to
 be the first emitter, so the shape is proven before claude-recon-agent and
-Shadowfax commit to it — and v1.0 is the worst possible time to discover the
+Shadowfax commit to it - and v1.0 is the worst possible time to discover the
 shape is wrong, because Shadowfax will have an ingest path by then. The emit
 is a serialiser over a findings model that already exists; its whole value is
 being early. v0.4 rather than v0.3 because the string, secret and ATT&CK
@@ -306,8 +306,8 @@ is the failure the config accessors already guard against.
 **Bounded parse time is closed here, not recorded again.** `architecture.md`
 carries it as a known gap: isolation covers a parser that raises, not one
 that hangs, and `max_parse_bytes` bounds size while nothing bounds time. A
-nested archive is an unbounded-time construct by design — quines, deep
-nesting, an entry that decompresses forever — so v0.5 is the version where
+nested archive is an unbounded-time construct by design - quines, deep
+nesting, an entry that decompresses forever - so v0.5 is the version where
 that gap stops being theoretical. It needs a mechanism the pipeline does not
 have: a subprocess, a watchdog or an alarm.
 
@@ -348,7 +348,7 @@ precision and recall, so it comes before the classifier rather than after.
 **The harness moved out of this release, and the reason it had to is the
 useful part.** Six decisions across `apis.py`, `extractors.py`, `AUTHORING.md`
 and this file were recorded as deferred until something could measure them,
-and every one of them named this release -- which sits behind two feature
+and every one of them named this release - which sits behind two feature
 releases neither of which needed the harness to start. A decision deferred to
 a release that has not begun is not deferred; it is abandoned with a citation
 attached. Two of the six are now settled, two more were settled by arithmetic
@@ -359,8 +359,8 @@ waiting on the harness at all.
 `api_capability` fired zero times over 6,688 ordinary Linux files and 23.7% of
 the time over 291 ordinary Windows ones. It is settled: no path to medium, on
 a measurement rather than an argument. The same run found the largest defect
-this tool has had -- `no_imports` at medium on resource-only modules, which is
-half of what Windows ships -- and took the gate from 32.3% to 15.8%.
+this tool has had - `no_imports` at medium on resource-only modules, which is
+half of what Windows ships - and took the gate from 32.3% to 15.8%.
 
 What it could not settle is now specific rather than general.
 `registry_persistence_path` needs installers, so it needs a `Program Files`
@@ -377,7 +377,7 @@ missing half is the one that can turn those into figures.
 
 **Report diffing stays too, and is not a corpus feature.** Two runs of the
 same corpus after a rule change is the question it answers, and it needs a
-stable serialisation to diff -- which is `to_dict`, and which the harness now
+stable serialisation to diff - which is `to_dict`, and which the harness now
 has.
 
 ---
@@ -426,7 +426,7 @@ subject-derived content. That escaping is the reason to share it rather than
 write a fourth one: a sample's embedded strings are attacker-controlled text
 and a report is a document somebody opens in a browser. Whatever it renders
 must also drop the absolute paths that `Report.path` carries, for the reason
-recorded at v0.4 — an HTML report is more likely to be shared than a JSON
+recorded at v0.4 - an HTML report is more likely to be shared than a JSON
 one, not less.
 
 The envelope is emitted from v0.4. What lands here is the commitment that its

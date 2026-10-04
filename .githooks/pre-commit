@@ -5,7 +5,7 @@
 # whose shebang says `python3` fails there: Windows installs `python`, or a
 # Store alias, and often nothing called `python3` at all. A hook that cannot
 # start is a hook that is not protecting anything, so this finds an
-# interpreter rather than assuming one -- and refuses the commit if it cannot
+# interpreter rather than assuming one - and refuses the commit if it cannot
 # find any, because a guard that silently does not run is worse than no guard.
 for candidate in python3 python py; do
     if command -v "$candidate" >/dev/null 2>&1; then

@@ -196,7 +196,7 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
 
     `entry_point` overrides the address of entry, and exists for one shape:
     a resource-only module has no entry point at all. Windows ships thousands
-    of them -- every `en-US\\*.mui` is one -- so it is a fixture this suite
+    of them - every `en-US\\*.mui` is one - so it is a fixture this suite
     needs rather than a curiosity.
 
     `tls_callbacks` is a list of virtual addresses and adds a `.tls` section;
@@ -233,7 +233,7 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     # A section entry is (name, characteristics, body) or, when the section
     # should claim more memory than the file provides for it,
     # (name, characteristics, body, virtual_size). That fourth element is how
-    # the unpacker shape -- a large VirtualSize over a small SizeOfRawData --
+    # the unpacker shape - a large VirtualSize over a small SizeOfRawData --
     # is built, and it is the only way to build it: everywhere else the two
     # are derived from the body and therefore agree by construction.
     placed = [{"name": entry[0], "chars": entry[1], "body": entry[2],

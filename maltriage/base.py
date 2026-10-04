@@ -167,7 +167,7 @@ def region_entropy(data, start: int, length: int, cap: int,
 # single-byte form of the CSI introducer that `ESC [` spells in two, so a
 # string carrying it repaints a terminal without containing an ESC at all. It
 # survives the one path in this project that decodes to `str` before
-# sanitising -- a certificate common name read as UTF-16.
+# sanitising - a certificate common name read as UTF-16.
 CONTROL_CHARACTERS = ({c: None for c in range(0x20)} | {0x7F: None}
                       | {c: None for c in range(0x80, 0xA0)})
 
@@ -204,7 +204,7 @@ def _share_budget(wants: list[int], budget: int) -> list[int]:
     Claimants asking for the same amount are settled as a group rather than
     one after another. Settling them individually leaves the division's
     remainder with whichever of them came last, so two equal sections would
-    get 3510 and 3511 bytes according to their position in the table — a one
+    get 3510 and 3511 bytes according to their position in the table - a one
     byte difference, but enough to move an entropy figure in its fourth
     decimal place and therefore enough to make the ordering observable. Any
     remainder is left unspent instead; at most one byte per claimant.

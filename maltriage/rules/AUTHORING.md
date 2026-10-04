@@ -18,7 +18,7 @@ rate, and that has not changed.
 What did change in v0.4.2 is that half of it is now measurable.
 `maltriage corpus <dir> --counterfactual` will tell you what a rule costs on
 ordinary files: point it at a directory of software you trust and read the
-`yara_match` line. The bundled set costs 0.03% -- two files in 6,688, both
+`yara_match` line. The bundled set costs 0.03% - two files in 6,688, both
 binutils, which embeds header magic for every format it parses and is right to
 match a rule about a header where one does not belong.
 
@@ -45,7 +45,7 @@ exit non-zero in somebody's CI, so a rule earns medium only if a human should
 look at the file because of that rule alone.
 
 Nothing here reaches `high`. In this project `high` means content that lies
-about what it is — a PE wearing a `.pdf` extension — and a rule matching a
+about what it is - a PE wearing a `.pdf` extension - and a rule matching a
 byte pattern is not in a position to establish deception.
 
 ## What a rule may not do
@@ -84,7 +84,7 @@ errors. Turn it on only for a set you wrote.
 
 **The `console` module is captured, not printed.** A rule can call
 `console.hex(uint8(i))` in a loop, and libyara writes to the process's own
-stdout when nothing catches it — which put sample bytes on an analyst's
+stdout when nothing catches it - which put sample bytes on an analyst's
 terminal, under `--quiet`, without a byte of it appearing in the report. The
 output is routed to the debug log instead.
 
@@ -96,7 +96,7 @@ not bounded by anything else:
   string rather than every one, which stops a short string against a large
   sample from producing libyara's cap of a million match objects. **libyara
   ignores fast mode for any string whose condition reads that string's count,
-  offset or length** — `#a`, `@a`, `!a`, `$a in (...)` — so a rule as ordinary
+  offset or length** - `#a`, `@a`, `!a`, `$a in (...)` - so a rule as ordinary
   as `condition: #a > 5` opts itself back into full enumeration.
 - A rule using `console` can allocate until the scan deadline fires.
 
@@ -164,6 +164,6 @@ benign cases:
 - `pdf_with_automatic_action` and `ole_document_with_vba_project` fire on
   ordinary forms and ordinary macros, which is why both are already `low`.
 
-A rule you write may well be narrower than any of these -- a rule matching one
+A rule you write may well be narrower than any of these - a rule matching one
 family's configuration block is a much more specific statement than "there is
-a PE header in here" -- and narrow is exactly where a technique id is earned.
+a PE header in here" - and narrow is exactly where a technique id is earned.
