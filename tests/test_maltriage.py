@@ -39,6 +39,10 @@ from maltriage.envelope import to_envelope
 from maltriage import cli
 from maltriage import corpus as corpus_module
 from maltriage import extractors as extractors_module
+from maltriage import base as base_module
+from maltriage import elf as elf_module
+from maltriage import pe as pe_module
+from maltriage import rules as rules_module
 from maltriage.extractors import (
     EntropyExtractor,
     Extractor,
@@ -61,6 +65,7 @@ from maltriage.extractors import default_extractors
 from maltriage.pipeline import analyse, analyse_directory
 from maltriage.config import (
     DEFAULT_CONFIG,
+    config_bool,
     config_int,
     config_ratio,
     validate_config,
@@ -978,7 +983,7 @@ def test_a_pe_without_pefile_is_reported_rather_than_silently_skipped(write, mon
     pefile's absence costs findings, so a report that omits them has to say
     so: a clean-looking report on an unparsed executable is the failure mode
     this whole rule exists to prevent."""
-    monkeypatch.setattr(extractors_module, "HAVE_PEFILE", False)
+    monkeypatch.setattr(pe_module, "HAVE_PEFILE", False)
     report = analyse(write("a.exe", build_pe()))
     assert "pe" not in report.data
     assert "pefile" in report.errors["pe"]
@@ -1550,7 +1555,7 @@ def test_an_exhausted_entropy_budget_is_reported_rather_than_read_as_absence(wri
 
 
 def test_the_entropy_budget_is_shared_by_size_not_by_position():
-    share = extractors_module._share_budget
+    share = base_module._share_budget
     assert share([100, 100, 100], 300) == [100, 100, 100]
     assert share([100, 100, 100], 30) == [10, 10, 10]
     # a small claim leaves its remainder to the others
@@ -1887,12 +1892,12 @@ def test_one_broken_rule_file_does_not_disable_the_others(write):
 def test_no_rules_configured_is_silence_and_no_parser_is_an_error(write, monkeypatch):
     """Two different facts. Nothing to scan with is not a failure; a rule set
     that exists and cannot be run is."""
-    monkeypatch.setattr(extractors_module, "BUNDLED_RULES", Path("/nonexistent"))
+    monkeypatch.setattr(rules_module, "BUNDLED_RULES", Path("/nonexistent"))
     report = analyse(write("a.bin", b"hello"))
     assert "yara" not in report.data and "yara" not in report.errors
 
     monkeypatch.undo()
-    monkeypatch.setattr(extractors_module, "HAVE_YARA", False)
+    monkeypatch.setattr(rules_module, "HAVE_YARA", False)
     report = analyse(write("b.bin", b"hello"))
     assert "yara-python" in report.errors["yara"]
     assert report.data["hashes"]["sha256"]  # the rest of the run is untouched
@@ -1909,7 +1914,7 @@ def test_a_rule_set_that_does_not_finish_is_reported_not_read_as_no_matches(writ
         def match(self, *args, **kwargs):
             raise yara.TimeoutError("scanning timed out")
 
-    monkeypatch.setattr(extractors_module, "compile_rules",
+    monkeypatch.setattr(rules_module, "compile_rules",
                         lambda paths, allow=False: ([("structural", TimesOut())], []))
     report = analyse(write("carrier.pdf", _carrier(build_pe())))
     data = report.data["yara"]
@@ -1953,9 +1958,9 @@ def test_rules_are_compiled_once_for_a_directory_rather_than_once_per_file(tmp_p
     by a test and never exercised in the production path."""
     write_samples(tmp_path)
     compiles = []
-    original = extractors_module.compile_rules
+    original = rules_module.compile_rules
     monkeypatch.setattr(
-        extractors_module, "compile_rules",
+        rules_module, "compile_rules",
         lambda paths, allow=False: (compiles.append(paths), original(paths, allow))[1])
     reports = analyse_directory(tmp_path)
     assert len(reports) > 3
@@ -2117,7 +2122,7 @@ def test_the_scan_budget_is_spent_across_the_rule_set_not_per_file(write, monkey
             time.sleep(0.3)
             return []
 
-    monkeypatch.setattr(extractors_module, "compile_rules",
+    monkeypatch.setattr(rules_module, "compile_rules",
                         lambda paths, allow=False: ([(f"slow{n}", Slow()) for n in range(12)], []))
     started = time.monotonic()
     report = analyse(write("a.bin", b"hello"),
@@ -2278,8 +2283,8 @@ def test_a_switch_written_as_a_string_is_reported_rather_than_absorbed():
         assert problems, bad
         assert "true or false" in problems[0]
     assert validate_config({"yara_fast_matching": False}) == []
-    assert extractors_module.config_bool({"k": "false"}, "k", True) is True
-    assert extractors_module.config_bool({"k": False}, "k", True) is False
+    assert config_bool({"k": "false"}, "k", True) is True
+    assert config_bool({"k": False}, "k", True) is False
 
 
 # the synthetic ELF fixture
@@ -2404,7 +2409,10 @@ def test_a_static_binary_says_so(write):
     assert data["interpreter"] is None
 
 
-def test_per_section_entropy_separates_a_packed_section_from_a_padded_one(write):
+def test_per_section_entropy_separates_a_packed_elf_section_from_a_padded_one(write):
+    """Named for ELF because the PE test of the same shape had the same name,
+    and had therefore not run since it was written: two functions with one
+    name in one module leaves the second, silently."""
     sections = [(".text", SHT_PROGBITS, SECTION_TEXT, b"\x90" * 0x800),
                 (".packed", SHT_PROGBITS, SECTION_WX, os.urandom(0x800))]
     by_name = _sections_of(_elf_data(write("a.elf", build_elf(sections=sections))))
@@ -2547,7 +2555,7 @@ def test_tail_merged_section_names_resolve_the_way_a_real_linker_writes_them(wri
     on this machine, which made `nonstandard_section_name` fire on almost
     every ELF in existence and let a crafted `sh_name` pointing into the
     middle of a string evade `packer_section_name` entirely."""
-    table = extractors_module._name_at
+    table = elf_module._name_at
     blob = b"\x00.rela.plt\x00.plt.got\x00"
     assert table(blob, 1) == ".rela.plt"
     assert table(blob, 6) == ".plt"          # the interior offset
@@ -3475,8 +3483,16 @@ def _every_finding_key() -> set[str]:
 
     Reading the source is unlovely, but the alternative is a hand-maintained
     second list, which is the thing this test exists to catch."""
-    source = Path(extractors_module.__file__).read_text(encoding="utf-8")
-    keys = set(re.findall(r'mk_finding\(\s*self\.name,\s*"([a-z_]+)"', source))
+    # Every module of the package, not one file. Until v0.4.5 the extractors
+    # were one module and this read it; after the split, reading only
+    # `extractors.py` would have found no keys at all and passed vacuously --
+    # the failure mode a test that greps for its own subject always has.
+    package = Path(extractors_module.__file__).resolve().parent
+    keys: set[str] = set()
+    for module in sorted(package.glob("*.py")):
+        keys |= set(re.findall(r'mk_finding\(\s*self\.name,\s*"([a-z_]+)"',
+                               module.read_text(encoding="utf-8")))
+    assert len(keys) > 20, f"only {len(keys)} keys found; is the glob wrong?"
     keys |= {f"{stem}_present" for stem in
              ("urls", "emails", "ipv4", "mutexes", "windows_paths",
               "unix_paths", "registry_path")}
@@ -5059,3 +5075,18 @@ def test_the_rendered_report_says_the_signature_was_skipped(write):
 def test_the_rendered_report_is_silent_when_nothing_was_skipped(write):
     report = analyse(write("plain.bin", b"hello world" * 400))
     assert "skipping" not in cli.render_human(report)
+
+
+def test_no_two_tests_share_a_name():
+    """A duplicate name does not collide loudly; the later definition replaces
+    the earlier one and the earlier test never runs again. One pair had been
+    shadowed since the ELF extractor landed, and the suite reported a pass
+    count that counted it once.
+
+    This also covers the helpers: two `_pe_data` definitions would be the same
+    silence with a wider blast radius."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    names = [node.name for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    duplicates = {name for name in names if names.count(name) > 1}
+    assert not duplicates, f"defined more than once: {sorted(duplicates)}"

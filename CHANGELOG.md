@@ -1,5 +1,79 @@
 # Changelog
 
+## Version 0.4.5 -- one module per format
+
+`extractors.py` was 3,091 lines: a quarter of the project, eight extractors
+for six formats, in one file. It is now eight modules, and `extractors.py` is
+the extractor set plus the names everything imports.
+
+| module | lines | what it holds |
+|---|---|---|
+| `base.py` | 225 | the three extractor kinds, `ParserUnavailable`, and the helpers more than one format needs |
+| `filetype.py` | 99 | format identification from magic bytes |
+| `hashes.py` | 85 | cryptographic and optional fuzzy hashing |
+| `entropy_scan.py` | 188 | the windowed scan |
+| `strings.py` | 543 | ASCII and UTF-16 extraction, IOCs, the run scanner |
+| `pe.py` | 923 | PE structure, and `certificate_range` for phase 1 |
+| `elf.py` | 703 | ELF structure |
+| `rules.py` | 407 | YARA compilation and matching |
+
+**Timed rather than prompted.** v0.5 adds an archive parser and v0.6 adds two
+document parsers. Each would have made this same work larger, and a file that
+grows by a format per release is not a file anybody chose -- it is one nobody
+got around to dividing.
+
+### Nothing changed behaviour, and that was checked three ways
+
+- The suite passed **412 on both sides** of the move.
+- A report-level diff over the bundled samples: every field of every report,
+  **byte-identical** before and after.
+- A check that no name the package imports went missing from
+  `maltriage.extractors`.
+
+Line ranges were moved rather than retyped, so the concatenation of the new
+modules differs from the original only in the module headers.
+
+`extractors.py` re-exports every name the project and its suite import, for
+the reason `entropy.py` did when the secret engine took its arithmetic: a
+refactor that forces every caller to learn a new layout has spent its own
+benefit. What it does not re-export is the format constants -- `SHT_NOBITS`,
+`SCN_MEM_EXECUTE`, `DIRECTORY_DEBUG` and the rest -- which were only reachable
+because they shared a file with everything else, and now live with their
+format.
+
+### The split found two defects, which is the argument for doing it
+
+**Four tests were patching a name nothing read.** A monkeypatch on
+`extractors_module.compile_rules` rebinds a name in the facade; the code that
+calls it looks up its own module global and never sees the patch. Those tests
+would have passed while testing nothing. They now patch the module that owns
+the name -- `rules_module`, `pe_module`, `elf_module` -- and one of them
+caught itself immediately: the compile-once test reported "compiled 0 times
+for 8 files" the moment the patch stopped landing.
+
+**One test had never run.** `test_per_section_entropy_separates_a_packed_section_from_a_padded_one`
+was defined twice, once for PE and once for ELF. Python keeps the second, so
+the PE one had been silently replaced since the ELF extractor landed in v0.3.1
+-- and the suite's pass count had been counting the pair once. The ELF one is
+renamed, the PE one runs for the first time and passes, and
+`test_no_two_tests_share_a_name` parses the suite with `ast` and fails on any
+future pair. Found by `pyflakes`, which is worth running on a file nobody has
+read end to end lately.
+
+The key-coverage test needed the same attention: it reads the source for
+`mk_finding(self.name, "...")` calls, and after the split it would have read
+`extractors.py`, found no keys at all, and passed vacuously. It now walks
+every module in the package and asserts it found more than twenty -- the
+failure mode a test that greps for its own subject always has.
+
+### Also
+
+- **414 passed**, or 305 passed and 109 skipped with neither pefile nor
+  yara-python. Two more than v0.4.4: the test that had never run, and the one
+  that stops it happening again.
+
+---
+
 ## Version 0.4.4 -- a signature is not the file's content
 
 v0.4.3 left `entropy_hotspot` as the largest remaining contributor to the

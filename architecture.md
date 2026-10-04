@@ -181,9 +181,45 @@ by a test and never exercised in the production path, and it cost nothing
 because no extractor had setup worth keeping. Compiling a YARA rule set is
 that setup.
 
-### extractors.py
+### extractors.py, and the modules under it
 
-The extraction engine. All extractors live here.
+The extraction engine. Until v0.4.5 every extractor lived in `extractors.py`,
+which reached 3,091 lines -- a quarter of the project, eight extractors for
+six formats. It is now one module per format, and `extractors.py` is the set
+plus the names everything imports:
+
+| module | lines | what it holds |
+|---|---|---|
+| `base.py` | 225 | the three extractor kinds, `ParserUnavailable`, and the helpers more than one format needs: `safe_text`, `region_entropy`, `_share_budget` |
+| `filetype.py` | 99 | format identification from magic bytes |
+| `hashes.py` | 85 | cryptographic hashing and optional fuzzy hashing |
+| `entropy_scan.py` | 188 | the windowed scan; the arithmetic stays in `entropy.py`, which the secret engine shares |
+| `strings.py` | 543 | ASCII and UTF-16 extraction, IOCs, the run scanner |
+| `pe.py` | 923 | PE structure, and `certificate_range` for phase 1 |
+| `elf.py` | 703 | ELF structure |
+| `rules.py` | 407 | YARA compilation and matching |
+
+**The split was timed, not prompted.** v0.5 adds an archive parser and v0.6
+adds two document parsers; each would have made the same work larger. A file
+that grows by a format per release is not a file anybody chose.
+
+**`extractors.py` still exports every name the project imports**, because a
+refactor that makes every caller learn a new layout has spent its own benefit.
+What it does not re-export is the format constants -- `SHT_NOBITS`,
+`SCN_MEM_EXECUTE`, `DIRECTORY_DEBUG` -- which were only visible because they
+shared a file with everything else and now live with their format.
+
+The move was verified three ways: the suite, which passed 412 on both sides;
+a report-level diff over the bundled samples, byte-identical; and a check that
+no name the package imports went missing. Ranges were moved rather than
+retyped, so the concatenation of the new modules differs from the original
+only in the module headers.
+
+A test that monkeypatches an extractor's internals must patch the module that
+owns the name, not `extractors.py`. Patching the re-exporting facade rebinds a
+different name and the test passes while testing nothing -- which happened to
+four tests during this split, and is the reason the suite's own
+`test_no_two_tests_share_a_name` exists beside it.
 
 A `HeaderExtractor` implements `read_header` and is handed the bytes the
 pipeline already read. A `StreamExtractor` implements `begin`, `feed` and
