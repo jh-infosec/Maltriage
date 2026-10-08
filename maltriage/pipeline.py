@@ -53,7 +53,7 @@ from .extractors import (
 )
 from .archives import Budget, budget_from
 from .models import Report
-from .config import DEFAULT_CONFIG, config_int, validate_config
+from .config import DEFAULT_CONFIG, config_int, config_str, validate_config
 
 log = logging.getLogger(__name__)
 
@@ -204,7 +204,11 @@ def analyse(
     # because the alternative is a tool that leaves unpacked malware in the
     # temporary directory of the machine that scanned it.
     if ctx.get("family") in ARCHIVE_FAMILIES:
-        with tempfile.TemporaryDirectory(prefix="maltriage-") as staging:
+        # `None` means the system temporary directory. A caller may point this
+        # elsewhere; the directory is still created fresh, used once and
+        # deleted, wherever it lives.
+        root = config_str(config, "archive_staging_dir", "") or None
+        with tempfile.TemporaryDirectory(prefix="maltriage-", dir=root) as staging:
             ctx["staging"] = staging
             _parse_phase(report, random_access, path, ctx, config)
             _recurse(report, config, extractors, budget, _depth)

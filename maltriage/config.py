@@ -39,9 +39,36 @@ DEFAULT_CONFIG = {
         [257, "7573746172", "TAR archive", "tar"],
         [0, "377abcaf271c", "7-Zip archive", "7z"],
         [0, "2321", "script with shebang", "script"],
+        # Formats a triage tool meets constantly and had no entry for. 25 of
+        # the 29 members of one ordinary DOCX came back `unrecognised_format`,
+        # and 53.1% of a System32 sample did, which is a table too thin for
+        # the platform rather than a corpus full of mysteries.
+        [0, "89504e470d0a1a0a", "PNG image", "png"],
+        [0, "ffd8ff", "JPEG image", "jpeg"],
+        [0, "474946383961", "GIF image", "gif"],
+        [0, "474946383761", "GIF image", "gif"],
+        [0, "424d", "BMP image", "bmp"],
+        # `<?xml`, which is a magic number in every way that matters here.
+        [0, "3c3f786d6c", "XML document", "xml"],
+        [0, "7b5c727466", "RTF document", "rtf"],
         [0, "edabeedb", "RPM package", "rpm"],
     ],
     "executable_families": ["pe", "elf", "macho"],
+
+    # Formats whose bytes are the output of a compressor. Whole-file entropy
+    # on one of these measures the codec rather than the sample: deflate
+    # output is incompressible by construction, so a PNG and a ZIP both score
+    # about 8.0 whatever they carry, and `high_file_entropy` on one says only
+    # that it was compressed, which its own magic number already said.
+    #
+    # TAR is absent on purpose: it is not compressed, and its entropy still
+    # describes its contents. So is a packed PE, which is the case the finding
+    # exists for.
+    #
+    # The windowed findings are unaffected. A hot region inside an otherwise
+    # quiet file still means something here: it is how an appended payload
+    # shows up in a PNG.
+    "compressed_families": ["zip", "gzip", "png", "jpeg", "gif"],
     "document_extensions": [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt",
                             ".jpg", ".png", ".rtf"],
     # Read sizing. The pipeline opens the file once and drives every
@@ -213,6 +240,19 @@ DEFAULT_CONFIG = {
     # accessor would have silently clamped 200 to 2.
     "archive_max_ratio": 200,
 
+    # Where members are unpacked. Empty means the system temporary directory,
+    # which is the right default and an expensive one on Windows: an endpoint
+    # scanner inspects every executable-shaped file written there, and the
+    # test suite's archive cases took this project's suite from 37 seconds to
+    # 216 on one machine while costing 0.86 seconds on another. The same cost
+    # lands on a real scan of a large installer.
+    #
+    # Pointing it somewhere already understood by the machine's own policy is
+    # a choice an operator can make with their eyes open. It is not an
+    # antivirus exclusion, and this project's position on those has not
+    # changed: see README.md, "Testing".
+    "archive_staging_dir": "",
+
     # Secret engine. The vocabulary of known formats lives in `secrets.py`
     # for the reason the API names do: a config file is a place for numbers,
     # not for a taxonomy.
@@ -380,6 +420,17 @@ def config_list(config, key, default):
     return value if isinstance(value, list) else default
 
 
+def config_str(config, key, default):
+    """A string, or the default.
+
+    The same strictness as the rest: a path written as `None`, a number or a
+    `Path` object falls back rather than being coerced, because a staging
+    directory the caller did not mean is a worse outcome than the default one.
+    """
+    value = config.get(key, default)
+    return value if isinstance(value, str) else default
+
+
 def validate_config(config):
     """Return a list of human-readable problems.
 
@@ -407,6 +458,10 @@ def validate_config(config):
         if key in config and not isinstance(config[key], bool):
             problems.append(f"{key}={config[key]!r} is not true or false, default used")
 
+    def check_str(key):
+        if key in config and not isinstance(config[key], str):
+            problems.append(f"{key}={config[key]!r} is not a string, default used")
+
     def check_ratio(key):
         if key not in config:
             return
@@ -424,6 +479,7 @@ def validate_config(config):
     check_int("archive_max_seconds")
     check_int("archive_ratio_floor_bytes")
     check_int("archive_max_ratio")
+    check_str("archive_staging_dir")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

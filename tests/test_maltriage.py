@@ -47,6 +47,7 @@ from maltriage import archives as archives_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
+from maltriage import pipeline as pipeline_module
 from maltriage import rules as rules_module
 from maltriage.extractors import (
     EntropyExtractor,
@@ -5562,7 +5563,7 @@ def test_a_compressed_container_is_not_scored_on_its_own_entropy(write):
     entropy = report.data["entropy"]
 
     assert entropy["overall_ratio"] > 0.9
-    assert entropy["whole_file_finding_withheld"] == "compressed container"
+    assert entropy["whole_file_finding_withheld"] == "compressed format"
     assert "high_file_entropy" not in {f["key"] for f in report.findings}
     assert "measuring the compression" in _rendered(report)
 
@@ -5587,3 +5588,98 @@ def test_an_ordinary_file_is_still_scored(write):
     report = analyse(write("packed.bin", os.urandom(40000)))
     assert report.data["entropy"]["whole_file_finding_withheld"] is None
     assert "high_file_entropy" in {f["key"] for f in report.findings}
+
+
+@pytest.mark.parametrize("name,body,family", [
+    ("image.png", b"\x89PNG\r\n\x1a\n" + bytes(512), "png"),
+    ("photo.jpg", b"\xff\xd8\xff\xe0" + bytes(512), "jpeg"),
+    ("anim.gif", b"GIF89a" + bytes(512), "gif"),
+    ("old.gif", b"GIF87a" + bytes(512), "gif"),
+    ("icon.bmp", b"BM" + bytes(512), "bmp"),
+    ("doc.xml", b"<?xml version='1.0'?><a/>" + b" " * 512, "xml"),
+    ("note.rtf", b"{\\rtf1\\ansi" + b" " * 512, "rtf"),
+])
+def test_the_table_knows_the_formats_a_document_is_made_of(write, name, body, family):
+    """25 of the 29 members of one ordinary DOCX came back
+    `unrecognised_format`, and 53.1% of a System32 sample did. That is a table
+    too thin for the platform rather than a corpus full of mysteries."""
+    report = analyse(write(name, body))
+    assert report.data["filetype"]["family"] == family
+    assert "unrecognised_format" not in {f["key"] for f in report.findings}
+
+
+def test_a_compressed_image_is_not_scored_on_its_own_entropy(write):
+    """The same argument the containers make. A PNG is deflate output, so its
+    whole-file entropy measures the codec, and the finding says only that it
+    was compressed - which its own magic number already said."""
+    body = b"\x89PNG\r\n\x1a\n" + os.urandom(40000)
+    report = analyse(write("image.png", body))
+
+    assert report.data["entropy"]["overall_ratio"] > 0.9
+    assert report.data["entropy"]["whole_file_finding_withheld"] == "compressed format"
+    assert "high_file_entropy" not in {f["key"] for f in report.findings}
+
+
+def test_a_hot_region_inside_a_compressed_format_still_fires(write):
+    """Withholding the whole-file finding does not withhold the windowed one.
+    An appended payload in a PNG is exactly the shape `entropy_hotspot`
+    exists for."""
+    body = b"\x89PNG\r\n\x1a\n" + bytes(40000) + os.urandom(20000)
+    report = analyse(write("image.png", body))
+    assert "entropy_hotspot" in {f["key"] for f in report.findings}
+
+
+def test_a_member_is_incomplete_relative_to_the_run(write, monkeypatch):
+    """One missing optional parser marked all twenty-nine members of an
+    ordinary DOCX. A marker that fires on everything marks nothing, and the
+    container's errors block already states a run-wide fact once."""
+    monkeypatch.setattr(rules_module, "HAVE_YARA", False)
+    monkeypatch.setattr(rules_module, "BUNDLED_RULES", RULE_DIR)
+    body = _zip_bytes([("a.bin", b"a"), ("b.bin", b"b")])
+    report = analyse(write("bundle.zip", body))
+    text = cli.render_human(report)
+
+    assert "yara" in report.errors, "the container should report it once"
+    assert "(incomplete)" not in text, text
+
+
+def test_members_can_be_staged_somewhere_the_caller_chooses(write, tmp_path,
+                                                           monkeypatch):
+    """The default is the system temporary directory, which is the right
+    default and an expensive one on Windows: an endpoint scanner inspects
+    every executable-shaped file written there, and these archive tests took
+    one machine's suite from 37 seconds to 216 while costing 0.86 on another.
+    """
+    chosen = tmp_path / "scratch"
+    chosen.mkdir()
+
+    # Watching the call rather than the directory afterwards. A directory that
+    # is empty when the scan ends looks the same whether it was used and
+    # cleaned up or never used at all, and the first version of this test
+    # could not tell those apart.
+    seen = {}
+    real = tempfile.TemporaryDirectory
+
+    def spy(*args, **kwargs):
+        seen["dir"] = kwargs.get("dir")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module.tempfile, "TemporaryDirectory", spy)
+    body = _zip_bytes([("payload.exe", build_pe())])
+    report = analyse(write("bundle.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_staging_dir": str(chosen)})
+
+    assert seen["dir"] == str(chosen)
+    assert [c.filename for c in report.children] == ["payload.exe"]
+    # Used and then removed, wherever it lives.
+    assert list(chosen.iterdir()) == []
+
+
+def test_a_staging_directory_that_is_not_a_string_falls_back(write):
+    """A path written as a number is a config mistake, not an instruction."""
+    body = _zip_bytes([("a.bin", b"a")])
+    report = analyse(write("bundle.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_staging_dir": 5})
+    assert [c.filename for c in report.children] == ["a.bin"]
+    assert "archive_staging_dir" in " ".join(validate_config(
+        {**DEFAULT_CONFIG, "archive_staging_dir": 5}))

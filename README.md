@@ -328,6 +328,15 @@ archives are the same attack as one enormous member.
 
 `archive_recursion: false` turns it off.
 
+**On Windows, expect the archive tests to be slow.** Members are unpacked
+into the system temporary directory, and an endpoint scanner inspects every
+executable-shaped file written there. The same cases cost 0.86 seconds on
+Linux and roughly three minutes on a Windows machine with real-time
+protection on. `archive_staging_dir` points the unpacking somewhere else if
+your machine's policy already understands a particular scratch location.
+That is a choice about where to write, not an antivirus exclusion, and the
+position on those is unchanged.
+
 ---
 
 ## Testing
@@ -337,11 +346,11 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The suite is **461 tests**, and how many run depends on which optional
+The suite is **473 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
 it is missing - the same rule the extractors follow. Two anchors, both
-verified: with everything installed, **461 passed, 0 skipped**; with neither
-pefile nor yara-python, **350 passed, 111 skipped**. Anything in between is
+verified: with everything installed, **473 passed, 0 skipped**; with neither
+pefile nor yara-python, **362 passed, 111 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
 lists them).
 

@@ -1,5 +1,68 @@
 # Changelog
 
+## Version 0.5.2 - what one real archive taught the signature table
+
+Four defects, all read off a single run of v0.5.1 against an ordinary DOCX
+from a Downloads folder. None of them would have shown up on a fixture,
+because a fixture has three members and they are all files somebody chose.
+
+**25 of the 29 members came back `unrecognised_format`.** The signature table
+had no entry for PNG, JPEG, GIF, BMP, XML or RTF: the formats a document is
+actually made of. The same gap explains 53.1% on a System32 sample, which had
+been read as a corpus full of mysteries rather than as a table too thin for
+the platform. `<?xml` is a magic number in every way that matters here.
+
+**The PNGs scored `high_file_entropy`**, which is the argument v0.5.1 made
+about ZIPs arriving one release late. A PNG is deflate output, so the figure
+measures the codec and the finding says only that the file was compressed,
+which its own magic number already said. The rule now keys on a
+`compressed_families` list rather than on two literals, and the list is in
+config with the argument written beside it.
+
+TAR stays off that list, because a TAR is not compressed. So does a packed
+PE, which is the case the finding exists for. And the *windowed* findings are
+untouched: a hot region inside an otherwise quiet file still means something,
+and an appended payload in a PNG is exactly that shape.
+
+**`(incomplete)` fired on all 29 members.** One missing optional parser,
+reported once in the container's errors block and then again on every line
+below it. A marker that fires on everything marks nothing. A member is now
+incomplete *relative to the run*: the marker means "this one came back short
+for a reason the others did not".
+
+**And the suite went from 37 seconds to 216 on Windows.** The same archive
+cases cost 0.86 seconds here. Members are unpacked into the system temporary
+directory and an endpoint scanner inspects every executable-shaped file
+written there, which is the scanner working rather than failing - the same
+conclusion v0.4.4 reached about the pytest fixtures it quarantined.
+
+`archive_staging_dir` moves the unpacking somewhere the machine's policy
+already understands. It is a choice about where to write, not an antivirus
+exclusion, and this project's position on those is unchanged. Empty means the
+system temporary directory, which stays the default.
+
+### Also
+
+- Two mutation survivors, both tests rather than code, which is now the
+  pattern rather than the exception. One was a `-k` filter that did not select
+  the test meant to catch it. The other could not tell a staging directory
+  that was used and cleaned up from one that was never used at all, since both
+  end up empty; it watches the call now instead of the directory afterwards.
+- `config_str`, with the same strictness as the rest: a path written as a
+  number falls back rather than being coerced, because a staging directory the
+  caller did not mean is worse than the default one.
+- **473 passed**, or 362 passed and 111 skipped with neither pefile nor
+  yara-python.
+
+### Still standing from that output
+
+`word/document.xml` scored `ipv4_present`, and in a Word document that is
+almost certainly a version string: `14.0.0.0` is a valid dotted quad. Left
+alone deliberately, because the fix is a measurement rather than a guess at a
+pattern, and this release was already four fixes long.
+
+---
+
 ## Version 0.5.1 - the report says what it found
 
 v0.5.0 recursed into a real archive on the first try: a DOCX inside a ZIP,

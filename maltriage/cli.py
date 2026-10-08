@@ -202,8 +202,8 @@ def render_human(report: Report) -> str:
     return "\n".join(lines)
 
 
-def render_children(report: Report, depth: int = 1,
-                    limit: int = 24) -> list[str]:
+def render_children(report: Report, depth: int = 1, limit: int = 24,
+                    already: frozenset[str] = frozenset()) -> list[str]:
     """What was inside, one line per member.
 
     A container scan that analysed thirty files and printed only the
@@ -217,6 +217,13 @@ def render_children(report: Report, depth: int = 1,
     """
     if not report.children:
         return []
+
+    # A member is incomplete relative to the run, not absolutely. One missing
+    # optional parser marked all twenty-nine members of an ordinary DOCX,
+    # which is a marker that fires on everything and therefore marks nothing:
+    # the container's errors block already said it once, which is where a
+    # reader looks for a fact about the whole scan.
+    already = already | frozenset(report.errors)
 
     out = []
     if depth == 1:
@@ -238,8 +245,8 @@ def render_children(report: Report, depth: int = 1,
             f"{'  ' + shown if shown else ''}"
             # A member whose own analysis came back short says so here, since
             # the errors block below belongs to the container alone.
-            f"{'  (incomplete)' if child.errors else ''}")
-        out.extend(render_children(child, depth + 1, limit))
+            f"{'  (incomplete)' if set(child.errors) - already else ''}")
+        out.extend(render_children(child, depth + 1, limit, already))
 
     hidden = len(report.children) - limit
     if hidden > 0:

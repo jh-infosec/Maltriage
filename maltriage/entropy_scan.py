@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import StreamExtractor
-from .config import config_int, config_ratio
+from .config import config_int, config_list, config_ratio
 from .entropy import BYTE_VALUES, byte_counts, entropy_from_counts, ratio as _ratio
 from .models import mk_finding
 
@@ -75,15 +75,11 @@ class EntropyExtractor(StreamExtractor):
         # reach a window or the histogram, and `finish` reports what was
         # skipped - an entropy figure over a different set of bytes than the
         # file has must say so, or it is a number nobody can reproduce.
-        # A compressed container's whole-file entropy measures the
-        # compressor, not the sample: deflate output is incompressible by
-        # construction, so every ZIP and every GZIP scores about 8.0 and the
-        # finding carries no information. It mattered less before v0.5.0,
-        # when a container was a single opaque file; now the members are
-        # scored individually and the container's own figure is noise sitting
-        # above them. TAR is absent from this list on purpose, because a TAR
-        # is not compressed and its entropy still describes its contents.
-        self._compressed_container = ctx.get("family") in ("zip", "gzip")
+        # A compressed format's whole-file entropy measures the compressor,
+        # not the sample. The list is in config, under `compressed_families`,
+        # with the argument written out there.
+        self._compressed_container = ctx.get("family") in config_list(
+            config, "compressed_families", [])
         self._exclude: tuple[int, int] | None = None
         found = ctx.get("certificate_range")
         if found:
@@ -164,7 +160,7 @@ class EntropyExtractor(StreamExtractor):
             #: Whether the whole-file finding was withheld, and why. Withheld
             #: and silent are different things: the numbers are still here.
             "whole_file_finding_withheld": (
-                "compressed container" if self._compressed_container else None),
+                "compressed format" if self._compressed_container else None),
             "excluded": (
                 {"reason": "authenticode_certificate",
                  "offset": self._exclude[0],
