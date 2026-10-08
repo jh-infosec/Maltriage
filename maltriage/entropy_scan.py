@@ -75,6 +75,15 @@ class EntropyExtractor(StreamExtractor):
         # reach a window or the histogram, and `finish` reports what was
         # skipped - an entropy figure over a different set of bytes than the
         # file has must say so, or it is a number nobody can reproduce.
+        # A compressed container's whole-file entropy measures the
+        # compressor, not the sample: deflate output is incompressible by
+        # construction, so every ZIP and every GZIP scores about 8.0 and the
+        # finding carries no information. It mattered less before v0.5.0,
+        # when a container was a single opaque file; now the members are
+        # scored individually and the container's own figure is noise sitting
+        # above them. TAR is absent from this list on purpose, because a TAR
+        # is not compressed and its entropy still describes its contents.
+        self._compressed_container = ctx.get("family") in ("zip", "gzip")
         self._exclude: tuple[int, int] | None = None
         found = ctx.get("certificate_range")
         if found:
@@ -152,6 +161,10 @@ class EntropyExtractor(StreamExtractor):
             ),
             "high_entropy_windows": self._hot,
             "bytes_scanned": self._size,
+            #: Whether the whole-file finding was withheld, and why. Withheld
+            #: and silent are different things: the numbers are still here.
+            "whole_file_finding_withheld": (
+                "compressed container" if self._compressed_container else None),
             "excluded": (
                 {"reason": "authenticode_certificate",
                  "offset": self._exclude[0],
@@ -165,7 +178,8 @@ class EntropyExtractor(StreamExtractor):
         file_ratio = config_ratio(config, "entropy_file_ratio", 0.90)
         window_ratio = config_ratio(config, "entropy_window_ratio", 0.94)
 
-        if data["overall_ratio"] >= file_ratio:
+        if data["overall_ratio"] >= file_ratio and not data.get(
+                "whole_file_finding_withheld"):
             out.append(mk_finding(self.name, "high_file_entropy",
                 f"whole-file entropy {data['overall']} is {data['overall_ratio']} of what "
                 "random data of this length reaches, consistent with packing, "

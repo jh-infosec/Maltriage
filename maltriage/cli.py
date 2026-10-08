@@ -82,6 +82,8 @@ def render_human(report: Report) -> str:
                 # holds has to say so on the line that reports it, not three
                 # screens away in the JSON.
                 + (f", skipping a {excluded['size']:,}B signature" if excluded else "")
+                + (", measuring the compression rather than the contents"
+                   if entropy.get("whole_file_finding_withheld") else "")
             )
 
     # Read with `.get` throughout. A renderer that raises on a thin report
@@ -150,12 +152,17 @@ def render_human(report: Report) -> str:
 
     if report.findings:
         lines.append("")
-        lines.append(f"  findings ({report.severity} max):")
+        # The file's own worst, not `report.severity`: that one includes
+        # everything inside the container, and printing it above a list of
+        # this file's findings would label them with a score none of them has.
+        lines.append(f"  findings ({max_severity(report.findings)} max):")
         for f in report.findings:
             lines.append(f"   {SEVERITY_MARK[f['severity']]} [{f['key']}] {f['detail']}")
     else:
         lines.append("")
         lines.append("  no findings")
+
+    lines.extend(render_children(report))
 
     # `report.errors` is analysis that did not run at all. `parse_errors` and
     # `warnings` are analysis that ran and came back thinner than it looks:
@@ -195,9 +202,66 @@ def render_human(report: Report) -> str:
     return "\n".join(lines)
 
 
+def render_children(report: Report, depth: int = 1,
+                    limit: int = 24) -> list[str]:
+    """What was inside, one line per member.
+
+    A container scan that analysed thirty files and printed only the
+    container's own findings is a report thinner than the work behind it,
+    which is the failure this project guards against everywhere else. It took
+    a real installer to notice: `scan` recursed into a DOCX inside a ZIP,
+    reached twenty-eight parts, and said nothing about any of them.
+
+    One line each rather than a full report each, because thirty full reports
+    is not a summary; `--json` carries everything.
+    """
+    if not report.children:
+        return []
+
+    out = []
+    if depth == 1:
+        worst = max_severity([{"severity": c.severity} for c in report.children])
+        out.append("")
+        out.append(f"  inside ({_tree_size(report)} file(s), worst {worst}):")
+
+    pad = "    " + "  " * (depth - 1)
+    for child in report.children[:limit]:
+        keys = sorted({f["key"] for f in child.findings})
+        shown = ", ".join(keys[:3]) + (", ..." if len(keys) > 3 else "")
+        inside = child.path.split("!/", 1)[-1]
+        # The name column narrows as the indent widens, so the size column
+        # stays put however deep the nesting goes.
+        width = max(20, 44 - 2 * (depth - 1))
+        out.append(
+            f"{pad}{SEVERITY_MARK[child.severity]} "
+            f"{inside:<{width}.{width}} {child.size_bytes:>10,}B"
+            f"{'  ' + shown if shown else ''}"
+            # A member whose own analysis came back short says so here, since
+            # the errors block below belongs to the container alone.
+            f"{'  (incomplete)' if child.errors else ''}")
+        out.extend(render_children(child, depth + 1, limit))
+
+    hidden = len(report.children) - limit
+    if hidden > 0:
+        out.append(f"{pad}   +{hidden} more, in --json")
+    return out
+
+
+def _tree_size(report: Report) -> int:
+    return len(report.children) + sum(_tree_size(c) for c in report.children)
+
+
 # Commands
 
 def cmd_scan(args: argparse.Namespace) -> int:
+    # Recursion turns one warning into one per member: a missing optional
+    # parser logged four hundred identical lines on a four-hundred-file
+    # installer, each naming a staging path. The report says what could not
+    # run, in the errors block, which is where it belongs; `-v` restores the
+    # individual lines.
+    if not args.verbose:
+        logging.getLogger(__package__).setLevel(logging.ERROR)
+
     target = args.target
     if target.is_file():
         reports = [analyse(target)]

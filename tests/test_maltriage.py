@@ -65,7 +65,7 @@ from maltriage.extractors import (
     shannon,
 )
 from maltriage.models import (SCHEMA_VERSION, SEVERITIES, SEVERITY_RANK, Report,
-                              mk_finding)
+                              max_severity, mk_finding)
 from maltriage.extractors import default_extractors
 from maltriage.pipeline import analyse, analyse_directory
 from maltriage.config import (
@@ -5459,3 +5459,131 @@ def test_a_forged_declared_size_does_not_invent_a_bomb(write):
     assert entry["declared_size"] == 50_000_000
     assert entry["bytes_staged"] == 64
     assert "archive_expansion_ratio" not in {f["key"] for f in report.findings}
+
+
+# What the rendered report says about a container
+#
+# Found by running the tool on a real archive rather than by reading the code:
+# `scan` recursed into a DOCX inside a ZIP, analysed twenty-eight parts, and
+# printed the container's own findings and nothing else.
+
+
+def _rendered(report):
+    return cli.render_human(report)
+
+
+def test_the_report_lists_what_was_inside(write):
+    body = _zip_bytes([("setup/payload.exe", build_pe()), ("readme.txt", b"hello")])
+    text = _rendered(analyse(write("bundle.zip", body)))
+
+    assert "inside (2 file(s)" in text
+    assert "setup/payload.exe" in text
+    assert "readme.txt" in text
+
+
+def test_the_tree_is_counted_to_its_full_depth(write):
+    inner = _zip_bytes([("a.bin", b"a"), ("b.bin", b"b")])
+    body = _zip_bytes([("nested.zip", inner), ("c.bin", b"c")])
+    text = _rendered(analyse(write("outer.zip", body)))
+
+    # Two at the top, two inside the nested one: four, not two.
+    assert "inside (4 file(s)" in text
+    assert "a.bin" in text and "b.bin" in text
+
+
+@needs_pefile
+def test_a_members_findings_are_named_on_its_line(write):
+    body = _zip_bytes([("payload.exe", build_pe())])
+    text = _rendered(analyse(write("bundle.zip", body)))
+    line = next(l for l in text.splitlines() if "payload.exe" in l)
+    assert "no_imports" in line
+
+
+@needs_pefile
+def test_a_member_whose_analysis_came_back_short_says_so(write, monkeypatch):
+    """The errors block belongs to the container. A member that could not be
+    fully analysed has to say so on its own line or the absence is invisible."""
+    monkeypatch.setattr(pe_module, "HAVE_PEFILE", False)
+    body = _zip_bytes([("payload.exe", build_pe())])
+    text = _rendered(analyse(write("bundle.zip", body)))
+    line = next(l for l in text.splitlines() if "payload.exe" in l)
+    assert "(incomplete)" in line
+
+
+def test_the_findings_header_scores_this_file_and_not_its_contents():
+    """`report.severity` includes everything inside, which is right for the
+    exit code and wrong as a label above a list of this file's own findings.
+
+    Built by hand rather than from a fixture. This is a question about the
+    renderer, and the two attempts to produce the case from real containers
+    both failed for reasons about entropy: a ZIP carrying a PE has no findings
+    of its own, so the header was absent whatever the renderer did, and a TAR
+    of random bytes scores `entropy_hotspot` at medium, which is the very
+    number the test is trying to keep out of the header."""
+    parent = Report(path="/x/bundle.tar", filename="bundle.tar", size_bytes=1000)
+    parent.findings.append(mk_finding("test", "example_low", "a small thing", "low"))
+    child = Report(path="bundle.tar!/payload.exe", filename="payload.exe",
+                   size_bytes=100)
+    child.findings.append(mk_finding("test", "example_medium", "a bigger thing",
+                                     "medium"))
+    parent.children.append(child)
+
+    text = cli.render_human(parent)
+    assert parent.severity == "medium", "the member should carry medium"
+    assert max_severity(parent.findings) == "low", "the container should not"
+    assert "findings (low max)" in text
+    assert "findings (medium max)" not in text
+    assert "payload.exe" in text
+
+
+def test_a_long_member_list_is_capped_and_says_where_the_rest_is(write):
+    """Counting the lines rather than reading the message. The message said
+    `+16 more` whether or not the list was actually capped, so a version that
+    printed all forty still claimed to have hidden sixteen."""
+    body = _zip_bytes([(f"member{i:03d}.bin", b"x") for i in range(40)])
+    text = _rendered(analyse(write("many.zip", body)))
+
+    shown = [line for line in text.splitlines() if ".bin" in line]
+    assert len(shown) == 24, len(shown)
+    assert "+16 more, in --json" in text
+
+
+def test_a_file_with_nothing_inside_it_says_nothing_about_insides(write):
+    text = _rendered(analyse(write("plain.bin", b"hello world" * 100)))
+    assert "inside (" not in text
+
+
+def test_a_compressed_container_is_not_scored_on_its_own_entropy(write):
+    """Deflate output is incompressible by construction, so every ZIP scores
+    about 8.0 and the finding carries no information. The numbers stay in the
+    report; the finding is withheld, and the report says it was."""
+    body = _zip_bytes([("a.bin", os.urandom(4096))])
+    report = analyse(write("bundle.zip", body))
+    entropy = report.data["entropy"]
+
+    assert entropy["overall_ratio"] > 0.9
+    assert entropy["whole_file_finding_withheld"] == "compressed container"
+    assert "high_file_entropy" not in {f["key"] for f in report.findings}
+    assert "measuring the compression" in _rendered(report)
+
+
+def test_an_uncompressed_container_is_still_scored(write):
+    """A TAR is not compressed, so its entropy still describes its contents
+    and the finding is not withheld.
+
+    Half a megabyte rather than forty kilobytes: tar pads to a 10 KB block,
+    and at 40 KB that padding pulled the whole-file ratio to 0.874, below the
+    threshold. The first version of this test read that as the rule working
+    when it was the fixture being too small."""
+    body = _tar_bytes([("a.bin", os.urandom(500_000))])
+    report = analyse(write("bundle.tar", body))
+
+    assert report.data["entropy"]["whole_file_finding_withheld"] is None
+    assert report.data["entropy"]["overall_ratio"] > 0.9
+    assert "high_file_entropy" in {f["key"] for f in report.findings}
+
+
+def test_an_ordinary_file_is_still_scored(write):
+    report = analyse(write("packed.bin", os.urandom(40000)))
+    assert report.data["entropy"]["whole_file_finding_withheld"] is None
+    assert "high_file_entropy" in {f["key"] for f in report.findings}

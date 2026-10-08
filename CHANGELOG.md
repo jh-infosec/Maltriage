@@ -1,5 +1,102 @@
 # Changelog
 
+## Version 0.5.1 - the report says what it found
+
+v0.5.0 recursed into a real archive on the first try: a DOCX inside a ZIP,
+twenty-eight OOXML parts, depth two, exactly as designed. Then it printed the
+container's own findings and stopped. Thirty files analysed and none of them
+mentioned.
+
+That is a report thinner than the work behind it, which is the failure this
+project guards against everywhere else, and it took running the tool on
+something real to see it. A fixture has three members and reads fine with no
+tree at all.
+
+```
+exam-report-template.zip  (84,265 bytes)
+  type     ZIP archive (or OOXML/JAR/APK)
+  entropy  7.997 overall, measuring the compression rather than the contents
+
+  no findings
+
+  inside (30 file(s), worst medium):
+     ! setup/payload.exe                   1,536B  no_imports
+       report.docx                           292B
+         word/document.xml                 1,200B  unrecognised_format
+         word/media/image1.png             2,008B  unrecognised_format
+     ~ alerts.csv                             29B  high_file_entropy
+```
+
+One line per member rather than a report per member: thirty reports is not a
+summary, and `--json` carries everything. A member whose own analysis came
+back short is marked `(incomplete)`, because the errors block belongs to the
+container and the absence would otherwise be invisible. The list caps at
+twenty-four and says where the rest is.
+
+**The findings header now scores the file rather than the tree.** `severity`
+includes everything inside, which is right for the exit code and wrong as a
+label above a list of this file's own findings: a ZIP with one low finding and
+a medium member was announcing `findings (medium max)` above a single low
+line.
+
+### A compressed container is no longer scored on its own entropy
+
+Deflate output is incompressible by construction, so every ZIP and every GZIP
+scores about 8.0 and `high_file_entropy` on one carries no information. It
+mattered less when a container was a single opaque file; now the members are
+scored individually and the container's figure is noise sitting above them.
+
+Withheld, not silent: the numbers stay in the report, `entropy` carries
+`whole_file_finding_withheld`, and the rendered line says "measuring the
+compression rather than the contents". TAR is deliberately not on the list,
+because a TAR is not compressed and its entropy still describes its contents.
+
+### One warning per run, not one per member
+
+A missing optional parser logged an identical line for every file in the tree:
+thirty on a small archive, four hundred on an installer, each naming a staging
+path a release after those were taken out of the report. `scan` now quiets the
+package logger unless `-v`, which is what `corpus` already did. What could not
+run is still in the report's errors block, which is where a consumer reads it.
+
+### The System32 prediction, and why it is not a verdict
+
+v0.4.4 predicted the gate would land between 10.0% and 15.8% after the
+certificate exclusion. Measured: **9.6%**, which is 0.4 points below the floor.
+
+It is also not the controlled comparison that prediction assumed, and the
+harness is what said so. The v0.4.4 run sampled 291 files from a population of
+23,907; this one sampled 292 from 23,949. System32 gained 42 files in the
+intervening week, so the seed drew from a different pool: a seed fixes which
+files are picked from a list, not what is on the list. `signature_present`
+moved from 12.0% to 9.2% and `section_entropy_high` appears for the first
+time, which is a different file mix rather than a different tool.
+
+So the direction and rough magnitude held - the gate fell from 15.8% and
+`entropy_hotspot` halved from 12.4% to 6.2% - and the band is neither
+confirmed nor refuted. Recorded that way rather than claimed as a success.
+
+The `sampled_from` line, added in v0.4.3 so a sampled result could not be
+mistaken for a complete one, is what made the population change visible. It
+was written for honesty about sampling and paid for itself as a diagnostic.
+
+### Also
+
+- Two mutation survivors were tests checking the wrong thing again. The header
+  test used a ZIP carrying a PE, which has no findings of its own, so the
+  header was absent whatever the renderer did; the cap test read the `+16
+  more` message, which printed whether or not the list was capped. The first
+  is now built by hand, because it is a question about the renderer and two
+  attempts to produce it from real containers failed for reasons about
+  entropy. The second counts the lines.
+- A TAR fixture of 40 KB tested nothing: tar pads to a 10 KB block, which
+  pulled the whole-file ratio to 0.874 and under the threshold, so the test
+  read a too-small fixture as the rule working.
+- **461 passed**, or 350 passed and 111 skipped with neither pefile nor
+  yara-python.
+
+---
+
 ## Version 0.5.0 - opening containers, and the attack surface that comes with it
 
 Every extractor before this one read bytes and reported what it saw. This one
