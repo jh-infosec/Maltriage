@@ -68,6 +68,12 @@ It never claims a file is malicious. It ranks a queue.
 - Secret detection over extracted strings: known vendor formats, assignment
   context, and entropy for the formats no rule exists for. Findings carry the
   offset, the length and the rule name, and never the value
+- Archive recursion into ZIP, GZIP and TAR, with members analysed as child
+  reports and severity propagating out of the container. RAR and 7z are
+  recognised and not opened. Every limit is shared by the whole tree: depth,
+  entry count, bytes written, wall-clock time and the expansion ratio, which
+  is measured from bytes actually written rather than from the sizes the
+  archive declares
 - Extension mismatch detection
 - Validated config, so a bad threshold is reported rather than absorbed
 - Severity scoring and a non-zero exit gate
@@ -306,6 +312,22 @@ Exit codes are 0 for clean, 1 when something scores medium or above, and 2
 when the scan could not run at all, so the tool drops into a shell pipeline
 or a CI gate without conflating a finding with a failure.
 
+A container is scanned by scanning what is inside it. `maltriage scan
+installer.zip` unpacks members into a temporary directory the tool deletes
+when the scan ends, analyses each one, and attaches the result as a child
+report. **The exit code follows the worst thing in the tree**, so an installer
+carrying a dropper exits non-zero even though the zip itself is unremarkable.
+
+Nothing an archive says about itself is believed. A declared member size is a
+claim by the sample, so members are read through a cap and the cap ends the
+read; the expansion ratio is computed from bytes actually written. Entry names
+are checked before anything is written, and one that escapes its own container
+is reported at `high` rather than quietly skipped. Depth, entry count, bytes
+and seconds are one budget shared by the whole tree, because a thousand small
+archives are the same attack as one enormous member.
+
+`archive_recursion: false` turns it off.
+
 ---
 
 ## Testing
@@ -315,11 +337,11 @@ pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The suite is **414 tests**, and how many run depends on which optional
+The suite is **451 tests**, and how many run depends on which optional
 dependencies are present. A test that needs one skips rather than fails when
 it is missing - the same rule the extractors follow. Two anchors, both
-verified: with everything installed, **414 passed, 0 skipped**; with neither
-pefile nor yara-python, **305 passed, 109 skipped**. Anything in between is
+verified: with everything installed, **451 passed, 0 skipped**; with neither
+pefile nor yara-python, **342 passed, 109 skipped**. Anything in between is
 normal and the skip reasons say which dependency is absent (`pytest -rs`
 lists them).
 

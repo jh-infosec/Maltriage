@@ -198,6 +198,23 @@ plus the names everything imports:
 | `pe.py` | 923 | PE structure, and `certificate_range` for phase 1 |
 | `elf.py` | 703 | ELF structure |
 | `rules.py` | 407 | YARA compilation and matching |
+| `archives.py` | 466 | container recursion, and the caps that make it safe |
+
+### archives.py, and who owns the walk
+
+The first extractor with an attack surface of its own, and the only one whose
+module docstring opens with rules rather than with a description. It stages
+members into a directory the pipeline created; the pipeline analyses them and
+attaches them as `Report.children`; the directory is deleted in a `finally`.
+
+The split of responsibility is the design. An extractor that called `analyse`
+would import the module that imports it, and the budget spans files no single
+extractor sees. So the extractor answers "what is in this container and what
+may be written", and the pipeline answers "what happens to what was written".
+
+`Report.severity` is the worst of a file's own findings and everything inside
+it. A gate that scored the wrapper rather than the contents would exit clean
+on an installer carrying a dropper, which is the case the feature exists for.
 
 **The split was timed, not prompted.** v0.5 adds an archive parser and v0.6
 adds two document parsers; each would have made the same work larger. A file

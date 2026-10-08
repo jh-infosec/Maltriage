@@ -1,5 +1,134 @@
 # Changelog
 
+## Version 0.5.0 - opening containers, and the attack surface that comes with it
+
+Every extractor before this one read bytes and reported what it saw. This one
+is handed a structure whose author chose the entry names, the declared sizes,
+the nesting depth and the compression ratio, and acts on them. The feature is
+three hundred lines; the safety is most of them.
+
+`maltriage scan installer.zip` unpacks members into a directory the tool
+deletes when the scan ends, analyses each one, and attaches the result as a
+child report. ZIP, GZIP and TAR. RAR and 7z are recognised and not opened.
+
+### Four rules, stated before the code rather than after it
+
+**Nothing an archive says about itself is believed.** A ZIP entry declares an
+uncompressed size. That number is a claim by the sample and a bomb is exactly
+the case where it is a lie, so every member is read through a cap and the cap
+is what ends the read. The declared size is recorded and never used as a
+bound, and the expansion ratio is computed from bytes actually written. A test
+forges a 50 MB declared size onto a 64-byte member and asserts no bomb finding
+appears.
+
+**No member lands outside the staging directory.** Entry names are
+attacker-controlled text. `safe_member_path` refuses absolute paths in either
+POSIX or Windows spelling, drive letters, UNC paths, any `..` segment, and
+anything whose *resolved* location is not under the root. The last check is
+the one that matters: a tar can write a symlink entry and then an
+ordinary-looking entry through it, and that name contains no `..` and is not
+absolute. A refusal is a finding at `high`, not a skipped line in a log.
+
+**The budget belongs to the tree, not to each archive.** A thousand archives
+of a thousand small entries is the same attack as one enormous member, and a
+per-container limit does not see it. Depth, entry count, bytes written and
+wall-clock time live in one `Budget` passed down the recursion, and the first
+to run out stops the walk and says so in the report.
+
+**The pipeline recurses, not the extractor.** An extractor calling `analyse`
+would import the module that imports it, and would own a budget spanning files
+it cannot see. The extractor stages members into a directory the pipeline
+created and will delete; the walk belongs to whoever owns the tree.
+
+### Severity propagates out of a container
+
+`Report.severity` is now the worst of a file's own findings and everything
+inside it, which is the case recursion exists for: a gate scoring the wrapper
+rather than its contents exits clean on an installer carrying a dropper. The
+propagation is in the model rather than in the CLI because the exit code, the
+corpus harness and the envelope all ask the same property the same question.
+
+Schema 1.7 adds `children`, and `to_dict` recurses into them. `asdict` copies
+fields, and `severity` is a property, so each child's own worst score would
+have been missing from its dictionary while the parent's was present.
+
+### `archive_path_traversal` is the second finding in this project to earn high
+
+The first is `extension_mismatch`, and the argument is the same: content that
+lies about what it is deserves a human on that alone. An entry naming a path
+outside its own container has no benign reading, and a build script that
+produces one is broken in a way worth knowing about too.
+
+### What the report does not carry
+
+`staged` is plumbing between the extractor and the pipeline. It names a
+directory on the scanning machine, which is the leak `Report.path` already is
+and the envelope exists to strip, so the pipeline removes it once the walk has
+used it. A child's `path` is rewritten to `container.zip!/member.exe`: the
+real path names a file deleted moments later, and the fake one says something
+useful.
+
+Caught by a test written for it, which failed on the first implementation.
+
+**And the name in it comes from the container, after Windows said otherwise.**
+The first version derived it from the staging path with `relative_to`, so the
+separator was whichever one the scanning machine's filesystem uses: the same
+ZIP described itself as `lib/thing.bin` on Linux and `lib\thing.bin` on
+Windows. Every format here uses forward slashes internally and the ZIP
+specification requires them, so the name is read from the entry rather than
+from the host, and `staging_root` is gone with it.
+
+This could not have failed on Linux, which is the fourth defect this project
+has found by running the suite on Windows and the reason that machine is the
+verification environment rather than this one.
+
+### Two lessons from the mutation runs, neither about archives
+
+**A mutation run on a tree that is not green proves nothing, and this is the
+second release to learn it.** Thirteen mutations all reported "caught", every
+one of them by a test that was already failing. Fixed, re-run, and this time
+the harness restores the file on SIGTERM - because the previous run timed out
+mid-mutation and left the mutation in the tree, which then explained two
+failures that were mine rather than the code's.
+
+**Three survivors were test gaps rather than safe code.** The `..` check and
+the resolve check overlap, so removing either left the other catching every
+case the suite had. The cases that separate them are now pinned: a name that
+normalises back inside the root is still refused, and a symlinked directory
+inside the root is caught only by the resolve. A fourth survivor was an
+equivalent mutant, and is left alone and recorded.
+
+### Also
+
+- TAR is identified by its magic at offset 257, which is why it was absent
+  from the signature table while ZIP and GZIP were there.
+- `archive_max_ratio` is an integer and deliberately does not use
+  `config_ratio`, which is bounded at 2.0 because it exists for entropy.
+  Borrowing it would have silently clamped 200 to 2.
+- The encoding guard from v0.4.4 cannot tell `zipfile.ZipFile.open` from
+  `Path.open`: both are a call named `open`, and the first takes no encoding.
+  Rather than loosen the rule into guesswork about receivers, a call can be
+  marked `# binary API` on its own line, which keeps the exception visible in
+  the source instead of hidden in the test.
+- **451 passed**, or 342 passed and 109 skipped with neither pefile nor
+  yara-python. 37 new tests, 14 mutations, all caught.
+
+### What is not here
+
+- **RAR and 7z** need a third-party decompressor. A dependency that parses
+  hostile input is one thing; one that unpacks it is a larger decision,
+  because the unpacker becomes the thing handling attacker-controlled
+  structure and the caps here do not reach inside it.
+- **Known-good hash filtering**, which is what makes a four-hundred-file
+  installer readable rather than merely safe to open.
+- **The hung parser.** The recursion checks a deadline between members, so a
+  nesting bomb ends with a report that says it ran out of time. A single call
+  into zlib that never returns is still unbounded: nothing in the pipeline can
+  interrupt a C extension mid-call, and closing that needs the subprocess the
+  roadmap has always said it needs.
+
+---
+
 ## Version 0.4.5 - one module per format
 
 `extractors.py` was 3,091 lines: a quarter of the project, eight extractors

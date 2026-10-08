@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
         [0, "d0cf11e0", "OLE2 compound document", "ole"],
         [0, "526172211a07", "RAR archive", "rar"],
         [0, "1f8b", "GZIP stream", "gzip"],
+        [257, "7573746172", "TAR archive", "tar"],
         [0, "377abcaf271c", "7-Zip archive", "7z"],
         [0, "2321", "script with shebang", "script"],
         [0, "edabeedb", "RPM package", "rpm"],
@@ -168,6 +169,49 @@ DEFAULT_CONFIG = {
     # nobody anything. Also the cost bound - this is the expensive path on a
     # sample with millions of strings.
     "api_max_token_scan_bytes": 128,
+
+    # Archive recursion.
+    #
+    # Every number here is a ceiling on hostile input rather than a tuning
+    # knob, and all but the first are shared by the whole recursion rather
+    # than applied per archive: a thousand archives of a thousand small
+    # entries is the same attack as one enormous member, and a per-container
+    # limit does not see it.
+    "archive_recursion": True,
+
+    # How deep the walk goes. Three is an installer inside a zip inside a zip,
+    # which is further than triage needs to look and far short of what a
+    # nesting bomb requires.
+    "archive_max_depth": 3,
+
+    # Members unpacked across the whole tree, and bytes written across it.
+    # 256 MiB is the budget a scan may spend on a container; a member larger
+    # than 64 MiB is staged up to that point and reported as truncated rather
+    # than skipped, because the first 64 MiB of a large file still identifies
+    # it.
+    "archive_max_entries": 1000,
+    "archive_max_total_bytes": 268435456,
+    "archive_max_member_bytes": 67108864,
+
+    # Wall-clock seconds for the recursion. The known gap `architecture.md`
+    # records is a parser that hangs rather than raises; this closes the half
+    # of it that nesting creates, by checking a deadline between members. A
+    # single call into zlib that never returns is still unbounded, and that is
+    # said out loud rather than implied.
+    "archive_max_seconds": 60,
+
+    # What counts as a decompression bomb. The ratio is measured from bytes
+    # actually written over bytes the container occupies, never from the sizes
+    # the archive declares -- the declared size is the number a bomb lies
+    # about. Below the floor the ratio is not judged at all: a 4 KB text file
+    # compressing 500:1 is a text file.
+    "archive_ratio_floor_bytes": 1048576,
+    # An integer, and deliberately not passed through `config_ratio`: that
+    # accessor is bounded at 2.0 because it exists for entropy, where a ratio
+    # above 1.0 is already a statistical artefact. An expansion ratio is a
+    # different kind of number living in a different range, and borrowing the
+    # accessor would have silently clamped 200 to 2.
+    "archive_max_ratio": 200,
 
     # Secret engine. The vocabulary of known formats lives in `secrets.py`
     # for the reason the API names do: a config file is a place for numbers,
@@ -371,6 +415,15 @@ def validate_config(config):
                 or not 0.0 <= value <= RATIO_MAX:
             problems.append(
                 f"{key}={value!r} is not a ratio between 0 and {RATIO_MAX}, default used")
+
+    check_bool("archive_recursion")
+    check_int("archive_max_depth")
+    check_int("archive_max_entries")
+    check_int("archive_max_total_bytes")
+    check_int("archive_max_member_bytes")
+    check_int("archive_max_seconds")
+    check_int("archive_ratio_floor_bytes")
+    check_int("archive_max_ratio")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

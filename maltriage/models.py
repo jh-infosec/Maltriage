@@ -17,7 +17,7 @@ from typing import Any
 
 from . import attack
 
-SCHEMA_VERSION = "1.6"
+SCHEMA_VERSION = "1.7"
 
 SEVERITIES = ("info", "low", "medium", "high")
 SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
@@ -104,14 +104,33 @@ class Report:
     data: dict[str, Any] = field(default_factory=dict)
     findings: list[dict[str, Any]] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    #: Reports on what was inside this one. Populated by the pipeline for an
+    #: archive, and empty for everything else.
+    children: list["Report"] = field(default_factory=list)
 
     @property
     def severity(self) -> str:
-        return max_severity(self.findings)
+        """The worst of this file's own findings and everything inside it.
+
+        Children count. A zip is a wrapper, and a gate that scored the wrapper
+        rather than its contents would exit clean on an installer carrying a
+        dropper -- which is the case archive recursion exists for. The
+        propagation is here rather than in the CLI because every consumer of a
+        report needs the same answer: the corpus harness, the envelope and the
+        exit code all ask this property what the file is worth.
+        """
+        worst = max_severity(self.findings)
+        for child in self.children:
+            worst = max((worst, child.severity), key=SEVERITY_RANK.__getitem__)
+        return worst
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["severity"] = self.severity
+        # `asdict` recurses into the children for us, but it copies fields and
+        # `severity` is a property, so each child's own worst score would be
+        # missing from its dictionary while the parent's was present.
+        out["children"] = [child.to_dict() for child in self.children]
         return out
 
     def to_json(self, indent: int | None = 2) -> str:

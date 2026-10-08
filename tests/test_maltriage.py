@@ -16,6 +16,7 @@ alongside the CHANGELOG entry that describes it.
 
 import ast
 import collections
+import gzip
 import io
 import json
 import math
@@ -25,8 +26,11 @@ import shlex
 import statistics
 import struct
 import sys
+import tarfile
+import tempfile
 import time
 import tracemalloc
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -39,6 +43,7 @@ from maltriage.envelope import to_envelope
 from maltriage import cli
 from maltriage import corpus as corpus_module
 from maltriage import extractors as extractors_module
+from maltriage import archives as archives_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -341,7 +346,7 @@ def test_failing_header_extractor_does_not_lose_other_results(write):
 def test_report_serialises_to_json(write):
     report = analyse(write("invoice.pdf", b"MZ" + b"\x00" * 100))
     parsed = json.loads(report.to_json())
-    assert parsed["schema_version"] == "1.6"
+    assert parsed["schema_version"] == "1.7"
     assert parsed["severity"] == "high"
 
 
@@ -4576,7 +4581,9 @@ def _text_io_calls(path):
     """Every text-mode read or write in a source file, and whether it says
     which encoding it means."""
     found = []
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
         if isinstance(node.func, ast.Attribute):
@@ -4593,6 +4600,12 @@ def _text_io_calls(path):
         literals = [a.value for a in node.args if isinstance(a, ast.Constant)
                     and isinstance(a.value, str)]
         if any("b" in literal for literal in literals):
+            continue
+        # An archive API named `open` takes no encoding and returns bytes.
+        # The call says so on its own line rather than the test guessing from
+        # the receiver's name, which would be a rule about variable naming
+        # dressed up as a rule about encodings.
+        if "# binary api" in lines[node.lineno - 1].lower():
             continue
         stated = any(keyword.arg == "encoding" for keyword in node.keywords)
         found.append((name, node.lineno, stated))
@@ -5090,3 +5103,359 @@ def test_no_two_tests_share_a_name():
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
     duplicates = {name for name in names if names.count(name) > 1}
     assert not duplicates, f"defined more than once: {sorted(duplicates)}"
+
+
+# Archive recursion
+#
+# The first extractor with an attack surface of its own. Every test below is a
+# hostile container rather than an awkward one: the entry names, the declared
+# sizes, the nesting depth and the compression ratio are all chosen by whoever
+# wrote the sample.
+
+
+def _zip_bytes(entries, compression=zipfile.ZIP_DEFLATED):
+    """A ZIP built in memory from (name, content) pairs."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression) as archive:
+        for name, content in entries:
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def _tar_bytes(members):
+    """A TAR built in memory from (name, content) pairs."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:  # binary API
+        for name, content in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+def _archive_data(report):
+    return report.data["archive"]
+
+
+def test_a_zip_is_unpacked_and_its_members_analysed(write):
+    body = _zip_bytes([("payload.exe", build_pe(
+        sections=[(".text", SECTION_CODE, b"\x90" * 0x400)]))])
+    report = analyse(write("bundle.zip", body))
+
+    assert _archive_data(report)["format"] == "zip"
+    assert [child.filename for child in report.children] == ["payload.exe"]
+    assert report.children[0].data["filetype"]["family"] == "pe"
+
+
+def test_a_member_says_where_inside_the_container_it_came_from(write):
+    body = _zip_bytes([("lib/thing.bin", b"content")])
+    report = analyse(write("bundle.zip", body))
+    assert report.children[0].path == "bundle.zip!/lib/thing.bin"
+
+
+def test_a_members_name_is_spelled_by_the_container_not_the_filesystem(write):
+    """Forward slashes on every platform, because every format here uses them
+    internally and the ZIP specification requires it.
+
+    This failed on Windows and could not fail on Linux: the name was derived
+    from the staging path with `relative_to`, so the separator was whichever
+    one the scanning machine's filesystem uses, and the same container
+    described itself as `lib/thing.bin` or `lib\thing.bin` depending on who
+    opened it. The name now comes from the container, which has no opinion
+    about the host.
+    """
+    assert archives_module._inside("lib/thing.bin") == "lib/thing.bin"
+    assert archives_module._inside("lib\\thing.bin") == "lib/thing.bin"
+    assert archives_module._inside("./lib/thing.bin") == "lib/thing.bin"
+
+    body = _zip_bytes([("lib/deep/thing.bin", b"content"), ("top.bin", b"x")])
+    report = analyse(write("bundle.zip", body))
+    for child in report.children:
+        assert "\\" not in child.path, child.path
+    assert {c.path for c in report.children} == {
+        "bundle.zip!/lib/deep/thing.bin", "bundle.zip!/top.bin"}
+
+
+def test_a_child_report_carries_no_temporary_path(write):
+    """The staging directory is deleted a moment after the scan, so a real
+    path would name a file that no longer exists -- and would put the scanning
+    machine's temp directory into a report that gets shared."""
+    body = _zip_bytes([("thing.bin", b"content")])
+    report = analyse(write("bundle.zip", body))
+    # The parent's own `path` names the file being scanned, which is the one
+    # path a report has always carried and the envelope exists to strip. It is
+    # the children that must not acquire a second one.
+    rendered = json.dumps(report.to_dict()["children"])
+    assert "maltriage-" not in rendered
+    assert tempfile.gettempdir() not in rendered
+    assert json.loads(rendered)[0]["path"] == "bundle.zip!/thing.bin"
+
+
+def test_the_staging_directory_does_not_outlive_the_scan(write):
+    """Unpacked malware must not be left in the temporary directory of the
+    machine that scanned it, including after a failure."""
+    before = set(Path(tempfile.gettempdir()).glob("maltriage-*"))
+    body = _zip_bytes([("thing.bin", b"content")])
+    analyse(write("bundle.zip", body))
+    assert set(Path(tempfile.gettempdir()).glob("maltriage-*")) == before
+
+
+def test_the_report_keeps_no_handle_on_the_staging_directory(write):
+    """`staged` and `staging_root` are plumbing between the extractor and the
+    pipeline. They name a directory on the scanning machine, so they are
+    removed once the walk has used them."""
+    body = _zip_bytes([("thing.bin", b"content")])
+    data = _archive_data(analyse(write("bundle.zip", body)))
+    assert "staged" not in data and "staging_root" not in data
+    assert [e["name"] for e in data["entries"]] == ["thing.bin"]
+
+
+def test_recursion_reaches_a_nested_archive(write):
+    inner = _zip_bytes([("payload.exe", build_pe())])
+    body = _zip_bytes([("nested.zip", inner)])
+    report = analyse(write("outer.zip", body))
+
+    nested = report.children[0]
+    assert nested.filename == "nested.zip"
+    assert [grandchild.filename for grandchild in nested.children] == ["payload.exe"]
+
+
+def test_depth_is_bounded_and_the_refusal_is_reported(write):
+    """Nesting is unbounded by construction. The limit is not that the walk
+    stops, it is that the report says the walk stopped."""
+    body = _zip_bytes([("a.bin", b"x")])
+    for _ in range(4):
+        body = _zip_bytes([("nested.zip", body)])
+    report = analyse(write("deep.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_max_depth": 2})
+
+    depth, node = 0, report
+    while node.children:
+        node, depth = node.children[0], depth + 1
+    assert depth == 2, depth
+    notes = " ".join(_archive_data(node).get("parse_errors") or [])
+    assert "depth" in notes and "limit" in notes
+
+
+def test_an_entry_that_escapes_the_container_is_refused_and_scored(write):
+    """`../` in an entry name has no benign reading. It earns high on the
+    argument `extension_mismatch` makes: content that lies about what it is
+    deserves a human on that alone."""
+    body = _zip_bytes([("../escape.txt", b"outside"), ("ok.txt", b"inside")])
+    report = analyse(write("bundle.zip", body))
+
+    refused = _archive_data(report)["refused"]
+    assert [r["reason"] for r in refused] == ["path escapes the container"]
+    traversal = next(f for f in report.findings if f["key"] == "archive_path_traversal")
+    assert traversal["severity"] == "high"
+    # Refused means not written, not merely not reported.
+    assert [child.filename for child in report.children] == ["ok.txt"]
+
+
+@pytest.mark.parametrize("name", [
+    "../escape.txt",
+    "../../../../etc/cron.d/x",
+    "/etc/passwd",
+    "C:\\Windows\\System32\\drivers\\etc\\hosts",
+    "\\\\server\\share\\x",
+    "nested/../../escape.txt",
+    "nested\\..\\..\\escape.txt",
+    "..",
+    "",
+])
+def test_every_spelling_of_escaping_is_refused(tmp_path, name):
+    """Mixed separators and Windows spellings, because a check that only asks
+    `PurePosixPath` treats `C:\\x` as one relative filename and lets it
+    through."""
+    assert archives_module.safe_member_path(tmp_path, name) is None
+
+
+@pytest.mark.parametrize("name", ["a.bin", "lib/a.bin", "lib\\a.bin", "./a.bin"])
+def test_an_ordinary_entry_name_is_allowed(tmp_path, name):
+    target = archives_module.safe_member_path(tmp_path, name)
+    assert target is not None
+    assert tmp_path.resolve() in target.parents
+
+
+def test_a_declared_size_is_never_believed(write):
+    """The number a zip bomb lies about. A member is read through a cap, and
+    the cap is what ends the read."""
+    body = _zip_bytes([("big.bin", b"\x00" * 200_000)])
+    report = analyse(write("bundle.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_max_member_bytes": 4096})
+
+    entry = _archive_data(report)["entries"][0]
+    assert entry["declared_size"] == 200_000
+    assert entry["bytes_staged"] == 4096
+    assert entry["truncated"] is True
+    assert report.children[0].size_bytes == 4096
+
+
+def test_a_decompression_bomb_is_scored_on_what_it_actually_wrote(write):
+    body = _zip_bytes([("bomb.bin", b"\x00" * 8_000_000)])
+    report = analyse(write("bomb.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_ratio_floor_bytes": 1024})
+
+    ratio = next(f for f in report.findings if f["key"] == "archive_expansion_ratio")
+    assert ratio["severity"] == "medium"
+    measured = next(e["value"] for e in ratio["evidence"]
+                    if e["name"] == "expansion_ratio")
+    assert measured > 200
+
+
+def test_a_small_file_that_compresses_well_is_not_a_bomb(write):
+    """A 4 KB text file compressing 500:1 is a text file. The floor exists so
+    the ratio is only judged where it means something."""
+    body = _zip_bytes([("notes.txt", b"a" * 4096)])
+    report = analyse(write("notes.zip", body))
+    assert "archive_expansion_ratio" not in {f["key"] for f in report.findings}
+
+
+def test_the_budget_is_shared_by_the_whole_tree(write):
+    """A thousand archives of a thousand entries is the same attack as one
+    enormous member, and a limit that resets per container does not see it."""
+    inner = _zip_bytes([(f"m{i}.bin", b"x") for i in range(10)])
+    body = _zip_bytes([(f"n{i}.zip", inner) for i in range(10)])
+    report = analyse(write("many.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_max_entries": 15})
+
+    staged = len(report.children) + sum(len(c.children) for c in report.children)
+    assert staged <= 15, staged
+    notes = json.dumps(report.to_dict())
+    assert "entry limit" in notes
+
+
+def test_an_encrypted_member_is_reported_and_not_attempted(write):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("secret.bin", b"content")
+    raw = bytearray(buffer.getvalue())
+    # Set the encryption flag in both the local header and the central
+    # directory, which is what a real encrypted entry carries.
+    for marker in (b"PK\x03\x04", b"PK\x01\x02"):
+        at = raw.find(marker)
+        flag_at = at + 6 if marker == b"PK\x03\x04" else at + 8
+        raw[flag_at] |= 0x01
+    report = analyse(write("locked.zip", bytes(raw)))
+
+    assert _archive_data(report)["encrypted_members"] == 1
+    finding = next(f for f in report.findings if f["key"] == "archive_encrypted")
+    assert finding["severity"] == "low"
+    assert report.children == []
+
+
+def test_a_tar_link_entry_is_named_and_not_followed(write):
+    """A symlink entry writes outside the staging directory without any `..`
+    appearing in a name."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:  # binary API
+        info = tarfile.TarInfo("escape")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        archive.addfile(info)
+        payload = b"ordinary"
+        member = tarfile.TarInfo("ok.txt")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    report = analyse(write("bundle.tar", buffer.getvalue()))
+
+    assert [r["reason"] for r in _archive_data(report)["refused"]] == ["link entry"]
+    assert [child.filename for child in report.children] == ["ok.txt"]
+    assert "archive_link_entry" in {f["key"] for f in report.findings}
+
+
+def test_a_tar_is_recognised_by_its_magic_rather_than_its_extension(write):
+    body = _tar_bytes([("payload.bin", b"content")])
+    report = analyse(write("bundle.unknown", body))
+    assert report.data["filetype"]["family"] == "tar"
+    assert [child.filename for child in report.children] == ["payload.bin"]
+
+
+def test_a_gzip_stream_is_one_member(write):
+    inner = build_pe()
+    body = gzip.compress(inner)
+    report = analyse(write("payload.gz", body))
+
+    assert _archive_data(report)["member_count"] == 1
+    assert report.children[0].data["filetype"]["family"] == "pe"
+
+
+def test_a_format_that_needs_a_third_party_unpacker_says_so(write):
+    """Recognised and not opened. The absence of member analysis gets a reason
+    rather than looking like an archive with nothing in it."""
+    report = analyse(write("bundle.rar", b"Rar!\x1a\x07\x00" + b"\x00" * 256))
+    notes = " ".join(_archive_data(report)["parse_errors"])
+    assert "not opened" in notes
+    assert report.children == []
+
+
+def test_a_container_that_will_not_open_is_a_fact_about_the_sample(write):
+    """A truncated ZIP and a PE wearing a .zip extension both land here, and
+    neither is a failure of the scan."""
+    report = analyse(write("broken.zip", b"PK\x03\x04" + b"\x00" * 64))
+    assert _archive_data(report)["parse_errors"]
+    assert report.children == []
+
+
+def test_severity_propagates_out_of_a_container(write):
+    """The case recursion exists for: a gate that scored the wrapper rather
+    than its contents would exit clean on an installer carrying a dropper."""
+    inner = _zip_bytes([("invoice.pdf", b"MZ" + b"\x00" * 1024)])
+    report = analyse(write("outer.zip", _zip_bytes([("nested.zip", inner)])))
+
+    assert report.findings == [] or all(
+        f["severity"] != "high" for f in report.findings)
+    assert report.severity == "high"
+    assert report.to_dict()["children"][0]["children"][0]["severity"] == "high"
+
+
+def test_recursion_can_be_switched_off(write):
+    body = _zip_bytes([("payload.exe", build_pe())])
+    report = analyse(write("bundle.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_recursion": False})
+    assert "archive" not in report.data
+    assert report.children == []
+
+
+def test_a_name_that_normalises_back_inside_is_still_refused(tmp_path):
+    """`lib/../a.bin` resolves to a path inside the root, so the escape check
+    alone would allow it. It is refused anyway: an entry name that needs
+    normalising is not a name an ordinary archive carries, and the two checks
+    overlap on purpose so that neither is load-bearing alone."""
+    assert archives_module.safe_member_path(tmp_path, "lib/../a.bin") is None
+    assert archives_module.safe_member_path(tmp_path, "a.bin") is not None
+
+
+def test_a_symlinked_directory_inside_the_root_is_refused(tmp_path):
+    """The case the resolve check exists for, and the one no string test
+    catches: the classic tar attack writes a symlink entry first and an
+    ordinary-looking entry through it second. The name has no `..` and is not
+    absolute, and it still lands outside."""
+    root, elsewhere = tmp_path / "staging", tmp_path / "elsewhere"
+    root.mkdir()
+    elsewhere.mkdir()
+    try:
+        (root / "evil").symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        pytest.skip("this platform will not create a symlink without privileges")
+
+    assert archives_module.safe_member_path(root, "evil/payload.bin") is None
+
+
+def test_a_forged_declared_size_does_not_invent_a_bomb(write):
+    """The ratio is computed from bytes written, so a container claiming its
+    members are enormous cannot make itself look like a bomb -- and, the other
+    way round, cannot hide one by understating them."""
+    body = bytearray(_zip_bytes([("small.bin", b"a" * 64)]))
+    # Overwrite the uncompressed size in both the local header and the central
+    # directory with a number no part of this file supports.
+    for marker, offset in ((b"PK\x03\x04", 22), (b"PK\x01\x02", 24)):
+        at = body.find(marker)
+        struct.pack_into("<I", body, at + offset, 50_000_000)
+    report = analyse(write("liar.zip", bytes(body)),
+                     config={**DEFAULT_CONFIG, "archive_ratio_floor_bytes": 1})
+
+    entry = _archive_data(report)["entries"][0]
+    assert entry["declared_size"] == 50_000_000
+    assert entry["bytes_staged"] == 64
+    assert "archive_expansion_ratio" not in {f["key"] for f in report.findings}

@@ -89,6 +89,14 @@ from .pe import (
     certificate_common_names,
     certificate_range,
 )
+from .archives import (
+    ARCHIVE_FAMILIES,
+    UNSUPPORTED_FAMILIES,
+    ArchiveExtractor,
+    Budget,
+    budget_from,
+    safe_member_path,
+)
 from .elf import ELF_MAGIC, ElfExtractor
 from .rules import (
     BUNDLED_RULES,
@@ -113,6 +121,8 @@ __all__ = [
     "PEExtractor", "HAVE_PEFILE", "SECURITY_DIRECTORY", "certificate_range",
     "certificate_common_names",
     "ElfExtractor", "ELF_MAGIC",
+    "ArchiveExtractor", "ARCHIVE_FAMILIES", "UNSUPPORTED_FAMILIES",
+    "Budget", "budget_from", "safe_member_path",
     "YaraExtractor", "HAVE_YARA", "BUNDLED_RULES", "RULE_SUFFIXES",
     "rule_files", "rule_fingerprint", "compile_rules",
     "default_extractors",
@@ -124,5 +134,5 @@ def default_extractors() -> list[Extractor]:
     phase can gate on the family it publishes."""
     return [FileTypeExtractor(), HashExtractor(), EntropyExtractor(),
             StringsExtractor(),
-            PEExtractor(), ElfExtractor(), YaraExtractor(),
+            PEExtractor(), ElfExtractor(), ArchiveExtractor(), YaraExtractor(),
             FuzzyHashExtractor()]

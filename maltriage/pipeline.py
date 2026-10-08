@@ -39,16 +39,19 @@ Five properties are deliberate and should survive future changes:
 
 from __future__ import annotations
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from .extractors import (
+    ARCHIVE_FAMILIES,
     Extractor,
     HeaderExtractor,
     RandomAccessExtractor,
     StreamExtractor,
     default_extractors,
 )
+from .archives import Budget, budget_from
 from .models import Report
 from .config import DEFAULT_CONFIG, config_int, validate_config
 
@@ -75,8 +78,19 @@ def analyse(
     path: Path | str,
     config: dict[str, Any] | None = None,
     extractors: list[Extractor] | None = None,
+    *,
+    _depth: int = 0,
+    _budget: Budget | None = None,
 ) -> Report:
-    """Analyse a single file. Never executes it."""
+    """Analyse a single file. Never executes it.
+
+    `_depth` and `_budget` are the recursion's own state and are private: a
+    caller analyses a file, and whether that file turns out to contain others
+    is not something the caller should have to know about. They are passed
+    down rather than rebuilt per archive because a budget that resets at every
+    container is not a budget -- a thousand archives of a thousand entries is
+    the same attack as one enormous member.
+    """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"not a file: {path}")
@@ -95,11 +109,14 @@ def analyse(
     header_bytes = config_int(config, "header_bytes", 8192)
     chunk_bytes = config_int(config, "read_chunk_bytes", 1048576)
 
+    budget = _budget if _budget is not None else budget_from(config)
     ctx: dict[str, Any] = {
         "path": str(path.resolve()),
         "filename": path.name,
         "extension": path.suffix.lower(),
         "size": size,
+        "depth": _depth,
+        "budget": budget,
     }
 
     with path.open("rb") as fh:
@@ -180,9 +197,61 @@ def analyse(
     # because these extractors address the file themselves rather than being
     # fed from the shared read. They see everything both earlier phases
     # published to `ctx`, which is how a parser gates on `family`.
-    _parse_phase(report, random_access, path, ctx, config)
+    #
+    # A container is unpacked into a directory this function owns and deletes.
+    # The archive extractor writes members into it; the recursion below reads
+    # them back; nothing survives the `finally`, including after a failure,
+    # because the alternative is a tool that leaves unpacked malware in the
+    # temporary directory of the machine that scanned it.
+    if ctx.get("family") in ARCHIVE_FAMILIES:
+        with tempfile.TemporaryDirectory(prefix="maltriage-") as staging:
+            ctx["staging"] = staging
+            _parse_phase(report, random_access, path, ctx, config)
+            _recurse(report, config, extractors, budget, _depth)
+    else:
+        _parse_phase(report, random_access, path, ctx, config)
 
     return report
+
+
+def _recurse(report: Report, config: dict[str, Any],
+             extractors: list[Extractor], budget: Budget, depth: int) -> None:
+    """Analyse what the archive extractor staged, as children of this report.
+
+    The walk lives here rather than in the extractor for two reasons. An
+    extractor that called `analyse` would import the module that imports it;
+    and the budget spans the whole tree, which is something only the thing
+    walking the tree can hold.
+
+    A child's `path` is rewritten to say where inside the container it came
+    from. The staging directory is deleted a moment later, so the real path
+    would name a file that no longer exists, and it would put a temporary
+    directory of the scanning machine into a report that gets shared.
+    """
+    archive = report.data.get("archive") or {}
+    staged = archive.get("staged") or []
+    if not staged:
+        archive.pop("staged", None)
+        return
+
+    for member in staged:
+        child_path = Path(member["path"])
+        if not child_path.is_file():
+            continue
+        try:
+            child = analyse(child_path, config, extractors,
+                            _depth=depth + 1, _budget=budget)
+        except OSError as exc:
+            report.errors[f"archive.{child_path.name}"] = \
+                f"{type(exc).__name__}: {exc}"
+            continue
+        child.path = f"{report.filename}!/{member['inside']}"
+        report.children.append(child)
+
+    # Walked, so the paths have done their job. What stays in the report is
+    # the entry list: names, declared sizes and flags, all of which came from
+    # the sample rather than from the machine that scanned it.
+    archive.pop("staged", None)
 
 
 def _parse_phase(report: Report, extractors: list[RandomAccessExtractor],

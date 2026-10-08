@@ -279,13 +279,31 @@ untrusted containers has an attack surface of its own, and decompression
 bombs, path traversal in entry names and symlink entries all have to be
 handled before the feature is safe to run.
 
-- [ ] Recurse into ZIP, GZIP, TAR and RAR
-- [ ] Depth, entry-count and total expansion ratio caps
-- [ ] Path locking that refuses any member escaping the extraction root (shared)
-- [ ] Password-protected archive detection
-- [ ] Nested reports linked to their parent
+- [x] Recurse into ZIP, GZIP and TAR
+- [x] Depth, entry-count and total expansion ratio caps
+- [x] Path locking that refuses any member escaping the extraction root (shared)
+- [x] Password-protected archive detection
+- [x] Nested reports linked to their parent
+- [ ] RAR and 7z, which need a third-party decompressor
 - [ ] Known-good hash filtering, which reports what it suppressed
-- [ ] Bounded parse time
+- [~] Bounded parse time: the nesting half is closed, the hung parser is not
+
+**RAR and 7z are recognised and not opened**, and that is a decision rather
+than an omission. Both need a third-party decompressor, and this project's
+rule for optional dependencies is that absence costs findings and is reported.
+A dependency that *parses* hostile input is one thing; a dependency that
+*unpacks* it is a larger decision, because the unpacker is then the thing
+handling attacker-controlled structure and the caps in `archives.py` do not
+reach inside it. The report says the container was recognised and not opened,
+so the absence of member analysis has a reason attached.
+
+**Bounded parse time is half closed, and the half that remains is named.** The
+recursion checks a deadline between members, so a nesting bomb now ends with a
+report that says it ran out of time. A single call into zlib that never
+returns is still unbounded, because nothing in the pipeline can interrupt a C
+extension mid-call. Closing that needs the subprocess this item has always
+said it needs, and a subprocess per sample is a cost the rest of the tool does
+not currently pay.
 
 **Path locking is the third use of a primitive that already exists twice**, in
 `loganalysis._safe_path` and in the wordlist roots landing in
