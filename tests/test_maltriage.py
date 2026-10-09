@@ -5799,3 +5799,108 @@ def test_a_list_with_a_number_in_it_is_reported(write):
     never matches, which is the quiet kind of wrong the accessors exist for."""
     problems = validate_config({**DEFAULT_CONFIG, "ioc_oid_prefixes": ["1.", 5]})
     assert any("ioc_oid_prefixes" in p for p in problems)
+
+
+# A URL cut in half by strings_max_length. v0.5.4.
+
+def test_a_url_cut_in_half_by_the_ceiling_is_not_an_indicator(write):
+    """The defect a real DOCX exposed, and the one the boilerplate list could
+    not reach. An OOXML part header is a single run of namespace declarations
+    well past a thousand bytes, so the cut lands inside a URL, and the piece
+    left behind was `http://sche`. That matches no boilerplate prefix because
+    it is not a URL: it is half of one, and the half is ours."""
+    run = (b"http://schemas.example/one " + b"x" * 25 + b" "
+           + b"http://schemas.example/two")
+    report = analyse(write("header1.xml", b"\x00" + run + b"\x00"),
+                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    data = _strings_data(report)
+
+    # Dropped rather than counted: `report.data` is the list that says what
+    # the file holds, and the file does not hold `http://sche`.
+    assert data["urls"] == ["http://schemas.example/one"]
+    assert data["indicators_fragments"] == 1
+    finding = next(f for f in report.findings if f["key"] == "urls_present")
+    assert "http://sche " not in finding["detail"] + " "
+    assert "1 URL(s)" in finding["detail"]
+
+
+def test_the_docx_case_end_to_end(write):
+    """What the real report.docx did, and why the boilerplate list alone was
+    not enough. Every whole URL in the part header is a schema, so the only
+    value left to report was the fragment, and the finding was a finding about
+    our own ceiling. The part is not interesting and now says so."""
+    # 64 bytes in, this leaves exactly `http://sche`.
+    run = (b'<hdr xmlns:a="http://www.gnu.org/licenses/"'
+           b' xmlns:b="http://schemas.microsoft.com/office/y"')
+    report = analyse(write("header1.xml", b"\x00" + run + b"\x00"),
+                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    data = _strings_data(report)
+
+    assert data["urls"] == ["http://www.gnu.org/licenses/"]
+    assert data["urls_boilerplate"] == 1
+    assert data["indicators_fragments"] == 1
+    assert "urls_present" not in {f["key"] for f in report.findings}
+
+
+def test_being_inside_a_cut_string_does_not_disqualify_a_value(write):
+    """Only the value sitting against the cut is suspect. The rest of a cut
+    string is intact text and its indicators are real."""
+    run = b"http://evil.example/stage2.bin " + b"y" * 200
+    report = analyse(write("a.bin", b"\x00" + run + b"\x00"),
+                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    data = _strings_data(report)
+
+    assert data["over_length"] == 1
+    assert data["urls"] == ["http://evil.example/stage2.bin"]
+    assert data["indicators_fragments"] == 0
+    assert "urls_present" in {f["key"] for f in report.findings}
+    # The ceiling bit, so the cut is reported. It set nothing aside, so it
+    # does not say it set nothing aside.
+    line = next(p for p in data["parse_errors"] if "strings_max_length" in p)
+    assert "setting aside" not in line
+
+
+def test_a_value_ending_an_uncut_string_is_an_indicator(write):
+    """What disqualifies the value is the cut, not its position. A string
+    that ended because the file said so ends on a whole value."""
+    report = analyse(write("a.bin", b"\x00http://evil.example/stage2.bin\x00"),
+                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    data = _strings_data(report)
+
+    assert data["over_length"] == 0
+    assert data["urls"] == ["http://evil.example/stage2.bin"]
+    assert data["indicators_fragments"] == 0
+
+
+def test_every_indicator_kind_is_cut_by_the_same_ceiling(write):
+    """A path, a registry key and an address are cut by the same bytes a URL
+    is, so the rule is about the cut rather than about URLs. The match group
+    is what gets measured, which matters for the one pattern whose value is a
+    group rather than the whole match."""
+    run = b"/usr/bin/one " + b"x" * 20 + b" /usr/local/share/long/path/here"
+    report = analyse(write("a.bin", b"\x00" + run + b"\x00"),
+                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    data = _strings_data(report)
+
+    assert data["unix_paths"] == ["/usr/bin/one"]
+    assert data["indicators_fragments"] == 1
+
+
+def test_the_cut_line_says_how_many_indicators_it_set_aside(write):
+    """Beside the cause rather than on its own line: the count means nothing
+    without the ceiling that produced it."""
+    run = (b"http://schemas.example/one " + b"x" * 25 + b" "
+           + b"http://schemas.example/two")
+    data = _strings(write("header1.xml", b"\x00" + run + b"\x00"),
+                    config={**DEFAULT_CONFIG, "strings_max_length": 64})
+
+    line = next(p for p in data["parse_errors"] if "strings_max_length" in p)
+    assert "setting aside 1 indicator(s) left incomplete by the cut" in line
+
+
+def test_a_file_with_no_cut_strings_says_nothing_about_fragments(write):
+    """The line appears because a ceiling bit, so an ordinary file carries
+    neither half of it."""
+    data = _strings(write("a.bin", b"\x00http://evil.example/x\x00"))
+    assert data["indicators_fragments"] == 0
+    assert not any("setting aside" in p for p in data.get("parse_errors") or [])

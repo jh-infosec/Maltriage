@@ -1,5 +1,69 @@
 # Changelog
 
+## Version 0.5.4 - a URL cut in half is not a URL
+
+v0.5.3 removed the schema URLs from one DOCX and six of its members kept
+firing `urls_present`. I predicted the visible header text held a real link,
+and said that if the values turned out to be schemas after all then the
+prefix list was missing an entry and it was a one-line fix.
+
+Both halves of that were wrong. Every value is a schema URL, and the one
+surviving the filter in each of the six files is `http://sche`.
+
+### The cause is our own ceiling
+
+`strings_max_length` is 1024 bytes. An OOXML part header is a single run of
+namespace declarations well past that, packed end to end, so the cut lands
+inside a URL far more often than not. The six members that fired are exactly
+the six whose namespace block exceeds the ceiling: headers and footers carry
+the drawing and 3D namespaces, while `settings.xml`, `styles.xml` and
+`fontTable.xml` stay under it and correctly reported nothing.
+
+`http://sche` matches no boilerplate prefix because it is not a URL. It is
+half of one, and the half is ours. So the finding was not a false positive
+about the file; it was a finding about this extractor's configuration.
+
+### The fix is structural rather than another list entry
+
+Whether `strings_max_length` cut a string now travels with the string, and a
+value whose end coincides with the cut is set aside. It is a fragment of
+something longer by construction, and no list of known prefixes could ever
+have caught it: the next cut lands at a different byte.
+
+The rule covers every indicator kind, not URLs alone. A path, a registry key
+or an address against the cut is half of something for the same reason.
+
+**Dropped from `report.data`, not counted there.** This departs from the
+v0.5.3 arrangement, where a licence URL stays in the data and is excluded
+only from the finding. The reason for the difference is that a licence URL is
+in the file and a judgement was made about it, while `http://sche` is not in
+the file at all. The one list here that claims to say what the sample holds
+should not carry something this extractor manufactured.
+
+The count is published, and appended to the `strings_max_length` line that
+already reports the cut, because it is meaningless apart from it.
+
+### What it costs
+
+A real value that happens to end exactly on the cut is discarded with the
+fragments. That is unavoidable: the bytes that would tell the two apart are
+the bytes we did not keep. The count and the cut are both reported, so the
+loss is visible rather than silent.
+
+### Measured
+
+**800 ordinary Linux files: 1.9% contained a string the ceiling cut, and none
+of them produced a fragment indicator.** The Linux gate is unchanged, and so
+is every key's firing rate. This defect needs URLs packed end to end with no
+separator long enough to break the run, which is a document format rather
+than an ELF binary. Twelve hundred Linux files never found it and one real
+DOCX did.
+
+**Mutation testing: 10 of 11 targeted mutations caught.** The survivor reads
+the whole match's end rather than the value group's, which is the same byte
+in every pattern currently defined, so no test can distinguish them. It is
+written the careful way and the comment says it is not pinned.
+
 ## Version 0.5.3 - an indicator list half full of licences
 
 Twenty of the twenty-nine members of one ordinary DOCX reported

@@ -101,7 +101,12 @@ class StringsExtractor(StreamExtractor):
             "ascii": _RunScanner(self._ascii_re, self._max, step=1),
             "wide": _RunScanner(self._wide_re, self._max, step=2),
         }
-        self._found = {"ascii": [], "wide": []}
+        # Each entry is the text and whether `strings_max_length` cut it. The
+        # flag travels with the string because the indicator pass needs it:
+        # a value that ends exactly where the cut landed is a fragment of a
+        # longer one, and reporting it as an indicator reports our own
+        # ceiling as though the file contained it.
+        self._found: dict[str, list[tuple[str, bool]]] = {"ascii": [], "wide": []}
         self._counts = {"ascii": 0, "wide": 0}
         self._long = 0
         self._tokens = config_int(config, "api_max_token_scan_bytes", 128)
@@ -163,7 +168,7 @@ class StringsExtractor(StreamExtractor):
         # it was a ceiling of twice what the config asked for, and the comment
         # beside the default claimed the product as the worst case.
         if len(self._found["ascii"]) + len(self._found["wide"]) < self._keep:
-            self._found[kind].append(text)
+            self._found[kind].append((text, over_length))
 
     def finish(self, path: Path, ctx: dict[str, Any],
                config: dict[str, Any]) -> dict[str, Any]:
@@ -171,7 +176,8 @@ class StringsExtractor(StreamExtractor):
             for run, over_length, offset in scanner.flush():
                 self._record(kind, run, over_length, offset)
 
-        strings = self._found["ascii"] + self._found["wide"]
+        retained = self._found["ascii"] + self._found["wide"]
+        strings = [text for text, _cut in retained]
         data: dict[str, Any] = {
             "ascii_count": self._counts["ascii"],
             "wide_count": self._counts["wide"],
@@ -181,7 +187,7 @@ class StringsExtractor(StreamExtractor):
             "over_length": self._long,
             "min_length": self._min,
         }
-        indicators, truncated = self._indicators(strings, config)
+        indicators, truncated = self._indicators(retained, config)
         data.update(indicators)
 
         # Which known API names appeared, and under which capabilities. Not
@@ -231,9 +237,15 @@ class StringsExtractor(StreamExtractor):
                 f"indicators: {', '.join(sorted(truncated))} reached "
                 "strings_max_iocs, so those lists are partial")
         if self._long:
-            problems.append(
-                f"strings: {self._long} run(s) were longer than "
-                "strings_max_length and contributed only their first bytes")
+            message = (f"strings: {self._long} run(s) were longer than "
+                       "strings_max_length and contributed only their first bytes")
+            # Said beside the cause rather than as its own line, because the
+            # count is meaningless without it: these are values that ended
+            # where the cut did, so they were half of something.
+            if data["indicators_fragments"]:
+                message += (f", setting aside {data['indicators_fragments']} "
+                            "indicator(s) left incomplete by the cut")
+            problems.append(message)
         if self._secrets_dropped:
             problems.append(
                 f"secrets: {self._secrets_dropped} candidate(s) beyond "
@@ -243,14 +255,42 @@ class StringsExtractor(StreamExtractor):
             data["parse_errors"] = problems
         return data
 
-    def _indicators(self, strings: list[str], config: dict[str, Any]) -> dict[str, Any]:
+    def _indicators(self, retained: list[tuple[str, bool]],
+                    config: dict[str, Any]) -> dict[str, Any]:
         limit = config_int(config, "strings_max_iocs", 128)
         found = {name: [] for name in IOC_PATTERNS}
         truncated = set()
-        for text in strings:
+        fragments = 0
+        for text, cut in retained:
             for name, pattern in IOC_PATTERNS.items():
                 for match in pattern.finditer(text):
-                    value = match.group(match.lastindex or 0)
+                    group = match.lastindex or 0
+                    value = match.group(group)
+                    # A string that hit `strings_max_length` ends mid-value,
+                    # and the value sitting against that end is the half we
+                    # kept of something longer. `http://sche` is what a DOCX
+                    # header's namespace block looks like after a 1024-byte
+                    # cut: it matches no boilerplate prefix, because it is
+                    # not a URL at all. Dropped rather than counted into
+                    # `report.data`, which is the one list here that is meant
+                    # to say what the file holds.
+                    #
+                    # It costs a real value that happens to end on the cut.
+                    # That is unavoidable - the bytes that would tell the two
+                    # apart are the bytes we did not keep - so the count is
+                    # published and the cut is already reported.
+                    #
+                    # The group's end rather than the match's, which today is
+                    # the same byte in every pattern here: `unix_paths` is the
+                    # only one whose value is a group, and the group is the
+                    # tail of its match. Mutation testing confirms no test
+                    # fails if this reads `match.end(0)`, so it says so here
+                    # rather than pretending to be pinned. It is written this
+                    # way because the next pattern with a trailing context
+                    # would otherwise measure the wrong byte quietly.
+                    if cut and match.end(group) == len(text):
+                        fragments += 1
+                        continue
                     if name == "ipv4" and not _is_ipv4(value):
                         continue
                     bucket = found[name]
@@ -262,6 +302,7 @@ class StringsExtractor(StreamExtractor):
                     bucket.append(value)
         result: dict[str, Any] = dict(found)
         result["indicators_truncated"] = sorted(truncated)
+        result["indicators_fragments"] = fragments
         # Counted, not removed. An analyst reading `report.data` sees every
         # value; what these change is how many the finding is about, which is
         # the same arrangement the entropy rule uses for a compressed format.
