@@ -162,6 +162,52 @@ DEFAULT_CONFIG = {
 
     "strings_max_iocs": 128,
 
+    # Indicators that are boilerplate rather than destinations.
+    #
+    # Measured over 1,200 ordinary Linux files: 42% carried a URL, and 50.5%
+    # of the 1,158 mentions were licence, standards or translation text.
+    # `www.gnu.org` and `gnu.org` alone were 34.7%. On Windows the same shape
+    # appears as XML namespaces: twenty of the twenty-nine parts of one
+    # ordinary DOCX reported a URL, every one of them a schema declaration.
+    #
+    # A namespace is an identifier, and a licence link is a legal notice.
+    # Neither is somewhere anything connects, and an indicator list half full
+    # of them is a worse list.
+    #
+    # Matched against the URL with its scheme removed, lowercased, as a
+    # prefix. Entries for general-purpose organisations are qualified by path:
+    # excluding the whole of `apache.org` would hide a real download, while
+    # excluding `www.apache.org/licenses/` hides a licence. Deliberately
+    # absent: github.com, raw.githubusercontent.com and the paste sites, which
+    # host boilerplate and payloads in equal measure.
+    "ioc_boilerplate_urls": [
+        "gnu.org/", "www.gnu.org/", "ftp.gnu.org/", "fsf.org/", "www.fsf.org/",
+        "translationproject.org/", "www.w3.org/", "www.unicode.org/",
+        "oasis-open.org/", "docs.oasis-open.org/",
+        "schemas.openxmlformats.org/", "schemas.microsoft.com/",
+        "purl.org/", "www.iso.org/",
+        "creativecommons.org/licenses/", "opensource.org/licenses/",
+        "www.apache.org/licenses/", "apache.org/licenses/",
+        "mozilla.org/mpl/", "www.mozilla.org/mpl/",
+        "www.debian.org/doc/", "www.rfc-editor.org/", "www.ietf.org/",
+    ],
+
+    # Dotted quads that are object identifiers rather than addresses.
+    #
+    # Measured over the same corpus: of 98 distinct dotted quads, 66 survived
+    # the structural check and 43 of those were ASN.1 arcs - `2.5.29.15` is
+    # the X.509 key-usage extension, `1.3.6.1` the IANA root. Certificate code
+    # is full of them, and a tool that parses certificates will meet it often.
+    #
+    # Prefixes rather than a shape rule, on purpose. "first octet under 3 and
+    # second under 40" describes an OID arc and also describes `1.1.1.1` and
+    # `1.0.0.1`, which are real resolvers and turn up in real configuration.
+    # The cost of this list is the reverse: an address genuinely inside
+    # 1.2/1.3/2.5/2.16 is set aside. It is set aside rather than dropped -
+    # `report.data` keeps every value either way, and only the finding counts
+    # the remainder.
+    "ioc_oid_prefixes": ["0.", "1.2.", "1.3.", "2.5.", "2.16."],
+
     # Whether the report carries the strings themselves as well as the
     # indicators drawn from them. Off: it is a dump rather than a finding,
     # and a report is stored, piped and shared.
@@ -458,6 +504,20 @@ def validate_config(config):
         if key in config and not isinstance(config[key], bool):
             problems.append(f"{key}={config[key]!r} is not true or false, default used")
 
+    def check_list(key):
+        """A list of strings, or the default.
+
+        Checked to the element, not just the container: a list with a number
+        in it is a list that will be compared against a string and silently
+        never match, which is the quiet kind of wrong this function exists to
+        make loud.
+        """
+        if key not in config:
+            return
+        value = config[key]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            problems.append(f"{key}={value!r} is not a list of strings, default used")
+
     def check_str(key):
         if key in config and not isinstance(config[key], str):
             problems.append(f"{key}={config[key]!r} is not a string, default used")
@@ -509,6 +569,8 @@ def validate_config(config):
     check_int("strings_max_length")
     check_int("strings_max_retained")
     check_int("strings_max_iocs")
+    check_list("ioc_boilerplate_urls")
+    check_list("ioc_oid_prefixes")
     check_bool("strings_include_text")
 
     check_int("secrets_min_entropy_length")

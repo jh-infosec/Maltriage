@@ -5683,3 +5683,119 @@ def test_a_staging_directory_that_is_not_a_string_falls_back(write):
     assert [c.filename for c in report.children] == ["a.bin"]
     assert "archive_staging_dir" in " ".join(validate_config(
         {**DEFAULT_CONFIG, "archive_staging_dir": 5}))
+
+
+# Indicators that are not destinations
+#
+# Measured over 1,200 ordinary Linux files: 42.1% carried a URL and 57.2% of
+# the mentions were licence, standards or translation text. Of 98 distinct
+# dotted quads, 83.9% were ASN.1 object identifiers from certificate code.
+# The same shape appears on Windows as XML namespaces: twenty of the
+# twenty-nine parts of one ordinary DOCX reported a URL, all of them schema
+# declarations.
+
+
+def _strings_data(report):
+    return report.data["strings"]
+
+
+def test_a_licence_url_is_not_an_indicator(write):
+    body = b"\x00Distributed under https://www.gnu.org/licenses/gpl.html\x00"
+    report = analyse(write("tool.bin", body))
+
+    assert "urls_present" not in {f["key"] for f in report.findings}
+    # Counted, not removed: the value is still in the report.
+    assert _strings_data(report)["urls"] == ["https://www.gnu.org/licenses/gpl.html"]
+    assert _strings_data(report)["urls_boilerplate"] == 1
+
+
+def test_a_real_url_beside_boilerplate_still_fires_and_says_what_was_set_aside(write):
+    body = (b"\x00https://www.gnu.org/licenses/gpl.html\x00"
+            b"\x00http://evil.example.com/stage2.bin\x00")
+    report = analyse(write("tool.bin", body))
+
+    finding = next(f for f in report.findings if f["key"] == "urls_present")
+    assert "evil.example.com" in finding["detail"]
+    assert "gnu.org" not in finding["detail"]
+    assert "1 boilerplate or identifier(s) set aside" in finding["detail"]
+
+
+def test_both_spellings_of_a_notice_are_boilerplate(write):
+    """The same licence appears under http and https across a distribution,
+    and a list carrying both spellings of every entry is a list somebody
+    maintains wrongly."""
+    body = (b"\x00http://www.gnu.org/licenses/\x00"
+            b"\x00https://www.gnu.org/licenses/\x00")
+    report = analyse(write("tool.bin", body))
+    assert _strings_data(report)["urls_boilerplate"] == 2
+    assert "urls_present" not in {f["key"] for f in report.findings}
+
+
+def test_a_code_host_is_not_boilerplate(write):
+    """Deliberately absent from the list: github and the paste sites host
+    licences and payloads in equal measure."""
+    body = b"\x00https://raw.githubusercontent.com/x/y/main/stage2.ps1\x00"
+    report = analyse(write("tool.bin", body))
+    assert "urls_present" in {f["key"] for f in report.findings}
+    assert _strings_data(report)["urls_boilerplate"] == 0
+
+
+def test_an_object_identifier_is_not_an_address(write):
+    """`2.5.29.15` is the X.509 key-usage extension. Certificate code is full
+    of them, and 83.9% of the dotted quads in an ordinary corpus were arcs."""
+    body = b"\x002.5.29.15\x00\x002.5.29.19\x00"
+    report = analyse(write("tool.bin", body))
+
+    assert "ipv4_present" not in {f["key"] for f in report.findings}
+    assert _strings_data(report)["ipv4"] == ["2.5.29.15", "2.5.29.19"]
+    assert _strings_data(report)["ipv4_oid_shaped"] == 2
+
+
+def test_the_resolvers_that_look_like_arcs_survive(write):
+    """The reason the rule is a prefix list rather than a shape. "First octet
+    under 3 and second under 40" describes an OID arc, and also describes
+    1.1.1.1 and 1.0.0.1, which are real resolvers that turn up in real
+    configuration."""
+    body = b"\x00nameserver 1.1.1.1\x00\x00fallback 1.0.0.1\x00"
+    report = analyse(write("resolv.bin", body))
+
+    finding = next(f for f in report.findings if f["key"] == "ipv4_present")
+    assert "1.1.1.1" in finding["detail"]
+    assert _strings_data(report)["ipv4_oid_shaped"] == 0
+
+
+def test_a_long_identifier_is_not_four_addresses(write):
+    """`\\b` sits happily in the middle of a dotted run, so the old pattern
+    read addresses out of `1.3.6.1.5.5.7.3.1`. This is a correctness fix
+    rather than a policy one: the values were never there."""
+    body = b"\x00oid 1.3.6.1.5.5.7.3.1 server\x00"
+    report = analyse(write("cert.bin", body))
+    assert _strings_data(report)["ipv4"] == []
+
+
+def test_a_version_number_is_still_reported_as_an_address(write):
+    """Recorded rather than fixed. `14.0.0.0` is a valid dotted quad and a
+    Word version, and nothing in a string table distinguishes them. The cost
+    is one `low` finding on a document; the alternative is a rule that would
+    also discard a real address in 14.x."""
+    body = b"\x00<Application>14.0.0.0</Application>\x00"
+    report = analyse(write("doc.bin", body))
+    assert "ipv4_present" in {f["key"] for f in report.findings}
+
+
+def test_emptying_the_lists_restores_the_old_behaviour(write):
+    """Both exclusions are config, so a caller who disagrees with the
+    measurement can have every value counted."""
+    body = b"\x00https://www.gnu.org/licenses/gpl.html\x00\x002.5.29.15\x00"
+    report = analyse(write("tool.bin", body),
+                     config={**DEFAULT_CONFIG, "ioc_boilerplate_urls": [],
+                             "ioc_oid_prefixes": []})
+    keys = {f["key"] for f in report.findings}
+    assert "urls_present" in keys and "ipv4_present" in keys
+
+
+def test_a_list_with_a_number_in_it_is_reported(write):
+    """A list containing a number is compared against a string and silently
+    never matches, which is the quiet kind of wrong the accessors exist for."""
+    problems = validate_config({**DEFAULT_CONFIG, "ioc_oid_prefixes": ["1.", 5]})
+    assert any("ioc_oid_prefixes" in p for p in problems)

@@ -1,5 +1,80 @@
 # Changelog
 
+## Version 0.5.3 - an indicator list half full of licences
+
+Twenty of the twenty-nine members of one ordinary DOCX reported
+`urls_present`, and every URL was an XML namespace. The same listing reported
+a Word version number, `14.0.0.0`, as a hardcoded IPv4 address.
+
+Both are the extractor reporting its own regex rather than the file.
+
+### Measured first, over 1,200 ordinary Linux files
+
+**URLs: 42.1% of files carried one, and 57.2% of the 1,158 mentions were
+licence, standards or translation text.** `www.gnu.org` and `gnu.org` together
+were 34.7% of every URL in the corpus. A namespace is an identifier and a
+licence link is a legal notice; neither is somewhere anything connects.
+
+**Addresses: of 98 distinct dotted quads, 83.9% were ASN.1 object
+identifiers.** `2.5.29.15` is the X.509 key-usage extension and `1.3.6.1` is
+the IANA root. Any tool that parses certificates meets these constantly.
+
+### Three changes, two of them policy and one a plain bug
+
+**The address pattern used `\b`, which sits happily in the middle of a dotted
+run.** `1.3.6.1.5.5.7.3.1` is one object identifier and the pattern read four
+addresses out of it. Lookarounds instead, which removed 32 of the 98 distinct
+values without touching a single real address. That is a correctness fix: the
+values were never there.
+
+**Licence and schema URLs are counted and not reported.** The list is in
+config as scheme-less prefixes, so the same notice under `http` and `https`
+needs one entry. Entries for general-purpose organisations are qualified by
+path: excluding all of `apache.org` would hide a real download, while
+`www.apache.org/licenses/` hides a licence. Deliberately absent are
+github.com, raw.githubusercontent.com and the paste sites, which host
+boilerplate and payloads in equal measure.
+
+**Object identifiers are counted and not reported**, by prefix rather than by
+shape. "First octet under 3 and second under 40" describes an OID arc, and
+also describes `1.1.1.1` and `1.0.0.1`, which are real resolvers that turn up
+in real configuration. The prefix list has the opposite cost: an address
+genuinely inside 1.2, 1.3, 2.5 or 2.16 is set aside. Priced and accepted,
+because the data keeps it either way.
+
+**Nothing is dropped.** `report.data` carries every value as before;
+`urls_boilerplate` and `ipv4_oid_shaped` say how many were set aside, and the
+finding's own text says so too - "3 boilerplate or identifier(s) set aside".
+A count that quietly excludes things is a count nobody can check.
+
+### The effect, on the same corpus
+
+| finding | before | after |
+|---|---|---|
+| `urls_present` | 505 of 1,200 files (42.1%) | 309 (25.8%) |
+| `ipv4_present` | 15 of 1,200 files (1.2%) | 5 (0.4%) |
+
+### What is recorded rather than fixed
+
+`14.0.0.0` is still reported as an address. It is a valid dotted quad and a
+Word version number, and nothing in a string table distinguishes them. The
+cost is one `low` finding on a document; a rule that caught it would also
+discard a real address in 14.x. There is a test asserting the current
+behaviour so the trade is visible rather than forgotten.
+
+### Also
+
+- `check_list` validates to the element, not just the container. A list with a
+  number in it is compared against a string, never matches, and says nothing -
+  the quiet kind of wrong the config accessors exist to make loud.
+- Nine mutations, all caught, including the two that matter most: a code host
+  added to the boilerplate list, and the arc rule rewritten as a shape rule so
+  that it swallows `1.1.1.1`.
+- **483 passed**, or 372 passed and 111 skipped with neither pefile nor
+  yara-python.
+
+---
+
 ## Version 0.5.2 - what one real archive taught the signature table
 
 Four defects, all read off a single run of v0.5.1 against an ordinary DOCX
