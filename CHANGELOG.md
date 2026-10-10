@@ -1,5 +1,76 @@
 # Changelog
 
+## Version 0.5.5 - the harness was measuring a gate the tool does not ship
+
+Before collecting a corpus of ordinary documents, I checked what the corpus
+harness does with a container, because every DOCX, XLSX and PPTX is a zip and
+the measurement was about to rest on it.
+
+It ignored members entirely.
+
+### The two halves disagreed inside the same record
+
+`main` exits on `report.severity`, which propagates from members. The harness
+computed `flagged` from `report.findings`, which does not. So a zip holding a
+PE named `invoice.pdf` exits non-zero in the field and was recorded here as a
+clean, unflagged file with an empty key list, in the same record that stated
+its severity as high.
+
+Every rate in the harness was therefore a rate for loose files only, and said
+nothing about it.
+
+### Why no earlier measurement caught it
+
+**800 ordinary Linux files: 3.4% were containers, and not one member reached
+medium.** Both gates agreed at 0.9%, so nothing was visibly wrong. The
+`.jar`, `.gz` and `.zip` files in `/usr/share` are archives of class files
+and manuals, and a manual is not suspicious.
+
+A corpus of documents is a corpus of archives. The measurement would have
+been wrong exactly where it was about to be used, and the Linux numbers would
+have gone on agreeing.
+
+### The fix
+
+`_record` walks the report and every member below it, so key firing, the
+marginal counts, `flagged` and the per-file key list all describe the file an
+analyst handed to the tool rather than its outermost layer. A key fires once
+per file however many members raised it, which is the rule the forty YARA
+matches already followed, extended through the tree. A member whose parser
+failed now counts in `incomplete`, for the same reason the container's does.
+
+`flagged` is now true for precisely the files whose `severity` reaches the
+gate. That is two ways of saying one thing, which is what makes one of them
+drifting something a test can catch. There is a test for the invariant over
+every bundled sample, and the old constant-only test now says why pinning the
+constant was not enough: the constant matched all along.
+
+### A rate needs to say what it is a rate over
+
+**New: `containers` and `members`, per label, in the text report and the
+JSON.** 400 files from `/usr/share` reads as `15 benign file(s) held 313
+member(s)`. A false positive rate over files that are each a hundred members
+is a different claim from one over a hundred loose files, and the rate alone
+cannot tell a reader which one they are holding.
+
+`bytes` still counts the container's size rather than the sum of its members:
+that is the input, and the members are inside it already. Counting both would
+turn the throughput figure into a measure of work.
+
+The per-file record gains a member count and no member names. A member name
+is a path inside somebody's file, and that record carries no paths.
+
+### Measured and verified
+
+The Linux gate is unchanged at 1.2% over 600 files from `/usr/bin` and the
+Python standard library, which is the expected result and not a null one: the
+fix changes nothing where no member is interesting.
+
+**Mutation testing: 9 of 9 targeted mutations caught.** Two survived the
+first run, both genuine gaps - nothing walked past the first level of
+nesting, and the artefact assertion was satisfied by an empty dictionary.
+497 tests pass.
+
 ## Version 0.5.4 - a URL cut in half is not a URL
 
 v0.5.3 removed the schema URLs from one DOCX and six of its members kept

@@ -4382,6 +4382,134 @@ def test_corpus_gate_matches_the_one_the_cli_enforces():
     assert corpus_module.GATE_SEVERITY == cli.GATE_SEVERITY
 
 
+def test_the_corpus_gate_counts_a_member_the_way_the_cli_does(write):
+    """Pinning the computation rather than the constant. The constant matched
+    all along; what differed was what each side computed over. `main` exits on
+    `report.severity`, which propagates from members, while this harness read
+    `report.findings` alone - so a zip holding a PE named `.pdf` exited
+    non-zero in the field and was recorded here as a clean unflagged file, in
+    the same record that put its severity at high."""
+    path = write("report.zip", b"")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("invoice.pdf", b"MZ" + b"\x00" * 1024)
+    report = analyse(path)
+
+    assert not report.findings, "the container itself is unremarkable"
+    assert report.severity == "high"
+
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", report, True)
+
+    assert result.flagged == {"benign": 1}
+    assert "extension_mismatch" in result.keys
+    assert result.per_file[0]["keys"] == sorted(result.keys)
+
+
+def test_every_corpus_record_flags_exactly_when_the_cli_would(tmp_path):
+    """The invariant behind the test above, over every bundled sample and a
+    container besides: flagged is true for precisely the files whose severity
+    reaches the gate. Two ways of saying the same thing, which is what makes
+    one of them drifting a thing a test can catch."""
+    written = write_samples(tmp_path / "benign")
+    nested = tmp_path / "benign" / "bundle.zip"
+    with zipfile.ZipFile(nested, "w") as archive:
+        archive.writestr("invoice.pdf", b"MZ" + b"\x00" * 1024)
+        archive.writestr("notes.txt", b"nothing here at all\n")
+
+    result = corpus_module.scan_corpus(tmp_path, per_file=True)
+
+    assert len(result.per_file) == len(written) + 1
+    at_gate = sum(
+        1 for record in result.per_file
+        if SEVERITY_RANK[record["severity"]] >= SEVERITY_RANK[corpus_module.GATE_SEVERITY])
+    assert result.flagged["benign"] == at_gate
+
+
+def test_a_member_key_fires_once_for_the_file_that_held_it(write):
+    """The same rule the forty YARA matches follow, extended through the
+    tree. A document is one file however many parts it has, and an archive of
+    two hundred identical members must not read as two hundred files."""
+    path = write("report.zip", b"")
+    with zipfile.ZipFile(path, "w") as archive:
+        for index in range(5):
+            archive.writestr(f"part{index}.pdf", b"MZ" + b"\x00" * 1024)
+
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", analyse(path), False)
+
+    assert result.files == {"benign": 1}
+    assert result.keys["extension_mismatch"].fired == {"benign": 1}
+
+
+def test_the_corpus_report_says_how_much_of_it_was_containers(write):
+    """A rate over files that are each a hundred members is not the same
+    measurement as one over a hundred loose files, and the rate alone cannot
+    tell a reader which one they are holding."""
+    path = write("report.zip", b"")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("one.txt", b"the first member of the archive\n")
+        archive.writestr("two.txt", b"the second member of the archive\n")
+
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", analyse(path), False)
+    corpus_module._record(result, "benign", _corpus_report({}), False)
+
+    assert result.containers == {"benign": 1}
+    assert result.members == {"benign": 2}
+    assert "1 benign file(s) held 2 member(s)" in corpus_module.render(result)
+    assert result.to_dict()["containers"] == {"benign": 1}
+    assert result.to_dict()["members"] == {"benign": 2}
+
+
+def test_the_corpus_walk_reaches_a_member_of_a_member(write):
+    """The tree is a tree, not a list. A document inside a zip inside an
+    email attachment is three levels, and a walk that stopped at the first
+    would measure the gate correctly for a bare DOCX and wrongly for the way
+    one actually arrives."""
+    inner = write("inner.zip", b"")
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr("invoice.pdf", b"MZ" + b"\x00" * 1024)
+    outer = write("outer.zip", b"")
+    with zipfile.ZipFile(outer, "w") as archive:
+        archive.writestr("inner.zip", inner.read_bytes())
+    report = analyse(outer)
+
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", report, False)
+
+    # The zip, the member zip, and the PE inside it.
+    assert result.members == {"benign": 2}
+    assert result.flagged == {"benign": 1}
+    assert "extension_mismatch" in result.keys
+
+
+def test_a_corpus_of_loose_files_says_nothing_about_containers():
+    """The line is there because something was a container. An ordinary
+    corpus carries neither it nor a zero."""
+    result = _hand_corpus()
+    assert result.containers == {}
+    assert "containers:" not in corpus_module.render(result)
+    # Present in the artefact even so, so that a reader comparing two results
+    # can tell "none" from "written before anything counted them".
+    assert result.to_dict()["containers"] == {}
+    assert result.to_dict()["members"] == {}
+
+
+def test_a_member_that_could_not_be_parsed_counts_as_incomplete(write):
+    """`incomplete` exists so a corpus cannot quietly measure a tool that was
+    missing a parser. A parser missing inside a member is the same gap."""
+    path = write("report.zip", b"")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("broken.exe", b"MZ" + b"\x00" * 200)
+    report = analyse(path)
+    report.children[0].errors["invented"] = "a parser that was not there"
+
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", report, False)
+
+    assert result.incomplete["invented"] == 1
+
+
 # Corpus harness, against real output
 
 
@@ -4436,7 +4564,10 @@ def test_corpus_per_file_is_opt_in_and_still_carries_no_path(tmp_path):
     for record in result.per_file:
         assert record["label"] == "benign"
         assert len(record["sha256"]) == 64
-        assert set(record) == {"label", "sha256", "size_bytes", "severity", "keys"}
+        # A count of members, not their names: a member name is a path
+        # inside somebody else's file and this record carries no paths.
+        assert set(record) == {"label", "sha256", "size_bytes", "severity",
+                              "keys", "members"}
 
 
 def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):

@@ -294,6 +294,18 @@ sorted system directory are a coherent group rather than an arbitrary one, and
 a sample nobody can redraw is a measurement nobody can check. A sampled result
 says what it was sampled from, in the output and in the JSON.
 
+Every rate is per file, counted over the whole file: a key fires once for the
+file that held it however many members raised it, and a container is flagged
+when any member is, which is the gate the CLI exits on. A result that found
+containers says so, because a rate over files that are each a hundred members
+is a different claim from one over a hundred loose files.
+
+```
+corpus: 400 benign
+  gate (medium+): flags 1.0% of benign files
+  containers: 15 benign file(s) held 313 member(s)
+```
+
 ```bash
 maltriage corpus ./corpus --json corpus.json --max-false-positive-rate 0.01
 ```

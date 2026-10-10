@@ -125,6 +125,13 @@ class CorpusResult:
     #: on a full run. It is carried so a sampled result cannot be mistaken for
     #: a complete one six months later, when the only thing left is the JSON.
     available: dict[str, int] = field(default_factory=dict)
+    #: Files of each label that turned out to be containers, and how many
+    #: members were examined inside them. Reported because a corpus of
+    #: documents is a corpus of archives, and a rate computed over files that
+    #: are each a hundred members is a different measurement from one over
+    #: a hundred loose files.
+    containers: dict[str, int] = field(default_factory=dict)
+    members: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_files(self) -> int:
@@ -193,6 +200,11 @@ class CorpusResult:
                 for key, outcome in sorted(self.keys.items())
             },
             "incomplete": dict(sorted(self.incomplete.items())),
+            # Always present, including as empty dictionaries, so a reader
+            # comparing two results can tell "no containers" from "a result
+            # written before anything counted them".
+            "containers": dict(sorted(self.containers.items())),
+            "members": dict(sorted(self.members.items())),
             "elapsed_seconds": round(self.elapsed, 3),
             # Present only when a sample was taken, and then unmissable. A rate
             # over 500 of 4,000 files is a different claim from a rate over
@@ -327,19 +339,38 @@ def scan_files(items: Iterable[tuple[str, Path]],
 def _record(result: CorpusResult, label: str, report: Report,
             per_file: bool) -> None:
     result.files[label] = result.files.get(label, 0) + 1
+    # The container's own size, which is the file on disk the analyst scanned.
+    # A member's bytes are inside that number already, and adding them would
+    # make the throughput figure describe work rather than input.
     result.bytes[label] = result.bytes.get(label, 0) + report.size_bytes
 
-    for source in report.errors:
-        result.incomplete[source] = result.incomplete.get(source, 0) + 1
+    members = _members(report)
+    if members:
+        result.containers[label] = result.containers.get(label, 0) + 1
+        result.members[label] = result.members.get(label, 0) + members
 
     # Once per file per key, not once per finding. A file with forty
     # `yara_match` findings is one file that matched rules, and counting the
     # findings would let a single noisy sample dominate a rate that is
     # supposed to describe a corpus.
+    #
+    # Over the whole tree, because the unit being measured is the file the
+    # analyst handed to the tool. Reading `report.findings` alone measured a
+    # gate the tool does not ship: `main` exits on `report.severity`, which
+    # propagates from members, so a zip holding a PE named `.txt` exited
+    # non-zero in the field and counted as a clean unflagged file here, in the
+    # same record that recorded its severity as high. The Linux corpus could
+    # not see it - 3.4% of files were containers and not one member reached
+    # medium - and a corpus of documents is a corpus of archives, so the
+    # measurement would have been wrong exactly where it was about to be used.
     worst_by_key: dict[str, str] = {}
-    for finding in report.findings:
-        key = finding["key"]
-        worst_by_key[key] = _worst(worst_by_key.get(key, "info"), finding["severity"])
+    for node in _tree(report):
+        for source in node.errors:
+            result.incomplete[source] = result.incomplete.get(source, 0) + 1
+        for finding in node.findings:
+            key = finding["key"]
+            worst_by_key[key] = _worst(worst_by_key.get(key, "info"),
+                                       finding["severity"])
 
     at_gate = [key for key, severity in worst_by_key.items()
                if SEVERITY_RANK[severity] >= SEVERITY_RANK[GATE_SEVERITY]]
@@ -371,8 +402,20 @@ def _record(result: CorpusResult, label: str, report: Report,
             "sha256": (report.data.get("hashes") or {}).get("sha256"),
             "size_bytes": report.size_bytes,
             "severity": report.severity,
-            "keys": sorted({f["key"] for f in report.findings}),
+            "keys": sorted(worst_by_key),
+            "members": members,
         })
+
+
+def _tree(report: Report):
+    """The report and every member below it, depth first."""
+    yield report
+    for child in report.children:
+        yield from _tree(child)
+
+
+def _members(report: Report) -> int:
+    return sum(1 for _ in _tree(report)) - 1
 
 
 def _worst(left: str, right: str) -> str:
@@ -468,6 +511,15 @@ def render(result: CorpusResult) -> str:
     recall = result.recall()
     lines.append(f"  recall: {recall:.1%}" if recall is not None
                  else "  recall: no malicious files, so none to state")
+
+    if result.containers:
+        # Said out loud, because a rate over files that are each a hundred
+        # members is not the same measurement as one over loose files, and
+        # the figure above cannot tell you which you are reading.
+        lines.append("  containers: " + ", ".join(
+            f"{count} {label} file(s) held "
+            f"{result.members.get(label, 0):,} member(s)"
+            for label, count in sorted(result.containers.items())))
 
     if result.incomplete:
         lines.append("  incomplete: " + ", ".join(
