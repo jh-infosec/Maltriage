@@ -300,9 +300,15 @@ when any member is, which is the gate the CLI exits on. A result that found
 containers says so, because a rate over files that are each a hundred members
 is a different claim from one over a hundred loose files.
 
+A result also says which formats it was a rate over, because a rate across a
+directory is an average over whatever was in it. 307 of these 400 files were
+of no family the tool recognises, which is the first thing to know about the
+1.0%.
+
 ```
 corpus: 400 benign
   gate (medium+): flags 1.0% of benign files
+  benign families: unknown 307, xml 63, gzip 14, pdf 6, png 4, script 4, jpeg 1, zip 1
   containers: 15 benign file(s) held 313 member(s)
 ```
 

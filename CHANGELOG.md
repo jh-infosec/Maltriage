@@ -1,5 +1,59 @@
 # Changelog
 
+## Version 0.5.6 - a rate has to say what it is a rate over
+
+Groundwork for the document corpus, and it changed what I think of some
+numbers already recorded here.
+
+### Which formats, per label
+
+**New: `families`, in the text report and the JSON.** 400 files from
+`/usr/share` now read as
+
+```
+  benign families: unknown 307, xml 63, gzip 14, pdf 6, png 4, script 4, jpeg 1, zip 1
+```
+
+That is 307 of 400 files of no family the tool recognises, which is the first
+thing anybody should know about the 1.0% gate rate beside it. Every earlier
+`/usr/share` figure in this changelog was an average across a mixture nobody
+stated, and the mixture was mostly files nothing claimed.
+
+Every family is listed rather than the top few. A corpus that turns out to be
+95% one format is the most important fact about any rate taken over it, and a
+truncated list is exactly where that would hide.
+
+**The family is what the bytes said, not what the name claimed.** `invoice.pdf`
+holding a PE counts as a PE. A breakdown that believed the extension would
+file every disguised sample in the wrong row, which is the opposite of what
+this tool is for.
+
+A file nothing recognises counts as `unknown` rather than null, because this
+is a dictionary key and a corpus of unrecognised files is a result worth
+being able to read.
+
+### Per file
+
+The per-file record gains `family`, deliberately not `extension`: an
+extension comes from the name, and the one rule that record follows is that
+it carries nothing from the name. With `family` and the member count added in
+v0.5.5, one scan of a mixed directory can be sliced by format afterwards
+instead of needing a staging directory per format.
+
+### Measured and verified
+
+No rate changes: this release adds a denominator description and nothing
+else. Mutation testing caught 7 of 7 targeted mutations, including the two
+that matter most - believing the extension, and leaving the breakdown out of
+the artefact. 500 tests pass.
+
+### Still open
+
+Every OOXML document reads as `zip`, because that is what a DOCX is. The
+breakdown will say `zip` where a reader wants `docx`, and telling them apart
+means looking for `[Content_Types].xml` among the members. That is a real
+candidate for the next release and is not in this one.
+
 ## Version 0.5.5 - the harness was measuring a gate the tool does not ship
 
 Before collecting a corpus of ordinary documents, I checked what the corpus

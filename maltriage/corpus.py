@@ -132,6 +132,12 @@ class CorpusResult:
     #: a hundred loose files.
     containers: dict[str, int] = field(default_factory=dict)
     members: dict[str, int] = field(default_factory=dict)
+    #: How many files of each label were of each detected family. A rate over
+    #: a directory is an average over whatever formats were in it, and the
+    #: average is the wrong number when the question is what a rule does to
+    #: documents. The family is what the bytes said, not what the name
+    #: claimed, which is the same stance every other finding here takes.
+    families: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def total_files(self) -> int:
@@ -205,6 +211,8 @@ class CorpusResult:
             # written before anything counted them".
             "containers": dict(sorted(self.containers.items())),
             "members": dict(sorted(self.members.items())),
+            "families": {label: dict(sorted(counts.items()))
+                         for label, counts in sorted(self.families.items())},
             "elapsed_seconds": round(self.elapsed, 3),
             # Present only when a sample was taken, and then unmissable. A rate
             # over 500 of 4,000 files is a different claim from a rate over
@@ -349,6 +357,10 @@ def _record(result: CorpusResult, label: str, report: Report,
         result.containers[label] = result.containers.get(label, 0) + 1
         result.members[label] = result.members.get(label, 0) + members
 
+    family = _family(report)
+    by_family = result.families.setdefault(label, {})
+    by_family[family] = by_family.get(family, 0) + 1
+
     # Once per file per key, not once per finding. A file with forty
     # `yara_match` findings is one file that matched rules, and counting the
     # findings would let a single noisy sample dominate a rate that is
@@ -404,6 +416,10 @@ def _record(result: CorpusResult, label: str, report: Report,
             "severity": report.severity,
             "keys": sorted(worst_by_key),
             "members": members,
+            # The family, deliberately not the extension. An extension comes
+            # from the name, and the one rule this record follows is that it
+            # carries nothing from the name.
+            "family": family,
         })
 
 
@@ -416,6 +432,15 @@ def _tree(report: Report):
 
 def _members(report: Report) -> int:
     return sum(1 for _ in _tree(report)) - 1
+
+
+def _family(report: Report) -> str:
+    """What the bytes said this file was, or `unknown` if nothing claimed it.
+
+    A string either way rather than `None`, because this is a dictionary key
+    and a corpus of files nothing recognises is a result worth reading.
+    """
+    return (report.data.get("filetype") or {}).get("family") or "unknown"
 
 
 def _worst(left: str, right: str) -> str:
@@ -511,6 +536,14 @@ def render(result: CorpusResult) -> str:
     recall = result.recall()
     lines.append(f"  recall: {recall:.1%}" if recall is not None
                  else "  recall: no malicious files, so none to state")
+
+    for label, counts in sorted(result.families.items()):
+        # Every family, not the top few. A corpus that turns out to be 95%
+        # one format is the single most important thing about a rate taken
+        # over it, and a truncated list is where that fact would hide.
+        shown = ", ".join(f"{family} {count}" for family, count in
+                          sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        lines.append(f"  {label} families: {shown}")
 
     if result.containers:
         # Said out loud, because a rate over files that are each a hundred

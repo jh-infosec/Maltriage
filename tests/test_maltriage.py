@@ -4483,6 +4483,45 @@ def test_the_corpus_walk_reaches_a_member_of_a_member(write):
     assert "extension_mismatch" in result.keys
 
 
+def test_the_corpus_says_which_formats_it_was_a_rate_over(write):
+    """A rate over a directory is an average over whatever formats were in
+    it, and the average is the wrong number when the question is what a rule
+    does to documents. A corpus that turns out to be almost all one format is
+    the most important thing about any rate taken over it."""
+    result = corpus_module.CorpusResult()
+    for name, body in (("a.exe", b"MZ" + b"\x00" * 512),
+                       ("b.exe", b"MZ" + b"\x00" * 512),
+                       ("c.pdf", b"%PDF-1.7\n" + b"\x00" * 512)):
+        corpus_module._record(result, "benign", analyse(write(name, body)), False)
+
+    assert result.families == {"benign": {"pe": 2, "pdf": 1}}
+    assert "benign families: pe 2, pdf 1" in corpus_module.render(result)
+    assert result.to_dict()["families"] == {"benign": {"pdf": 1, "pe": 2}}
+
+
+def test_the_family_is_what_the_bytes_said_not_what_the_name_claimed(write):
+    """`invoice.pdf` holding a PE counts as a PE. The whole project reads
+    bytes rather than names, and a breakdown that believed the extension
+    would put every disguised sample in the wrong row."""
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign",
+                          analyse(write("invoice.pdf", b"MZ" + b"\x00" * 1024)),
+                          True)
+
+    assert result.families == {"benign": {"pe": 1}}
+    assert result.per_file[0]["family"] == "pe"
+
+
+def test_a_file_nothing_recognises_is_counted_as_unknown(write):
+    """A string rather than a null, because this is a dictionary key and a
+    corpus of files nothing claims is a result worth being able to read."""
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign",
+                          analyse(write("thing.dat", b"\x17" * 600)), False)
+
+    assert result.families == {"benign": {"unknown": 1}}
+
+
 def test_a_corpus_of_loose_files_says_nothing_about_containers():
     """The line is there because something was a container. An ordinary
     corpus carries neither it nor a zero."""
@@ -4567,7 +4606,7 @@ def test_corpus_per_file_is_opt_in_and_still_carries_no_path(tmp_path):
         # A count of members, not their names: a member name is a path
         # inside somebody else's file and this record carries no paths.
         assert set(record) == {"label", "sha256", "size_bytes", "severity",
-                              "keys", "members"}
+                              "keys", "members", "family"}
 
 
 def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):
