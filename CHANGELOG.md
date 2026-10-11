@@ -1,5 +1,76 @@
 # Changelog
 
+## Version 0.5.7 - a home directory is not a sample of anything
+
+The first real attempt at a document corpus failed, and the way it failed is
+the release.
+
+### What the run said
+
+500 files drawn at random from one machine's Documents and Downloads, 31,499
+files in total:
+
+```
+  gate (medium+): flags 12.8% of benign files
+  benign families: unknown 426, png 34, jpeg 23, pe 6, xml 5, pdf 3, zip 3
+  incomplete: fuzzy on 1 file(s), yara on 637 file(s)
+```
+
+Three PDFs and three zips. Sliced by family, every format the tool
+recognises except PE flagged at zero: png 0 of 34, jpeg 0 of 23, xml 0 of 5,
+pdf 0 of 3, zip 0 of 3. The entire 12.8% is 59 unrecognised files and 5
+executables, and all 59 unrecognised ones are `entropy_hotspot`.
+
+### Why, and why it is not a finding about documents
+
+An extension census explained it. 14,099 of the 31,499 files are `.ncw`,
+Native Instruments compressed audio, with thousands more `.ffp`, `.toy`,
+`.sbf` and `.nki` beside them. The directory is a music sample library. The
+426 unrecognised files are compressed audio, and compressed audio is high
+entropy by construction.
+
+So `entropy_hotspot` at 12.6% is not a false positive rate on documents. It
+is a false positive rate on one application's cache, and retuning a severity
+against it would be fitting the tool to one machine. **The counterfactual
+says demoting that single key takes the gate from 12.8% to 1.0%**, which is
+the largest lever this project has measured, and it is recorded here as
+measured and deliberately not pulled: the files it would stop flagging are
+unrecognised high-entropy blobs, which is also what raw shellcode and an
+encrypted payload look like, and there is no malicious corpus here to price
+that against.
+
+Also recorded: this run had YARA on none of its 637 files, so it measures a
+tool without YARA.
+
+### The change
+
+**`--extension EXT`, repeatable, selects the population by extension**, with
+or without the dot and in any case. There were 133 PDFs and 59 DOCX in that
+directory and a random draw of 500 found three of them, so without this the
+measurement is unreachable.
+
+Selecting by extension looks like a contradiction in a tool whose stance is
+that a name proves nothing, and it is not one: this chooses which files to
+measure and never decides what a file is. Every finding still comes from the
+bytes, and `families` still reports what the bytes said. The selection is
+recorded in the text report and the JSON, because a rate over a filtered
+population is a different claim.
+
+The selection is also what gets sampled from. If the directory were the
+denominator, a restricted run would report a rate over files it never
+opened.
+
+A selection that matches nothing gets its own error, separate from an empty
+directory: the cause is different and so is the fix.
+
+### Verified
+
+505 tests pass. Mutation testing caught 9 of 9 after one survivor turned out
+to be a malformed mutant rather than a test gap - the edit left the original
+line in place below it and changed nothing. Rewritten properly, the test
+catches it. Worth recording, because a mutant that does nothing is
+indistinguishable from a mutant nothing catches unless you read it.
+
 ## Version 0.5.6 - a rate has to say what it is a rate over
 
 Groundwork for the document corpus, and it changed what I think of some

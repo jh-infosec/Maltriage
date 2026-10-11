@@ -4609,6 +4609,78 @@ def test_corpus_per_file_is_opt_in_and_still_carries_no_path(tmp_path):
                               "keys", "members", "family"}
 
 
+def test_a_corpus_can_be_restricted_to_an_extension(tmp_path):
+    """The measurement a home directory makes impossible without it. 14,099
+    of one machine's 31,499 files were a single application's compressed
+    audio cache, so a sample of 500 drawn at random held 3 PDFs and no
+    spreadsheets, and the rate it produced described the cache."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    for name in ("a.pdf", "b.PDF", "c.ncw", "d.ncw", "e.docx"):
+        (benign / name).write_bytes(b"%PDF-1.7\n" + b"\x00" * 200)
+
+    result = corpus_module.scan_corpus(tmp_path, extensions=["pdf", ".DOCX"])
+
+    assert result.files == {"benign": 3}
+    assert result.selected_extensions == [".pdf", ".docx"]
+    assert result.to_dict()["selected_extensions"] == [".pdf", ".docx"]
+    assert "restricted to .pdf, .docx" in corpus_module.render(result)
+
+
+def test_the_selection_is_what_gets_sampled_from(tmp_path):
+    """A sample is drawn from the selection, not from the directory. If the
+    denominator were the directory, a restricted run would report a rate over
+    files it never opened."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    for index in range(10):
+        (benign / f"doc{index}.pdf").write_bytes(b"%PDF-1.7\n" + b"\x00" * 200)
+    for index in range(90):
+        (benign / f"cache{index}.ncw").write_bytes(b"\x17" * 200)
+
+    result = corpus_module.scan_corpus(tmp_path, extensions=[".pdf"], limit=4)
+
+    assert result.files == {"benign": 4}
+    assert result.available == {"benign": 10}
+
+
+def test_an_extension_is_spelled_three_ways_and_means_one_thing(tmp_path):
+    """`docx`, `.docx` and `.DOCX` are one selection. An unnormalised list
+    fails silently: it matches nothing and reports a rate over zero files."""
+    assert corpus_module._normalise_extensions(
+        ["docx", ".DOCX", " .pdf ", "", "pdf"]) == [".docx", ".pdf"]
+
+
+def test_restricting_to_nothing_leaves_the_population_alone(tmp_path):
+    """An absent selection is not an empty one. The flag is optional and the
+    unrestricted run is still the default."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "a.pdf").write_bytes(b"%PDF-1.7\n" + b"\x00" * 200)
+    (benign / "b.ncw").write_bytes(b"\x17" * 200)
+
+    for extensions in (None, []):
+        result = corpus_module.scan_corpus(tmp_path, extensions=extensions)
+        assert result.files == {"benign": 2}
+        assert result.selected_extensions == []
+        assert "selected_extensions" not in result.to_dict()
+        assert "restricted to" not in corpus_module.render(result)
+
+
+def test_corpus_command_says_when_a_selection_matched_nothing(tmp_path, capsys):
+    """A different failure from an empty directory, with a different fix, so
+    it gets its own sentence. The directory was full; the selection was
+    wrong."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "a.ncw").write_bytes(b"\x17" * 200)
+
+    code = cli.main(["corpus", str(tmp_path), "--extension", "docx"])
+
+    assert code == cli.EXIT_USAGE
+    assert "no files matching .docx were found" in capsys.readouterr().err
+
+
 def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):
     target = tmp_path / "file.bin"
     target.write_bytes(b"x")

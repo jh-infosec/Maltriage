@@ -300,6 +300,18 @@ when any member is, which is the gate the CLI exits on. A result that found
 containers says so, because a rate over files that are each a hundred members
 is a different claim from one over a hundred loose files.
 
+`--extension EXT` is repeatable and restricts the population, with or without
+the dot and in any case. It chooses which files to measure and never decides
+what one is: every finding still comes from the bytes. It exists because a
+home directory is not a sample of anything in particular. On one machine,
+14,099 of 31,499 files were a single application's compressed audio cache, so
+a random draw of 500 contained three PDFs and the rate it produced described
+the cache.
+
+```bash
+maltriage corpus --benign ~/Documents --extension pdf --extension docx
+```
+
 A result also says which formats it was a rate over, because a rate across a
 directory is an average over whatever was in it. 307 of these 400 files were
 of no family the tool recognises, which is the first thing to know about the

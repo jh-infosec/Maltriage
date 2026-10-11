@@ -3,4 +3,4 @@
 Reads bytes from disk. Never executes, launches or modifies a sample.
 """
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"

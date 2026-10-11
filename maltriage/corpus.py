@@ -138,6 +138,16 @@ class CorpusResult:
     #: documents. The family is what the bytes said, not what the name
     #: claimed, which is the same stance every other finding here takes.
     families: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: The extensions the population was restricted to, if any. Selecting by
+    #: extension looks like a contradiction in a tool whose whole stance is
+    #: that a name proves nothing, and it is not one: this chooses which
+    #: files to measure, it never decides what a file is. Every finding below
+    #: still comes from the bytes. The distinction matters because a home
+    #: directory can be 45% one application's cache, and a rate drawn at
+    #: random from it describes that cache rather than the question asked.
+    #: Recorded because a rate over a filtered population is a different
+    #: claim, and the filter has to survive into the artefact.
+    selected_extensions: list[str] = field(default_factory=list)
 
     @property
     def total_files(self) -> int:
@@ -213,6 +223,8 @@ class CorpusResult:
             "members": dict(sorted(self.members.items())),
             "families": {label: dict(sorted(counts.items()))
                          for label, counts in sorted(self.families.items())},
+            **({"selected_extensions": list(self.selected_extensions)}
+               if self.selected_extensions else {}),
             "elapsed_seconds": round(self.elapsed, 3),
             # Present only when a sample was taken, and then unmissable. A rate
             # over 500 of 4,000 files is a different claim from a rate over
@@ -275,6 +287,25 @@ def named_files(sources: dict[str, list[Path]]) -> list[tuple[str, Path]]:
     return found
 
 
+def _normalise_extensions(extensions: list[str]) -> list[str]:
+    """`docx`, `.docx` and `.DOCX` are one selection, written three ways.
+
+    A selection nobody can spell is a selection nobody uses, and the failure
+    mode is silent: an unnormalised list simply matches nothing and reports a
+    rate over zero files.
+    """
+    out = []
+    for raw in extensions:
+        value = raw.strip().lower()
+        if not value:
+            continue
+        if not value.startswith("."):
+            value = "." + value
+        if value not in out:
+            out.append(value)
+    return out
+
+
 def sample(items: list[tuple[str, Path]], limit: int,
            seed: int = 0) -> list[tuple[str, Path]]:
     """At most `limit` files of each label, drawn at random and reproducibly.
@@ -300,19 +331,22 @@ def sample(items: list[tuple[str, Path]], limit: int,
 
 def scan_corpus(root: Path | str, config: dict[str, Any] | None = None,
                 extractors: list[Extractor] | None = None,
-                per_file: bool = False, limit: int | None = None) -> CorpusResult:
+                per_file: bool = False, limit: int | None = None,
+                extensions: list[str] | None = None) -> CorpusResult:
     """Run maltriage over a labelled corpus and count what happened."""
     root = Path(root)
     if not root.is_dir():
         raise NotADirectoryError(f"not a directory: {root}")
-    return scan_files(labelled_files(root), config, extractors, per_file, limit)
+    return scan_files(labelled_files(root), config, extractors, per_file, limit,
+                      extensions)
 
 
 def scan_files(items: Iterable[tuple[str, Path]],
                config: dict[str, Any] | None = None,
                extractors: list[Extractor] | None = None,
                per_file: bool = False,
-               limit: int | None = None) -> CorpusResult:
+               limit: int | None = None,
+               extensions: list[str] | None = None) -> CorpusResult:
     """Run maltriage over labelled files and count what happened.
 
     Extractors are built once and reused, which is the contract
@@ -321,6 +355,10 @@ def scan_files(items: Iterable[tuple[str, Path]],
     """
     items = list(items)
     result = CorpusResult()
+    if extensions:
+        result.selected_extensions = _normalise_extensions(extensions)
+        items = [(label, path) for label, path in items
+                 if path.suffix.lower() in result.selected_extensions]
     for label, _ in items:
         result.available[label] = result.available.get(label, 0) + 1
     if limit is not None:
@@ -519,6 +557,10 @@ def render(result: CorpusResult) -> str:
                        for label, count in sorted(result.files.items()))
     speed = result.throughput()
     lines.append(f"corpus: {totals or 'no labelled files'}")
+    if result.selected_extensions:
+        # Before the sampling line, because this is the narrower statement:
+        # a sample is drawn from the selection, not from the directory.
+        lines.append("  restricted to " + ", ".join(result.selected_extensions))
     if result.available and result.available != result.files:
         lines.append("  sampled from " + ", ".join(
             f"{count:,} {label}"

@@ -366,7 +366,17 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     items = (corpus_module.labelled_files(args.root) if args.root
              else corpus_module.named_files(sources))
     result = corpus_module.scan_files(items, per_file=args.per_file,
-                                      limit=args.limit)
+                                      limit=args.limit,
+                                      extensions=args.extension)
+
+    if not result.total_files and args.extension:
+        # Said separately from the two messages below, because the cause is
+        # different and so is the fix. The directory was not empty; the
+        # selection matched nothing in it.
+        print(f"{APP_NAME}: no files matching "
+              f"{', '.join(result.selected_extensions)} were found",
+              file=sys.stderr)
+        return EXIT_USAGE
 
     if not result.total_files:
         if args.root:
@@ -469,6 +479,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "default: a corpus report is kept and compared, "
                              "and a corpus directory describes somebody's "
                              "sample collection")
+    corpus.add_argument("--extension", action="append", metavar="EXT",
+                        help="measure only files with this extension, with or "
+                             "without the dot and in any case. Repeatable. "
+                             "This chooses which files to measure and never "
+                             "decides what one is: a home directory can be "
+                             "half one application's cache, and a sample "
+                             "drawn at random from it describes the cache")
     corpus.add_argument("--max-false-positive-rate", type=float, metavar="RATE",
                         help="exit non-zero if the gate flags more than this "
                              "share of benign files, as a fraction (0.05)")
