@@ -1,5 +1,89 @@
 # Changelog
 
+## Version 0.5.8 - the documents were right and I was wrong twice
+
+The document corpus from v0.5.7 drilled down to actual values. 186 files: 113
+PDF, 58 OOXML, 15 cloud placeholder stubs of exactly 162 bytes each that
+carry a document extension and no content.
+
+I wrote three predictions down first. Two were wrong, and both were wrong in
+the direction that means the tool is working.
+
+### `ipv4_present` at 43.1% is signal, not noise
+
+I predicted Office version numbers, following the `14.0.0.0` case v0.5.3
+recorded as an accepted cost. The actual values:
+
+```
+     15  0.0.0.0          12  10.129.43.10     12  10.129.43.11
+     12  10.129.43.9      12  10.129.43.7      12  10.129.43.6
+      6  10.129.37.139     6  10.129.37.141     1  192.168.195.10
+```
+
+Those are Hack The Box lab addresses. The documents are penetration test
+reports, and they are full of real addresses because that is what a pentest
+report contains. Of 132 mentions across 29 distinct values, the only clear
+noise is `0.0.0.0`, one date read as a quad, and possibly `13.0.0.0`. **No
+change. The rule is doing its job and the v0.5.3 decision stands.**
+
+### `unix_paths_present` at 34.5% is also signal
+
+I predicted something structural inside OOXML, font or theme data. The actual
+values are `/bin/bash`, `/etc/passwd`, `/usr/bin/sudo`, `/home/marc/.email-backup.sh`,
+`/tmp/dirtypipe` and `/tmp/50808.c`. Real paths out of real write-ups, one of
+them naming the Dirty Pipe exploit. **No change.**
+
+### The URL filter is working
+
+The top fourteen URL values are all OOXML namespaces, and every one of their
+prefixes is already in `ioc_boilerplate_urls`. They appear in this dump
+because it reads `report.data`, which keeps every value by design; the
+finding excludes them. 8,066 mentions across 189 distinct values, and the
+~45% `urls_present` rate comes from the long tail, which is hyperlinks in
+documents. **No change.**
+
+### The one real finding: PDF entropy
+
+```
+pdf entropy over 113 file(s)
+  overall_ratio    min=0.631 median=0.996 max=1.000
+  high_entropy_windows: 112 file(s) have at least one, max 5062
+  whole-file finding withheld on 0 of 113
+```
+
+`high_file_entropy` fired on 94.7% of PDFs. A finding that fires on nineteen
+files in twenty of a format is describing the format.
+
+**`pdf` joins `compressed_families`.** This was added on measurement and the
+principle argues the other way: a PDF is a text skeleton around compressed
+object streams, not a compressed stream like a GZIP. The median whole-file
+ratio of 0.996 settles it. The numbers stay in the report and the report says
+the finding was withheld, exactly as it does for ZIP and PNG.
+
+### What was deliberately not changed
+
+`entropy_hotspot` fires on 4.4% of PDFs and is the entire 2.7% gate on this
+corpus. It fires where the whole file is quiet and one window is hot, which
+in a PDF means a text document carrying one compressed image stream.
+
+That is an ordinary PDF. It is also the exact shape of an embedded payload,
+which is what the rule exists for. The windowed finding stays at medium and
+the measurement is recorded beside it. 4.4% of 113 files is five files, and
+there is no malicious corpus here to weigh the other side.
+
+### A caveat on the whole corpus
+
+These are a security practitioner's documents. HTB lab reports, a PenTest+
+study guide, exam write-ups. `ipv4_present`, `unix_paths_present` and
+`registry_path_present` are all elevated for that reason, and a corpus of
+invoices and meeting minutes would give different numbers for those three.
+The PDF entropy result does not depend on the subject matter.
+
+### Verified
+
+507 tests pass. Mutation testing caught 5 of 5, including the one that
+matters most: withholding the windowed finding along with the whole-file one.
+
 ## Version 0.5.7 - a home directory is not a sample of anything
 
 The first real attempt at a document corpus failed, and the way it failed is

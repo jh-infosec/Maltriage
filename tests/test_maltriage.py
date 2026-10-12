@@ -5862,6 +5862,37 @@ def test_a_compressed_image_is_not_scored_on_its_own_entropy(write):
     assert "high_file_entropy" not in {f["key"] for f in report.findings}
 
 
+def test_a_pdf_is_not_scored_on_its_own_entropy(write):
+    """Added on measurement rather than on principle, and the principle would
+    have argued the other way: a PDF is a text skeleton around compressed
+    object streams, not a compressed stream. Over 113 real PDFs the whole-file
+    ratio had a median of 0.996 of random and `high_file_entropy` fired on
+    94.7% of them. A finding that fires on nineteen files in twenty of a
+    format is describing the format."""
+    body = b"%PDF-1.7\n" + os.urandom(300_000) + b"\n%%EOF\n"
+    report = analyse(write("manual.pdf", body))
+
+    assert report.data["filetype"]["family"] == "pdf"
+    assert report.data["entropy"]["overall_ratio"] > 0.9
+    assert report.data["entropy"]["whole_file_finding_withheld"] == "compressed format"
+    assert "high_file_entropy" not in {f["key"] for f in report.findings}
+
+
+def test_a_hot_region_inside_a_pdf_still_fires(write):
+    """Deliberately unchanged, and the one case worth stating twice. A text
+    PDF carrying one compressed stream is an ordinary PDF, and it is also the
+    shape an embedded payload would take. It was measured at 4.4% of 113 real
+    PDFs, which is recorded rather than tuned away: there is no malicious
+    corpus here to weigh the other side."""
+    body = (b"%PDF-1.7\n" + b"1 0 obj\n<< /Type /Catalog >>\nendobj\n" * 400
+            + b"stream\n" + os.urandom(20_000) + b"\nendstream\n"
+            + b"2 0 obj\n<< /Type /Page >>\nendobj\n" * 400 + b"%%EOF\n")
+    report = analyse(write("report.pdf", body))
+
+    assert report.data["entropy"]["overall_ratio"] < 0.9
+    assert "entropy_hotspot" in {f["key"] for f in report.findings}
+
+
 def test_a_hot_region_inside_a_compressed_format_still_fires(write):
     """Withholding the whole-file finding does not withhold the windowed one.
     An appended payload in a PNG is exactly the shape `entropy_hotspot`

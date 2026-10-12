@@ -68,7 +68,14 @@ DEFAULT_CONFIG = {
     # The windowed findings are unaffected. A hot region inside an otherwise
     # quiet file still means something here: it is how an appended payload
     # shows up in a PNG.
-    "compressed_families": ["zip", "gzip", "png", "jpeg", "gif"],
+    #
+    # PDF was added in v0.5.7 on measurement rather than on principle. It is
+    # not uniformly compressed the way a GZIP stream is: it is a text skeleton
+    # around compressed object streams. But over 113 real PDFs the whole-file
+    # ratio had a median of 0.996 of what random data of that length reaches,
+    # and `high_file_entropy` fired on 94.7% of them. A finding that fires on
+    # nineteen files in twenty of a format says something about the format.
+    "compressed_families": ["zip", "gzip", "png", "jpeg", "gif", "pdf"],
     "document_extensions": [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt",
                             ".jpg", ".png", ".rtf"],
     # Read sizing. The pipeline opens the file once and drives every
