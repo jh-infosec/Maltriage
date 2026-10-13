@@ -1,5 +1,68 @@
 # Changelog
 
+## Version 0.5.9 - a corpus an antivirus is eating
+
+Groundwork for a labelled malicious corpus, which is what both open entropy
+decisions have been waiting on. The first thing it needs is not a feature for
+handling samples. It is a way to notice when they are gone.
+
+### The problem
+
+Standard practice for storing samples is a password-protected archive,
+because that is what stops the scanner removing them. This tool cannot read
+an encrypted archive, so a corpus stored safely is a corpus it cannot
+measure. Stored unencrypted, the scanner quarantines files, and this project
+already decided it will not recommend antivirus exclusions.
+
+A file quarantined during a run raises `OSError`, lands in `incomplete`, and
+is visible. A file quarantined between runs simply is not in the listing, and
+the denominator shrinks with nothing said.
+
+That is biased in the direction that flatters the tool. The samples an
+antivirus takes first are the ones it recognised, which are disproportionately
+the ones a triage tool would also have flagged. A recall figure computed over
+the survivors is a recall figure over the hard cases only.
+
+### The change
+
+**`--write-manifest PATH` and `--manifest PATH`.** The first records the
+SHA-256 of every file scanned. The second compares a later run against it and
+reports what is missing, above the rates rather than below them, because a
+run that lost files is a run whose denominator is wrong and that has to be
+read before the numbers it produced.
+
+```
+  benign manifest: 3 of 5, 2 MISSING
+```
+
+Files added since the manifest are counted separately from files lost.
+Reporting them as one number would hide a corpus that did both at once.
+
+**`--write-manifest` is refused with `--limit`.** That combination is a
+mistake which produces a plausible file rather than an error: a manifest of
+500 sampled files is indistinguishable from a manifest of a 500 file corpus,
+and every later run would report thousands missing.
+
+**The manifest carries hashes and nothing else.** It is meant to be committed
+beside a measurement, and a list of the filenames in a malicious corpus is a
+description of somebody's sample collection. The hashes the run keeps in
+memory for the comparison are deliberately absent from `to_dict`: `--per-file`
+is opt-in for exactly that reason and this must not become a back door into
+it.
+
+### Also
+
+Eight ` -- ` sequences had crept back into comments and docstrings written
+since the dash cleanup, five of them in code added in v0.5.0 and later. All
+mine. Replaced, with the same per-file line-count assertion the first cleanup
+used after a `\s*` in the regex joined lines.
+
+### Verified
+
+515 tests pass. Mutation testing caught 9 of 9, including the two worth
+naming: the hash list leaking into the artefact, and `missing` counted the
+wrong way round.
+
 ## Version 0.5.8 - the documents were right and I was wrong twice
 
 The document corpus from v0.5.7 drilled down to actual values. 186 files: 113

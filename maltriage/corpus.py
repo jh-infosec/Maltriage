@@ -2,7 +2,7 @@
 Corpus harness: what the findings actually cost.
 
 Points maltriage at directories of files whose nature you already know, and
-answers the question every threshold in this project has been deferring --
+answers the question every threshold in this project has been deferring:
 how often does each finding key fire on something that is fine?
 
 
@@ -17,7 +17,7 @@ A corpus root holds directories named for what is in them:
 Anything in a directory not named for a label is ignored rather than guessed
 at, because a corpus whose ground truth is inferred is not ground truth.
 
-That layout is for a corpus you are assembling. For one you already have --
+That layout is for a corpus you are assembling. For one you already have,
 a system directory, a package cache, a software library - name the label
 instead of building the directory:
 
@@ -63,6 +63,7 @@ that, and it is off unless asked for.
 
 from __future__ import annotations
 
+import json
 import random
 import time
 from dataclasses import dataclass, field
@@ -148,6 +149,18 @@ class CorpusResult:
     #: Recorded because a rate over a filtered population is a different
     #: claim, and the filter has to survive into the artefact.
     selected_extensions: list[str] = field(default_factory=list)
+    #: Every scanned file's SHA-256, per label. Held so a run can be compared
+    #: against a manifest written by an earlier one, and deliberately absent
+    #: from `to_dict`: a per-file list is what `--per-file` is opt-in for, and
+    #: this must not become a back door into it.
+    scanned: dict[str, list[str]] = field(default_factory=dict)
+    #: Manifest comparison, present only when one was supplied. `missing` is
+    #: the count of hashes the manifest expected and this run did not see.
+    #: It exists because a corpus of samples is a corpus an antivirus is
+    #: actively removing files from, and a denominator that shrinks quietly
+    #: is the one failure a rate must not have. The files that go first are
+    #: the ones the scanner recognised, which biases recall upward.
+    manifest: dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_files(self) -> int:
@@ -287,6 +300,52 @@ def named_files(sources: dict[str, list[Path]]) -> list[tuple[str, Path]]:
     return found
 
 
+def write_manifest(result: CorpusResult, path: Path) -> None:
+    """Record what this corpus held, as hashes and nothing else.
+
+    No names and no paths. A manifest listing the filenames of a malicious
+    corpus is a description of somebody's sample collection, and this file is
+    meant to be committed beside a measurement.
+    """
+    payload = {
+        "version": 1,
+        "labels": {label: sorted(digests)
+                   for label, digests in sorted(result.scanned.items())},
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def read_manifest(path: Path) -> dict[str, set[str]]:
+    """A manifest as sets of hashes, per label."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or "labels" not in payload:
+        raise ValueError(f"not a corpus manifest: {path}")
+    return {label: set(digests)
+            for label, digests in (payload["labels"] or {}).items()}
+
+
+def compare_manifest(result: CorpusResult,
+                     expected: dict[str, set[str]]) -> dict[str, Any]:
+    """What this run saw against what the manifest said was there.
+
+    `missing` is the number that were expected and not seen. On a corpus an
+    antivirus is quarantining from, that number is the measurement's
+    integrity: the samples it takes first are the ones it recognised, so a
+    recall figure computed over what survived is biased upward.
+    """
+    out: dict[str, Any] = {}
+    for label in sorted(set(expected) | set(result.scanned)):
+        want = expected.get(label, set())
+        seen = set(result.scanned.get(label, []))
+        out[label] = {
+            "expected": len(want),
+            "seen": len(seen),
+            "missing": len(want - seen),
+            "unexpected": len(seen - want),
+        }
+    return out
+
+
 def _normalise_extensions(extensions: list[str]) -> list[str]:
     """`docx`, `.docx` and `.DOCX` are one selection, written three ways.
 
@@ -398,6 +457,10 @@ def _record(result: CorpusResult, label: str, report: Report,
     family = _family(report)
     by_family = result.families.setdefault(label, {})
     by_family[family] = by_family.get(family, 0) + 1
+
+    digest = (report.data.get("hashes") or {}).get("sha256")
+    if digest:
+        result.scanned.setdefault(label, []).append(digest)
 
     # Once per file per key, not once per finding. A file with forty
     # `yara_match` findings is one file that matched rules, and counting the
@@ -568,6 +631,17 @@ def render(result: CorpusResult) -> str:
     lines.append(f"  {result.total_bytes / 1e6:.1f} MB in {result.elapsed:.1f}s "
                  f"({speed['bytes_per_second'] / 1e6:.1f} MB/s, "
                  f"{speed['files_per_second']:.0f} files/s)")
+
+    for label, counts in sorted(result.manifest.items()):
+        # Loud, and above the rates rather than below them. A run that lost
+        # files is a run whose denominator is wrong, and that has to be read
+        # before the numbers it produced.
+        state = (f"{counts['missing']} MISSING" if counts["missing"]
+                 else "all present")
+        extra = (f", {counts['unexpected']} not in the manifest"
+                 if counts["unexpected"] else "")
+        lines.append(f"  {label} manifest: {counts['seen']} of "
+                     f"{counts['expected']}, {state}{extra}")
 
     fpr = result.false_positive_rate()
     if fpr is None:

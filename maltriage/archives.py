@@ -143,7 +143,7 @@ def safe_member_path(root: Path, name: str) -> Path | None:
     letter, a UNC path, any `..` segment, an empty or dot-only name, and
     anything whose resolved location is not under `root`. The last check is
     the one that matters, because the others can be spelled in ways nobody
-    enumerates correctly -- mixed separators, `..` after a symlink, a name
+    enumerates correctly - mixed separators, `..` after a symlink, a name
     that is harmless until the filesystem normalises it.
     """
     if not name or name in (".", ".."):
@@ -195,7 +195,7 @@ class ArchiveExtractor(RandomAccessExtractor):
 
     Produces no findings about what is *inside* a member: the pipeline
     analyses each staged file and attaches the result as a child report. What
-    this extractor reports is the container's own behaviour -- an entry that
+    this extractor reports is the container's own behaviour - an entry that
     tries to escape, a ratio that only a bomb reaches, an encrypted member
     nothing can read, and everything the budget refused.
     """
@@ -371,7 +371,7 @@ class ArchiveExtractor(RandomAccessExtractor):
             # Both halves: where the bytes are now, and where they came from.
             # The second is taken from the container rather than from the
             # staging path, because a path is spelled by the filesystem that
-            # holds it -- on Windows that produced `lib\thing.bin` for a ZIP
+            # holds it - on Windows that produced `lib\thing.bin` for a ZIP
             # entry the archive itself calls `lib/thing.bin`, so the same
             # container described itself differently depending on who scanned
             # it.

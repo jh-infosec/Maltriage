@@ -114,7 +114,7 @@ class Report:
 
         Children count. A zip is a wrapper, and a gate that scored the wrapper
         rather than its contents would exit clean on an installer carrying a
-        dropper -- which is the case archive recursion exists for. The
+        dropper - which is the case archive recursion exists for. The
         propagation is here rather than in the CLI because every consumer of a
         report needs the same answer: the corpus harness, the envelope and the
         exit code all ask this property what the file is worth.

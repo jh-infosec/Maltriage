@@ -88,7 +88,7 @@ def analyse(
     caller analyses a file, and whether that file turns out to contain others
     is not something the caller should have to know about. They are passed
     down rather than rebuilt per archive because a budget that resets at every
-    container is not a budget -- a thousand archives of a thousand entries is
+    container is not a budget - a thousand archives of a thousand entries is
     the same attack as one enormous member.
     """
     path = Path(path)

@@ -330,6 +330,15 @@ def cmd_corpus(args: argparse.Namespace) -> int:
               f"0 and 1, not {ceiling}", file=sys.stderr)
         return EXIT_USAGE
 
+    # Checked before the scan, like the two above, because this one is a
+    # mistake that produces a plausible file rather than an error: a manifest
+    # of 500 sampled files looks exactly like a manifest of a 500 file corpus
+    # and every later run would report thousands missing.
+    if args.write_manifest and args.limit is not None:
+        print(f"{APP_NAME}: --write-manifest records the whole corpus, so it "
+              "cannot be combined with --limit", file=sys.stderr)
+        return EXIT_USAGE
+
     if args.limit is not None and args.limit < 1:
         print(f"{APP_NAME}: --limit is a number of files per label, "
               f"not {args.limit}", file=sys.stderr)
@@ -388,11 +397,23 @@ def cmd_corpus(args: argparse.Namespace) -> int:
                   file=sys.stderr)
         return EXIT_USAGE
 
+    # Before the report, because it changes how the report should be read.
+    if args.manifest:
+        try:
+            expected = corpus_module.read_manifest(args.manifest)
+        except (OSError, ValueError, json.JSONDecodeError) as problem:
+            print(f"{APP_NAME}: {problem}", file=sys.stderr)
+            return EXIT_USAGE
+        result.manifest = corpus_module.compare_manifest(result, expected)
+
     if not args.quiet:
         print(corpus_module.render(result))
         if args.counterfactual:
             print()
             print(corpus_module.render_counterfactual(result))
+
+    if args.write_manifest:
+        corpus_module.write_manifest(result, args.write_manifest)
 
     if args.json:
         args.json.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
@@ -479,6 +500,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "default: a corpus report is kept and compared, "
                              "and a corpus directory describes somebody's "
                              "sample collection")
+    corpus.add_argument("--manifest", type=Path, metavar="PATH",
+                        help="compare this run against a manifest written "
+                             "earlier, and report how many files it expected "
+                             "and did not see. A corpus of samples is one an "
+                             "antivirus removes files from, and the ones it "
+                             "takes first are the ones it recognised")
+    corpus.add_argument("--write-manifest", type=Path, metavar="PATH",
+                        help="record the SHA-256 of every file scanned, and "
+                             "nothing else. Refused with --limit: a manifest "
+                             "of a sample is not a manifest of the corpus")
     corpus.add_argument("--extension", action="append", metavar="EXT",
                         help="measure only files with this extension, with or "
                              "without the dot and in any case. Repeatable. "

@@ -282,7 +282,7 @@ DEFAULT_CONFIG = {
 
     # What counts as a decompression bomb. The ratio is measured from bytes
     # actually written over bytes the container occupies, never from the sizes
-    # the archive declares -- the declared size is the number a bomb lies
+    # the archive declares - the declared size is the number a bomb lies
     # about. Below the floor the ratio is not judged at all: a 4 KB text file
     # compressing 500:1 is a text file.
     "archive_ratio_floor_bytes": 1048576,

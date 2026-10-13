@@ -4681,6 +4681,136 @@ def test_corpus_command_says_when_a_selection_matched_nothing(tmp_path, capsys):
     assert "no files matching .docx were found" in capsys.readouterr().err
 
 
+def _manifest_corpus(tmp_path, count=5):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    for index in range(count):
+        (benign / f"f{index}.bin").write_bytes(f"sample {index}".encode() * 40)
+    return benign
+
+
+def test_a_manifest_notices_a_corpus_that_lost_files(tmp_path):
+    """The reason this exists. A corpus of samples is a corpus an antivirus
+    removes files from, and the ones it takes first are the ones it
+    recognised - so a recall figure over what survived is biased upward by
+    exactly the files that would have proved the tool works."""
+    benign = _manifest_corpus(tmp_path)
+    first = corpus_module.scan_corpus(tmp_path)
+    manifest = tmp_path / "corpus.manifest.json"
+    corpus_module.write_manifest(first, manifest)
+
+    (benign / "f1.bin").unlink()
+    (benign / "f3.bin").unlink()
+    second = corpus_module.scan_corpus(tmp_path)
+    second.manifest = corpus_module.compare_manifest(
+        second, corpus_module.read_manifest(manifest))
+
+    assert second.manifest["benign"] == {
+        "expected": 5, "seen": 3, "missing": 2, "unexpected": 0}
+    assert "benign manifest: 3 of 5, 2 MISSING" in corpus_module.render(second)
+
+
+def test_a_manifest_carries_hashes_and_nothing_else(tmp_path):
+    """It is meant to be committed beside a measurement, and a list of the
+    filenames in a malicious corpus is a description of somebody's sample
+    collection."""
+    benign = _manifest_corpus(tmp_path, count=3)
+    result = corpus_module.scan_corpus(tmp_path)
+    manifest = tmp_path / "corpus.manifest.json"
+    corpus_module.write_manifest(result, manifest)
+
+    text = manifest.read_text(encoding="utf-8")
+    assert str(tmp_path) not in text
+    for path in benign.iterdir():
+        assert path.name not in text
+    payload = json.loads(text)
+    assert payload["version"] == 1
+    assert len(payload["labels"]["benign"]) == 3
+    assert all(len(digest) == 64 for digest in payload["labels"]["benign"])
+
+
+def test_a_manifest_says_nothing_when_the_corpus_is_intact(tmp_path):
+    _manifest_corpus(tmp_path, count=4)
+    result = corpus_module.scan_corpus(tmp_path)
+    manifest = tmp_path / "corpus.manifest.json"
+    corpus_module.write_manifest(result, manifest)
+
+    again = corpus_module.scan_corpus(tmp_path)
+    again.manifest = corpus_module.compare_manifest(
+        again, corpus_module.read_manifest(manifest))
+
+    assert again.manifest["benign"]["missing"] == 0
+    assert "all present" in corpus_module.render(again)
+
+
+def test_a_file_added_since_the_manifest_is_counted_separately(tmp_path):
+    """Growing is not the same failure as shrinking, and reporting them as
+    one number would hide a corpus that did both at once."""
+    benign = _manifest_corpus(tmp_path, count=3)
+    manifest = tmp_path / "corpus.manifest.json"
+    corpus_module.write_manifest(corpus_module.scan_corpus(tmp_path), manifest)
+
+    (benign / "f0.bin").unlink()
+    (benign / "new.bin").write_bytes(b"a later arrival" * 40)
+    result = corpus_module.scan_corpus(tmp_path)
+    result.manifest = corpus_module.compare_manifest(
+        result, corpus_module.read_manifest(manifest))
+
+    assert result.manifest["benign"] == {
+        "expected": 3, "seen": 3, "missing": 1, "unexpected": 1}
+    assert "1 MISSING, 1 not in the manifest" in corpus_module.render(result)
+
+
+def test_the_hash_list_never_reaches_the_corpus_artefact(tmp_path):
+    """`--per-file` is opt-in because a corpus directory describes somebody's
+    sample collection. The hashes this run keeps for manifest comparison must
+    not become a back door into that."""
+    _manifest_corpus(tmp_path, count=3)
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert len(result.scanned["benign"]) == 3
+    assert "scanned" not in result.to_dict()
+    assert "per_file" not in result.to_dict()
+
+
+def test_writing_a_manifest_of_a_sample_is_refused(tmp_path, capsys):
+    """A mistake that produces a plausible file rather than an error: a
+    manifest of 500 sampled files looks exactly like a manifest of a 500 file
+    corpus, and every later run would report thousands missing."""
+    _manifest_corpus(tmp_path)
+    code = cli.main(["corpus", str(tmp_path), "--limit", "2",
+                     "--write-manifest", str(tmp_path / "m.json")])
+
+    assert code == cli.EXIT_USAGE
+    assert "cannot be combined with --limit" in capsys.readouterr().err
+    assert not (tmp_path / "m.json").exists()
+
+
+def test_a_manifest_that_is_not_one_is_a_usage_error(tmp_path, capsys):
+    _manifest_corpus(tmp_path)
+    bad = tmp_path / "notes.json"
+    bad.write_text('{"hashes": []}', encoding="utf-8")
+
+    code = cli.main(["corpus", str(tmp_path), "--manifest", str(bad)])
+
+    assert code == cli.EXIT_USAGE
+    assert "not a corpus manifest" in capsys.readouterr().err
+
+
+def test_the_corpus_command_writes_and_then_checks_a_manifest(tmp_path, capsys):
+    _manifest_corpus(tmp_path)
+    manifest = tmp_path / "m.json"
+
+    assert cli.main(["corpus", str(tmp_path),
+                     "--write-manifest", str(manifest)]) == cli.EXIT_CLEAN
+    capsys.readouterr()
+    (tmp_path / "benign" / "f2.bin").unlink()
+    assert cli.main(["corpus", str(tmp_path),
+                     "--manifest", str(manifest)]) == cli.EXIT_CLEAN
+
+    assert "benign manifest: 4 of 5, 1 MISSING" in capsys.readouterr().out
+
+
 def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):
     target = tmp_path / "file.bin"
     target.write_bytes(b"x")
@@ -5421,7 +5551,7 @@ def test_a_members_name_is_spelled_by_the_container_not_the_filesystem(write):
 
 def test_a_child_report_carries_no_temporary_path(write):
     """The staging directory is deleted a moment after the scan, so a real
-    path would name a file that no longer exists -- and would put the scanning
+    path would name a file that no longer exists - and would put the scanning
     machine's temp directory into a report that gets shared."""
     body = _zip_bytes([("thing.bin", b"content")])
     report = analyse(write("bundle.zip", body))
@@ -5687,7 +5817,7 @@ def test_a_symlinked_directory_inside_the_root_is_refused(tmp_path):
 
 def test_a_forged_declared_size_does_not_invent_a_bomb(write):
     """The ratio is computed from bytes written, so a container claiming its
-    members are enormous cannot make itself look like a bomb -- and, the other
+    members are enormous cannot make itself look like a bomb - and, the other
     way round, cannot hide one by understating them."""
     body = bytearray(_zip_bytes([("small.bin", b"a" * 64)]))
     # Overwrite the uncompressed size in both the local header and the central
