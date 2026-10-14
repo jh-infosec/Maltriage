@@ -4811,6 +4811,157 @@ def test_the_corpus_command_writes_and_then_checks_a_manifest(tmp_path, capsys):
     assert "benign manifest: 4 of 5, 1 MISSING" in capsys.readouterr().out
 
 
+_OOXML_PARTS = [("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+                ("word/document.xml", b"<?xml version='1.0'?><w:document/>" + b" " * 200)]
+_VBA_PART = ("word/vbaProject.bin", b"\xd0\xcf\x11\xe0" + b"\x00" * 400)
+
+
+def _ooxml(write, name, parts):
+    return write(name, _zip_bytes(parts))
+
+
+def test_a_document_is_told_from_a_plain_archive_by_its_members(write):
+    """A DOCX, a JAR and an APK are the same four bytes, so 58 real documents
+    came back from the corpus as `zip 58`, which answered nothing about
+    documents. The answer lives in the member names and nowhere else."""
+    document = analyse(_ooxml(write, "report.docx", _OOXML_PARTS))
+    archive = analyse(write("backup.zip", _zip_bytes([("notes.txt", b"ordinary" * 40)])))
+    jar = analyse(write("lib.jar", _zip_bytes([
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"),
+        ("a/B.class", b"\xca\xfe\xba\xbe" + bytes(200))])))
+
+    assert document.data["archive"]["container_kind"] == "ooxml"
+    assert jar.data["archive"]["container_kind"] == "jar"
+    assert archive.data["archive"]["container_kind"] is None
+    # The magic number still says zip for all three, and still should.
+    for report in (document, archive, jar):
+        assert report.data["filetype"]["family"] == "zip"
+
+
+def test_the_kind_is_read_from_members_not_from_the_extension(write):
+    """Renaming a DOCX does not make it a ZIP, and renaming a ZIP does not
+    make it a document. The whole project reads bytes rather than names and
+    this is no exception."""
+    renamed = analyse(_ooxml(write, "invoice.zip", _OOXML_PARTS))
+    pretender = analyse(write("report.docx", _zip_bytes([("a.txt", b"nothing" * 40)])))
+
+    assert renamed.data["archive"]["container_kind"] == "ooxml"
+    assert pretender.data["archive"]["container_kind"] is None
+
+
+def test_the_corpus_breakdown_reports_the_document_rather_than_the_zip(write):
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign",
+                          analyse(_ooxml(write, "report.docx", _OOXML_PARTS)), False)
+    corpus_module._record(result, "benign",
+                          analyse(write("backup.zip",
+                                        _zip_bytes([("a.txt", b"ordinary" * 40)]))), False)
+
+    assert result.families == {"benign": {"ooxml": 1, "zip": 1}}
+
+
+def test_a_macro_project_is_reported_when_the_name_allows_it(write):
+    """Ordinary in most organisations, so `low`. This project does not put a
+    key at the gate without a false positive rate behind it, and macros are
+    not an exception to that because they feel dangerous."""
+    report = analyse(_ooxml(write, "budget.docm", _OOXML_PARTS + [_VBA_PART]))
+
+    assert report.data["archive"]["macro_project"] is True
+    assert report.data["archive"]["macro_capable_name"] is True
+    finding = next(f for f in report.findings if f["key"] == "ooxml_macros")
+    assert finding["severity"] == "low"
+
+
+def test_a_macro_project_under_a_name_that_forbids_it_is_its_own_finding(write):
+    """The more interesting half: the name promises a document that cannot
+    run code and the content carries code. Separated from the ordinary case
+    so a corpus can price them apart, and held at `low` for now for the same
+    reason every other key here was."""
+    report = analyse(_ooxml(write, "invoice.docx", _OOXML_PARTS + [_VBA_PART]))
+
+    keys = {f["key"] for f in report.findings}
+    assert "ooxml_macros_unexpected" in keys
+    assert "ooxml_macros" not in keys
+    assert report.data["archive"]["macro_capable_name"] is False
+
+
+def test_a_document_without_macros_says_nothing_about_macros(write):
+    report = analyse(_ooxml(write, "report.docx", _OOXML_PARTS))
+    assert report.data["archive"]["macro_project"] is False
+    assert not [f for f in report.findings if f["key"].startswith("ooxml_macros")]
+
+
+def test_the_macro_member_is_found_wherever_it_sits(write):
+    """Word puts it under `word/`, Excel under `xl/`, and nothing stops a
+    container putting it somewhere else entirely."""
+    for part in ("xl/vbaProject.bin", "ppt/vbaProject.bin", "vbaProject.bin",
+                 "word/VBAPROJECT.BIN"):
+        report = analyse(_ooxml(write, "book.xlsm",
+                                _OOXML_PARTS + [(part, b"\xd0\xcf\x11\xe0" + bytes(400))]))
+        assert report.data["archive"]["macro_project"] is True, part
+
+
+def test_a_member_name_spelled_with_backslashes_still_counts(write):
+    """The v0.5.0 lesson, one layer up. A container writes whatever separator
+    it likes into the name, and `zipfile` preserves it, so a document storing
+    `word\\vbaProject.bin` would have read as macro-free against a check that
+    only knew about forward slashes."""
+    report = analyse(_ooxml(write, "budget.docm", _OOXML_PARTS + [
+        ("word\\vbaProject.bin", b"\xd0\xcf\x11\xe0" + bytes(400))]))
+    assert report.data["archive"]["macro_project"] is True
+
+
+def test_a_member_merely_named_after_the_macro_project_does_not_count(write):
+    """The check is the member's own name, not a substring of its path. A
+    screenshot called `vbaProject.bin.png` is a screenshot, and a rule that
+    matched anywhere in the name would report macros on a document that has
+    none."""
+    report = analyse(_ooxml(write, "report.docx", _OOXML_PARTS + [
+        ("word/media/vbaProject.bin.png", b"\x89PNG\r\n\x1a\n" + bytes(200)),
+        ("word/notvbaProject.bin", b"\x00" * 200)]))
+
+    assert report.data["archive"]["macro_project"] is False
+    assert not [f for f in report.findings if f["key"].startswith("ooxml_macros")]
+
+
+def test_a_truncated_listing_cannot_prove_there_are_no_macros(write):
+    """Absence of evidence. A container built to put its VBA project last
+    would read as clean once the budget stopped the walk, so the report says
+    the absence proves nothing rather than letting it read as a clean bill."""
+    parts = _OOXML_PARTS + [(f"word/media/image{n}.png", b"\x89PNG\r\n\x1a\n" + bytes(64))
+                            for n in range(40)]
+    report = analyse(_ooxml(write, "report.docx", parts),
+                     config={**DEFAULT_CONFIG, "archive_max_entries": 5})
+    archive = report.data["archive"]
+
+    assert archive["truncated"] is True
+    assert archive["macro_project"] is False
+    assert any("not evidence that there is none" in problem
+               for problem in archive["parse_errors"])
+
+
+def test_a_truncated_listing_that_did_find_macros_says_so_plainly(write):
+    """The caveat is about an absence. Having found one, there is nothing
+    uncertain left to say."""
+    parts = [_OOXML_PARTS[0], _VBA_PART] + [
+        (f"word/media/image{n}.png", b"\x89PNG\r\n\x1a\n" + bytes(64)) for n in range(40)]
+    report = analyse(_ooxml(write, "report.docm", parts),
+                     config={**DEFAULT_CONFIG, "archive_max_entries": 5})
+    archive = report.data["archive"]
+
+    assert archive["truncated"] is True
+    assert archive["macro_project"] is True
+    assert not any("not evidence" in problem for problem in archive["parse_errors"])
+
+
+def test_nothing_ooxml_reaches_the_gate(write):
+    """Both macro keys are `low` on purpose. Raising either is a decision a
+    document corpus makes, not one an argument about macros makes."""
+    report = analyse(_ooxml(write, "invoice.docx", _OOXML_PARTS + [_VBA_PART]))
+    worst = {f["severity"] for f in report.findings if f["key"].startswith("ooxml")}
+    assert worst <= {"info", "low"}
+
+
 def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):
     target = tmp_path / "file.bin"
     target.write_bytes(b"x")

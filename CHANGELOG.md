@@ -1,5 +1,60 @@
 # Changelog
 
+## Version 0.5.10 - a DOCX, a JAR and an APK are the same four bytes
+
+The document corpus reported `zip 58`, which answers nothing about documents.
+A ZIP magic number cannot tell a Word file from a Java archive from an
+Android package, and the answer is not in the extension either, because
+renaming a DOCX does not make it a ZIP.
+
+It is in the member names, which archive recursion already reads.
+
+### What a container turns out to be
+
+**`container_kind`**, read from the members: `ooxml` when
+`[Content_Types].xml` is present, `jar` when `META-INF/MANIFEST.MF` is, and
+absent when a ZIP is just a ZIP. The corpus breakdown reports it, so 58
+documents now read as `ooxml 58`.
+
+The magic number still says `zip` for all of them, and still should. This is
+a refinement drawn from bytes, not a replacement of one guess with another.
+
+### Macros, in two findings rather than one
+
+**`ooxml_macros`** when a compiled VBA project is present and the extension
+already says it may be. **`ooxml_macros_unexpected`** when it is present and
+the name says it should not be: a document whose name promises it cannot run
+code, carrying code.
+
+The second is the same shape as `extension_mismatch`, which is `high` in this
+project because content that lies about what it is deserves a human on that
+alone. **Both are `low` anyway.** This project does not put a key at the gate
+without a false positive rate behind it, and macros do not get an exemption
+for feeling dangerous. The document corpus decides, through the
+counterfactual, not an argument about macros.
+
+The two are separate keys so a corpus can price them apart. Reported as one,
+the ordinary case would bury the interesting one.
+
+### Absence of evidence
+
+A listing stopped by the budget cannot prove there are no macros. A container
+built to put its VBA project last would read as clean, so when the walk was
+truncated and nothing was found, the report says the absence proves nothing.
+When macros were found, it says nothing extra: there is no uncertainty left.
+
+### Verified
+
+527 tests pass. Mutation testing caught 12 of 12 after two genuine gaps were
+closed, and both were worth having:
+
+- A member name spelled `word\vbaProject.bin`. `zipfile` preserves whatever
+  separator the container wrote, so the v0.5.0 backslash lesson applied one
+  layer up and a macro-carrying document would have read as clean.
+- A screenshot called `vbaProject.bin.png`. The check is the member's own
+  name, not a substring of its path, and matching anywhere would report
+  macros on a document that has none.
+
 ## Version 0.5.9 - a corpus an antivirus is eating
 
 Groundwork for a labelled malicious corpus, which is what both open entropy

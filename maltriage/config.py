@@ -76,6 +76,14 @@ DEFAULT_CONFIG = {
     # and `high_file_entropy` fired on 94.7% of them. A finding that fires on
     # nineteen files in twenty of a format says something about the format.
     "compressed_families": ["zip", "gzip", "png", "jpeg", "gif", "pdf"],
+    # Extensions whose name promises the file may carry macros. The point of
+    # the list is the disagreement: a `.docx` holding a compiled VBA project
+    # is a document whose name says it cannot run code and whose content says
+    # it can. In config rather than in code so it can grow without a release,
+    # and because an organisation that has decided `.doc` is macro-capable in
+    # its environment is not wrong.
+    "macro_capable_extensions": [".docm", ".dotm", ".xlsm", ".xltm", ".xlam",
+                                 ".pptm", ".potm", ".ppsm", ".ppam"],
     "document_extensions": [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt",
                             ".jpg", ".png", ".rtf"],
     # Read sizing. The pipeline opens the file once and drives every

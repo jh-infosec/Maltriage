@@ -48,7 +48,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .base import RandomAccessExtractor
-from .config import config_bool, config_int
+from .config import config_bool, config_int, config_list
 from .models import mk_finding
 
 #: Families this extractor will open. RAR and 7z are recognised by the
@@ -260,6 +260,23 @@ class ArchiveExtractor(RandomAccessExtractor):
 
         if budget.exhausted:
             data["parse_errors"].extend(f"budget: {why}" for why in budget.exhausted)
+
+        # What kind of container this turned out to be, read from the member
+        # names rather than from the extension. A DOCX, a JAR and an APK are
+        # all ZIP files, and the magic number cannot tell them apart - which
+        # is why a corpus of 58 real documents reported `zip 58` and nothing
+        # more useful.
+        data["container_kind"] = _container_kind(data["entries"])
+        data["macro_project"] = _has_macro_project(data["entries"])
+        data["macro_capable_name"] = (
+            path.suffix.lower() in config_list(config, "macro_capable_extensions", []))
+        if data["truncated"] and not data["macro_project"]:
+            # Absence of evidence. The listing stopped early, so "no macro
+            # project" means "none among the members we got to", and a
+            # container built to put its VBA last would read as clean.
+            data["parse_errors"].append(
+                "members: the listing stopped at the budget, so finding no "
+                "macro project is not evidence that there is none")
         return data
 
     # One reader per format. Each one yields the same shape so the findings
@@ -382,6 +399,31 @@ class ArchiveExtractor(RandomAccessExtractor):
                  config: dict[str, Any]) -> list[dict[str, Any]]:
         out = []
 
+        if data.get("macro_project"):
+            # Both at `low`, and that is a decision rather than an oversight.
+            # A macro-enabled document is ordinary in most organisations, and
+            # this project does not put a key at the gate without a false
+            # positive rate behind it. The counterfactual over a document
+            # corpus is what should raise either of these, not an argument
+            # about how bad macros are.
+            if data.get("macro_capable_name"):
+                out.append(mk_finding(
+                    self.name, "ooxml_macros",
+                    "the document carries a compiled VBA project, which its "
+                    "extension already says it may", "low"))
+            else:
+                # The more interesting half. `extension_mismatch` is high in
+                # this project because content that lies about what it is
+                # deserves a human on that alone, and this is the same shape
+                # one layer in: the name promises a document that cannot run
+                # code and the content carries code. Held at `low` until a
+                # corpus says what it costs, which is the same restraint
+                # every other key here was given.
+                out.append(mk_finding(
+                    self.name, "ooxml_macros_unexpected",
+                    "the document carries a compiled VBA project, and its "
+                    "extension says it should not be able to", "low"))
+
         for refusal in data.get("refused") or []:
             if refusal["reason"] == "path escapes the container":
                 # High, and the second finding in this project to earn it.
@@ -460,6 +502,45 @@ def _gzip_stored_name(path: Path) -> str | None:
         return name.decode("utf-8", "replace") or None
     except OSError:
         return None
+
+
+#: The member that makes a ZIP an Office Open XML document. Every OOXML file
+#: has one at the root: it is the part map the format is built around, and
+#: nothing else puts a file at that name.
+OOXML_MARKER = "[content_types].xml"
+
+#: The same question for a Java archive, which is the other thing a ZIP in an
+#: ordinary corpus usually turns out to be.
+JAR_MARKER = "meta-inf/manifest.mf"
+
+#: The compiled VBA project. Its presence is what "this document carries
+#: macros" means structurally, whatever the extension claims.
+MACRO_MEMBER = "vbaproject.bin"
+
+
+def _member_names(entries: list[dict[str, Any]]) -> list[str]:
+    return [str(entry.get("name") or "").replace("\\", "/").lower()
+            for entry in entries]
+
+
+def _container_kind(entries: list[dict[str, Any]]) -> str | None:
+    """What this ZIP actually is, or `None` when it is just a ZIP.
+
+    Read from member names, which is the only place the answer lives: the
+    magic number of a DOCX, a JAR, an APK and a backup are the same four
+    bytes.
+    """
+    names = _member_names(entries)
+    if OOXML_MARKER in names:
+        return "ooxml"
+    if JAR_MARKER in names:
+        return "jar"
+    return None
+
+
+def _has_macro_project(entries: list[dict[str, Any]]) -> bool:
+    return any(name.rsplit("/", 1)[-1] == MACRO_MEMBER
+               for name in _member_names(entries))
 
 
 def _inside(raw_name: str) -> str:

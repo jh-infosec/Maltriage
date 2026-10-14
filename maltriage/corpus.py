@@ -540,7 +540,16 @@ def _family(report: Report) -> str:
 
     A string either way rather than `None`, because this is a dictionary key
     and a corpus of files nothing recognises is a result worth reading.
+
+    A container that turned out to be something more specific is reported as
+    that. A DOCX, a JAR and an APK share a magic number, so 58 real documents
+    came back as `zip 58`, which answered nothing about documents. The
+    refinement still comes from the bytes: it is read from the member names,
+    not from the extension.
     """
+    kind = (report.data.get("archive") or {}).get("container_kind")
+    if kind:
+        return kind
     return (report.data.get("filetype") or {}).get("family") or "unknown"
 
 
