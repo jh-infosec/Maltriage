@@ -17,6 +17,7 @@ alongside the CHANGELOG entry that describes it.
 import ast
 import collections
 import gzip
+import hashlib
 import io
 import json
 import math
@@ -36,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from maltriage import apis
+from maltriage import known as known_module
 from maltriage import attack
 from maltriage import secrets as secrets_module
 from maltriage import envelope as envelope_module
@@ -66,7 +68,7 @@ from maltriage.extractors import (
     shannon,
 )
 from maltriage.models import (SCHEMA_VERSION, SEVERITIES, SEVERITY_RANK, Report,
-                              max_severity, mk_finding)
+                              at_gate, max_severity, mk_finding)
 from maltriage.extractors import default_extractors
 from maltriage.pipeline import analyse, analyse_directory
 from maltriage.config import (
@@ -4960,6 +4962,185 @@ def test_nothing_ooxml_reaches_the_gate(write):
     report = analyse(_ooxml(write, "invoice.docx", _OOXML_PARTS + [_VBA_PART]))
     worst = {f["severity"] for f in report.findings if f["key"].startswith("ooxml")}
     assert worst <= {"info", "low"}
+
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_a_vouched_for_file_still_reports_everything_it_found(write):
+    """The known-good set buys a build that does not fail. It does not buy a
+    file that looks clean: every finding is still there at its real severity,
+    and `report.severity` still says what the file is worth."""
+    path = write("invoice.pdf", b"MZ" + b"\x00" * 1024)
+    report = analyse(path)
+    assert report.severity == "high"
+
+    known_module.mark(report, {_sha256(path)})
+
+    assert report.data["known_good"]["matched"] is True
+    assert report.severity == "high"
+    assert "extension_mismatch" in {f["key"] for f in report.findings}
+    assert at_gate(report, cli.GATE_SEVERITY) is False
+
+
+def test_a_set_built_by_a_caller_may_be_spelled_in_upper_case(tmp_path):
+    """`load` lowercases what it reads, but `scan_files` takes a set from the
+    caller and nothing makes them use `load` to build it. A comparison that
+    assumed lowercase would vouch for nothing and say nothing."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    path = benign / "invoice.pdf"
+    path.write_bytes(b"MZ" + b"\x00" * 1024)
+
+    result = corpus_module.scan_corpus(tmp_path,
+                                       known_good={_sha256(path).upper()})
+
+    assert result.known_good == {"benign": 1}
+    assert result.flagged == {}
+
+
+def test_a_file_outside_the_set_is_untouched(write):
+    path = write("invoice.pdf", b"MZ" + b"\x00" * 1024)
+    report = analyse(path)
+    known_module.mark(report, {"0" * 64})
+
+    assert report.data["known_good"]["matched"] is False
+    assert at_gate(report, cli.GATE_SEVERITY) is True
+
+
+def test_an_archive_is_not_vouched_for_by_a_known_good_member(write, tmp_path):
+    """The file's own digest, not any member's. An installer carrying a
+    dropper is not known-good because its readme is."""
+    inner = write("notes.txt", b"an ordinary file" * 40)
+    path = write("bundle.zip", _zip_bytes([
+        ("notes.txt", inner.read_bytes()),
+        ("invoice.pdf", b"MZ" + b"\x00" * 1024)]))
+    report = analyse(path)
+
+    known_module.mark(report, {_sha256(inner)})
+
+    assert report.data["known_good"]["matched"] is False
+    assert at_gate(report, cli.GATE_SEVERITY) is True
+
+
+def test_the_exit_code_and_the_harness_agree_about_a_vouched_file(write, tmp_path):
+    """The v0.5.5 defect, which cost a release to find: two computations of
+    one question drifted apart. There is one now, and this pins that both
+    callers use it."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    path = benign / "invoice.pdf"
+    path.write_bytes(b"MZ" + b"\x00" * 1024)
+    vouched = {_sha256(path)}
+
+    result = corpus_module.scan_corpus(tmp_path, known_good=vouched)
+    report = analyse(path)
+    known_module.mark(report, vouched)
+
+    assert result.flagged == {}
+    assert at_gate(report, cli.GATE_SEVERITY) is False
+    assert result.known_good == {"benign": 1}
+    # The finding is still counted. What the set changed is the gate.
+    assert "extension_mismatch" in result.keys
+
+
+def test_the_corpus_says_how_many_it_was_told_to_let_through(write, tmp_path):
+    """A false positive rate computed after quietly removing files is not
+    one."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    for index in range(4):
+        (benign / f"f{index}.pdf").write_bytes(b"MZ" + bytes(1024) + bytes([index]))
+    vouched = {_sha256(benign / "f0.pdf"), _sha256(benign / "f1.pdf")}
+
+    result = corpus_module.scan_corpus(tmp_path, known_good=vouched)
+
+    assert result.known_good == {"benign": 2}
+    assert result.flagged == {"benign": 2}
+    assert result.false_positive_rate() == 0.5
+    assert "benign known-good: 2 file(s) vouched for" in corpus_module.render(result)
+    assert result.to_dict()["known_good"] == {"benign": 2}
+
+
+def test_a_vouched_file_is_not_a_sole_cause_or_a_newly_flagged_one(tmp_path):
+    """The marginal counts are about the gate, and a vouched file is not at
+    it. Counting one as the sole cause of a flag it does not produce would
+    put a number in the counterfactual that no change could ever realise."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    path = benign / "invoice.pdf"
+    path.write_bytes(b"MZ" + b"\x00" * 1024)
+
+    result = corpus_module.scan_corpus(tmp_path, known_good={_sha256(path)})
+
+    assert result.keys["extension_mismatch"].sole_cause == 0
+    for outcome in result.keys.values():
+        assert outcome.would_newly_flag == 0
+
+
+def test_nothing_is_vouched_for_without_a_set(tmp_path):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "invoice.pdf").write_bytes(b"MZ" + b"\x00" * 1024)
+
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.known_good == {}
+    assert result.flagged == {"benign": 1}
+    assert "known-good" not in corpus_module.render(result)
+
+
+def test_a_hash_list_reads_from_text_or_from_a_manifest(tmp_path):
+    digest = "a" * 64
+    text = tmp_path / "good.txt"
+    text.write_text(f"# from the build\n{digest.upper()}\n\n", encoding="utf-8")
+    manifest = tmp_path / "good.json"
+    manifest.write_text(json.dumps({"version": 1, "labels": {"benign": [digest]}}),
+                        encoding="utf-8")
+
+    assert known_module.load(text) == {digest}
+    assert known_module.load(manifest) == {digest}
+
+
+def test_a_list_this_tool_half_understood_is_refused(tmp_path):
+    """A list half of which is MD5 would otherwise load as a working set that
+    silently vouches for nothing, and the caller would never learn."""
+    bad = tmp_path / "good.txt"
+    bad.write_text("a" * 64 + "\n" + "b" * 32 + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not a SHA-256"):
+        known_module.load(bad)
+
+
+def test_an_empty_hash_list_is_refused(tmp_path):
+    empty = tmp_path / "good.txt"
+    empty.write_text("# nothing but a comment\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="holds no hashes"):
+        known_module.load(empty)
+
+
+def test_the_scan_command_lets_a_vouched_file_exit_clean(tmp_path, capsys):
+    path = tmp_path / "invoice.pdf"
+    path.write_bytes(b"MZ" + b"\x00" * 1024)
+    good = tmp_path / "good.txt"
+    good.write_text(_sha256(path) + "\n", encoding="utf-8")
+
+    assert cli.main(["scan", str(path)]) == cli.EXIT_FINDINGS
+    assert cli.main(["scan", str(path), "--known-good", str(good)]) == cli.EXIT_CLEAN
+    # And it still said what it found.
+    assert "extension_mismatch" in capsys.readouterr().out
+
+
+def test_the_scan_command_refuses_a_hash_list_it_cannot_read(tmp_path, capsys):
+    path = tmp_path / "a.bin"
+    path.write_bytes(b"hello" * 40)
+    bad = tmp_path / "good.txt"
+    bad.write_text("not a hash\n", encoding="utf-8")
+
+    assert cli.main(["scan", str(path), "--known-good", str(bad)]) == cli.EXIT_USAGE
+    assert "not a SHA-256" in capsys.readouterr().err
 
 
 def test_corpus_rejects_a_root_that_is_not_a_directory(tmp_path):

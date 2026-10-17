@@ -70,8 +70,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import known
 from .extractors import Extractor, default_extractors
-from .models import SEVERITY_RANK, Report
+from .models import SEVERITY_RANK, Report, at_gate as models_at_gate
 from .pipeline import analyse
 
 #: The severity at or above which a file is flagged. Mirrors `cli.GATE_SEVERITY`
@@ -149,6 +150,11 @@ class CorpusResult:
     #: Recorded because a rate over a filtered population is a different
     #: claim, and the filter has to survive into the artefact.
     selected_extensions: list[str] = field(default_factory=list)
+    #: Files of each label the caller's known-good set vouched for. They were
+    #: analysed in full and their findings are in the rates below; what the
+    #: set changed is whether they are held at the gate. Reported because a
+    #: false positive rate computed after quietly removing files is not one.
+    known_good: dict[str, int] = field(default_factory=dict)
     #: Every scanned file's SHA-256, per label. Held so a run can be compared
     #: against a manifest written by an earlier one, and deliberately absent
     #: from `to_dict`: a per-file list is what `--per-file` is opt-in for, and
@@ -232,6 +238,7 @@ class CorpusResult:
             # Always present, including as empty dictionaries, so a reader
             # comparing two results can tell "no containers" from "a result
             # written before anything counted them".
+            "known_good": dict(sorted(self.known_good.items())),
             "containers": dict(sorted(self.containers.items())),
             "members": dict(sorted(self.members.items())),
             "families": {label: dict(sorted(counts.items()))
@@ -391,13 +398,14 @@ def sample(items: list[tuple[str, Path]], limit: int,
 def scan_corpus(root: Path | str, config: dict[str, Any] | None = None,
                 extractors: list[Extractor] | None = None,
                 per_file: bool = False, limit: int | None = None,
-                extensions: list[str] | None = None) -> CorpusResult:
+                extensions: list[str] | None = None,
+                known_good: set[str] | None = None) -> CorpusResult:
     """Run maltriage over a labelled corpus and count what happened."""
     root = Path(root)
     if not root.is_dir():
         raise NotADirectoryError(f"not a directory: {root}")
     return scan_files(labelled_files(root), config, extractors, per_file, limit,
-                      extensions)
+                      extensions, known_good)
 
 
 def scan_files(items: Iterable[tuple[str, Path]],
@@ -405,7 +413,8 @@ def scan_files(items: Iterable[tuple[str, Path]],
                extractors: list[Extractor] | None = None,
                per_file: bool = False,
                limit: int | None = None,
-               extensions: list[str] | None = None) -> CorpusResult:
+               extensions: list[str] | None = None,
+               known_good: set[str] | None = None) -> CorpusResult:
     """Run maltriage over labelled files and count what happened.
 
     Extractors are built once and reused, which is the contract
@@ -423,6 +432,9 @@ def scan_files(items: Iterable[tuple[str, Path]],
     if limit is not None:
         items = sample(items, limit)
 
+    if known_good is not None:
+        known_good = known.normalise(known_good)
+
     extractors = extractors if extractors is not None else default_extractors()
     started = time.perf_counter()
 
@@ -435,6 +447,8 @@ def scan_files(items: Iterable[tuple[str, Path]],
             # shrink the denominator.
             result.incomplete["unreadable"] = result.incomplete.get("unreadable", 0) + 1
             continue
+        if known_good is not None:
+            known.mark(report, known_good)
         _record(result, label, report, per_file)
 
     result.elapsed = time.perf_counter() - started
@@ -485,9 +499,17 @@ def _record(result: CorpusResult, label: str, report: Report,
             worst_by_key[key] = _worst(worst_by_key.get(key, "info"),
                                        finding["severity"])
 
+    # `at_gate` is the keys that would hold this file at the gate; `flagged`
+    # is whether it is held, and those are two questions now that a caller
+    # can vouch for a file. The shared helper answers the second, so the
+    # exit code and this harness cannot drift apart again.
     at_gate = [key for key, severity in worst_by_key.items()
                if SEVERITY_RANK[severity] >= SEVERITY_RANK[GATE_SEVERITY]]
-    flagged = bool(at_gate)
+    vouched = bool((report.data.get("known_good") or {}).get("matched"))
+    flagged = models_at_gate(report, GATE_SEVERITY)
+
+    if vouched:
+        result.known_good[label] = result.known_good.get(label, 0) + 1
 
     if flagged:
         result.flagged[label] = result.flagged.get(label, 0) + 1
@@ -500,7 +522,7 @@ def _record(result: CorpusResult, label: str, report: Report,
         # The two marginal counts, accumulated here rather than derived later,
         # because deriving them would need every file's key set kept in memory
         # and the answer is a running total either way.
-        if label != "benign":
+        if label != "benign" or vouched:
             continue
         if not flagged:
             # Raising this key would newly flag this file: nothing else does.
@@ -651,6 +673,10 @@ def render(result: CorpusResult) -> str:
                  if counts["unexpected"] else "")
         lines.append(f"  {label} manifest: {counts['seen']} of "
                      f"{counts['expected']}, {state}{extra}")
+
+    for label, count in sorted(result.known_good.items()):
+        lines.append(f"  {label} known-good: {count} file(s) vouched for by "
+                     "the supplied set, and not held at the gate")
 
     fpr = result.false_positive_rate()
     if fpr is None:

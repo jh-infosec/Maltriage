@@ -1,5 +1,69 @@
 # Changelog
 
+## Version 0.5.11 - a list from outside, and one gate instead of two
+
+Known-good filtering, the last substantial v0.5 item, and the only place in
+this project where an answer comes from outside the bytes.
+
+### Why hashes, and not the signer
+
+The obvious version on Windows is "signed by Microsoft", and this tool
+already extracts Authenticode signer names. **It is not usable, and the
+reason is a rule set long before the question came up:** Authenticode is
+reported as presence and signer names only, never validity. A certificate
+blob can be copied into any file. Treating an unvalidated signer name as
+known-good would let a sample nominate itself, which is worse than having no
+feature.
+
+So the set is SHA-256, and the caller supplies it. A file cannot nominate its
+own hash.
+
+### What it does
+
+**`--known-good PATH`, on `scan` and on `corpus`.** A text file of hashes,
+one per line, with `#` comments; a corpus manifest from `--write-manifest` is
+accepted too, since that already produces exactly this shape.
+
+A matched file is still analysed in full and every finding is still reported
+at its real severity. `report.severity` is unchanged. What the set buys is a
+build that does not fail, not a file that looks clean.
+
+The corpus report says how many files it was told to let through, because a
+false positive rate computed after quietly removing files is not one. A
+vouched file is also excluded from the marginal counts: it is not at the
+gate, so calling it the sole cause of a flag it does not produce would put a
+number in the counterfactual that no change could realise.
+
+**A list this tool half understood is refused.** A file half of which is MD5
+would otherwise load as a working set that silently vouches for nothing, and
+the caller would never learn their file was wrong.
+
+**An archive is not vouched for by a known-good member.** The file's own
+digest, not any member's: an installer carrying a dropper is not known-good
+because its readme is.
+
+### One gate instead of two
+
+`at_gate(report, gate)` now lives in `models`, and both the CLI exit code and
+the corpus harness call it. v0.5.5 cost a release to find that those two had
+computed the same question separately and drifted; a known-good set gives
+them a second chance to drift, so they no longer each have an answer. The
+gate severity is passed in rather than imported, so `models` stays the lowest
+layer and the two mirrored constants stay pinned by their existing test.
+
+### Verified
+
+540 tests pass. Mutation testing caught 12 of 13; the survivor is a
+`.lower()` that the normalised set and `hexdigest` make redundant today, kept
+because it is the line that would silently stop matching if the hash
+extractor ever changed its spelling, and the comment says it is not pinned.
+
+One mutation caught a real defect rather than a missing test: a caller-built
+set spelled in upper case matched nothing. `load` lowercases what it reads,
+but `scan_files` takes a set from the caller and nothing obliges them to have
+used `load`. Normalising inside the comparison would rebuild the set for
+every file in the corpus, so it happens once, where the set arrives.
+
 ## Version 0.5.10 - a DOCX, a JAR and an APK are the same four bytes
 
 The document corpus reported `zip 58`, which answers nothing about documents.

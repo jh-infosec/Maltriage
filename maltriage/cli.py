@@ -26,7 +26,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .models import SEVERITY_RANK, Report, max_severity
+from . import known
+from .models import SEVERITY_RANK, Report, at_gate, max_severity
 from .pipeline import analyse, analyse_directory
 from .fixtures import write_samples
 from .envelope import to_envelope
@@ -269,6 +270,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not args.verbose:
         logging.getLogger(__package__).setLevel(logging.ERROR)
 
+    vouched_for: set[str] | None = None
+    if args.known_good:
+        try:
+            vouched_for = known.load(args.known_good)
+        except (OSError, ValueError, json.JSONDecodeError) as problem:
+            print(f"{APP_NAME}: {problem}", file=sys.stderr)
+            return EXIT_USAGE
+
     target = args.target
     if target.is_file():
         reports = [analyse(target)]
@@ -281,6 +290,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not reports:
         print(f"{APP_NAME}: no files found in {target}", file=sys.stderr)
         return EXIT_CLEAN
+
+    # Before anything is rendered or written, so every output agrees.
+    if vouched_for is not None:
+        for report in reports:
+            known.mark(report, vouched_for)
 
     if not args.quiet:
         for report in reports:
@@ -309,8 +323,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             for report in reports:
                 fh.write(json.dumps(to_envelope(report)) + "\n")
 
-    worst = max_severity([{"severity": r.severity} for r in reports])
-    return EXIT_FINDINGS if SEVERITY_RANK[worst] >= SEVERITY_RANK[GATE_SEVERITY] else EXIT_CLEAN
+    if any(at_gate(report, GATE_SEVERITY) for report in reports):
+        return EXIT_FINDINGS
+    return EXIT_CLEAN
 
 
 def cmd_corpus(args: argparse.Namespace) -> int:
@@ -374,9 +389,18 @@ def cmd_corpus(args: argparse.Namespace) -> int:
 
     items = (corpus_module.labelled_files(args.root) if args.root
              else corpus_module.named_files(sources))
+    vouched_for = None
+    if args.known_good:
+        try:
+            vouched_for = known.load(args.known_good)
+        except (OSError, ValueError, json.JSONDecodeError) as problem:
+            print(f"{APP_NAME}: {problem}", file=sys.stderr)
+            return EXIT_USAGE
+
     result = corpus_module.scan_files(items, per_file=args.per_file,
                                       limit=args.limit,
-                                      extensions=args.extension)
+                                      extensions=args.extension,
+                                      known_good=vouched_for)
 
     if not result.total_files and args.extension:
         # Said separately from the two messages below, because the cause is
@@ -463,6 +487,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="write findings envelopes here, one JSON object per "
                            "file. Carries findings and what could not be run, "
                            "never extraction output and never the path")
+    scan.add_argument("--known-good", type=Path, metavar="PATH",
+                      help="a file of SHA-256 hashes, one per line, naming files that should not fail a build. They are still analysed in full and every finding is still reported; what changes is the gate. A corpus manifest is accepted too")
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress human output")
     scan.add_argument("-v", "--verbose", action="store_true")
     scan.set_defaults(func=cmd_scan)
@@ -500,6 +526,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "default: a corpus report is kept and compared, "
                              "and a corpus directory describes somebody's "
                              "sample collection")
+    corpus.add_argument("--known-good", type=Path, metavar="PATH",
+                        help="a file of SHA-256 hashes, one per line, naming files that should not fail a build. They are still analysed in full and every finding is still reported; what changes is the gate. A corpus manifest is accepted too")
     corpus.add_argument("--manifest", type=Path, metavar="PATH",
                         help="compare this run against a manifest written "
                              "earlier, and report how many files it expected "

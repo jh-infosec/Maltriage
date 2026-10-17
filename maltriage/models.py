@@ -79,6 +79,25 @@ def mk_finding(extractor: str, key: str, detail: str, severity: str = "info",
     return finding
 
 
+def at_gate(report: "Report", gate: str) -> bool:
+    """Whether this file should fail a build.
+
+    One computation, called by the CLI's exit code and by the corpus
+    harness, because the last time those two answered the question
+    separately they disagreed: `main` counted members and the harness did
+    not, so a zip holding a disguised PE exited non-zero in the field and
+    was recorded as a clean unflagged file. The gate severity is passed in
+    rather than imported, so this stays the lowest layer.
+
+    A file the caller vouched for is not at the gate, and its severity is
+    unchanged. The report still says what it found; what the known-good set
+    buys is a build that does not fail, not a file that looks clean.
+    """
+    if (report.data.get("known_good") or {}).get("matched"):
+        return False
+    return SEVERITY_RANK[report.severity] >= SEVERITY_RANK[gate]
+
+
 def max_severity(findings: list[dict[str, Any]]) -> str:
     if not findings:
         return "info"
