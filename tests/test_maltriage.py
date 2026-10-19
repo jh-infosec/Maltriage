@@ -2265,20 +2265,33 @@ def test_a_broken_entry_inside_a_rules_directory_is_reported_not_dropped(write, 
     """A rules directory holding a dangling symlink, a symlink loop or a
     directory named `sub.yar` used to lose those entries without a word, which
     silently shortens the rule set. A moved rules repository or an
-    unchecked-out submodule is ordinary breakage."""
+    unchecked-out submodule is ordinary breakage.
+
+    The symlink half is conditional. Windows will not create one without
+    Developer Mode or elevation, and this test never found that out because
+    `needs_yara` skipped it on every Windows run until a Python with a
+    yara-python wheel existed there. The first Windows run with YARA failed
+    here. Skipping the whole test would have thrown away the directory case,
+    which every platform can check."""
     rules = tmp_path / "rules"
     rules.mkdir()
     (rules / "kept.yar").write_bytes(
         b'rule kept { meta: severity = "low" strings: $a = "alpha" condition: $a }')
-    (rules / "dangling.yar").symlink_to(tmp_path / "gone.yar")
     (rules / "sub.yar").mkdir()
+    try:
+        (rules / "dangling.yar").symlink_to(tmp_path / "gone.yar")
+        dangling = True
+    except OSError:
+        dangling = False
 
     report = analyse(write("a.bin", b"alpha"),
                      config={**DEFAULT_CONFIG, "yara_rule_paths": [str(rules)]})
     data = report.data["yara"]
     assert "kept" in _rules_of(data)                    # the good file survived
     problems = " ".join(data["parse_errors"])
-    assert "dangling.yar" in problems and "sub.yar" in problems
+    assert "sub.yar" in problems
+    if dangling:
+        assert "dangling.yar" in problems
     assert "incomplete:" in cli.render_human(report)
 
 
