@@ -285,8 +285,24 @@ handled before the feature is safe to run.
 - [x] Password-protected archive detection
 - [x] Nested reports linked to their parent
 - [ ] RAR and 7z, which need a third-party decompressor
-- [ ] Known-good hash filtering, which reports what it suppressed
+- [x] Known-good hash filtering, which reports what it suppressed *(v0.5.11)*
 - [~] Bounded parse time: the nesting half is closed, the hung parser is not
+
+**v0.5 shipped eleven times, and the releases after v0.5.0 were not planned
+here.** Nine of them came out of pointing the tool at real files: an archive
+taught the signature table (v0.5.2), an indicator list half full of licences
+(v0.5.3), a URL cut in half by this tool's own ceiling (v0.5.4), a corpus
+harness measuring a gate the tool does not ship (v0.5.5), and a home
+directory that turned out to be 45% one application's audio cache (v0.5.7).
+None of those were on a list. The list was right about what to build and had
+nothing to say about what was already wrong.
+
+**Known-good filtering ruled out the obvious implementation.** The signer
+name was the tempting source and is unusable: this project reports
+Authenticode as presence and signer names only, never validity, and a
+certificate blob can be copied into any file. An unvalidated signer name
+would let a sample nominate itself. Hashes the caller supplies, and a file
+cannot nominate its own hash.
 
 **RAR and 7z are recognised and not opened**, and that is a decision rather
 than an omission. Both need a third-party decompressor, and this project's
@@ -341,10 +357,29 @@ reaches, so both are random-access extractors gating on the header phase,
 which is the third kind doing what it was added for.
 
 - [ ] OLE2 structured storage parsing
-- [ ] OOXML part extraction
-- [ ] VBA macro extraction and stream listing
+- [x] OOXML identification and part listing *(v0.5.10)*
+- [~] VBA: presence is detected, extraction and stream listing are not
 - [ ] Auto-execute trigger detection
 - [ ] DDE and external relationship detection
+
+**Part of this arrived early, and the reason is worth keeping.** v0.5.10
+identifies OOXML and reports whether a document carries a compiled VBA
+project, because a document corpus reported `zip 58` and could say nothing
+about documents at all. That was a measurement problem before it was a
+feature, which is how it jumped the queue.
+
+What arrived is presence, not extraction: the tool says a VBA project is
+there and does not read it. Reading it is the rest of this release, and it is
+also where the attack surface starts, because a VBA stream is
+attacker-controlled structure parsed by code this project would have to
+write.
+
+**Both macro keys are at `low` and both measured 0.0% on 59 real
+documents.** That number is weaker than it looks: the corpus contained no
+macro-enabled document at all, so it is equally consistent with the rule
+being right and with the detector never having been exercised. The synthetic
+tests prove it fires. The corpus proves nothing fired. Raising either key
+needs a corpus with at least one positive in it.
 
 ---
 
@@ -358,10 +393,27 @@ precision and recall, so it comes before the classifier rather than after.
 - [x] Throughput benchmarking *(shipped in v0.4.2)*
 - [x] A corpus of ordinary Windows binaries *(System32, in v0.4.3)*
 - [ ] Precision and recall, which need a labelled malicious corpus
-- [ ] False negatives introduced by known-good filtering (needs v0.5)
+- [ ] False negatives introduced by known-good filtering (needs a corpus)
 - [ ] Report diff between two runs
 - [ ] A Program Files corpus, for the findings System32 cannot exercise
 - [ ] YARA measured on Windows, which needs a Python a wheel exists for
+- [x] A corpus of ordinary documents *(v0.5.7, v0.5.8)*
+- [x] A corpus manifest, so a sample set cannot shrink quietly *(v0.5.9)*
+
+**Two severity decisions are now waiting on this release rather than on an
+argument.** `entropy_hotspot` is the largest lever ever measured here:
+demoting it took a home directory from 12.8% to 1.0% and takes the document
+corpus to 0.0%. It has not been pulled, because what it would stop flagging
+is unrecognised high-entropy data, which is also the shape of raw shellcode
+and an encrypted payload. Pulling it trades a measured false positive rate
+for an unmeasured false negative rate, and only a labelled malicious corpus
+can price the second.
+
+**Every Windows figure in the changelog describes a tool without YARA.** The
+last document run reported `yara on 2886 file(s)`, meaning zero rules
+executed, because Python 3.14 has no yara-python wheel. This is cheap to fix
+and has not been, and until it is, no Windows number here is a number about
+the whole tool.
 
 **The harness moved out of this release, and the reason it had to is the
 useful part.** Six decisions across `apis.py`, `extractors.py`, `AUTHORING.md`
