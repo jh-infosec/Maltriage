@@ -2295,6 +2295,112 @@ def test_a_broken_entry_inside_a_rules_directory_is_reported_not_dropped(write, 
     assert "incomplete:" in cli.render_human(report)
 
 
+_PDF_RULE = "pdf_with_automatic_action"
+
+
+def _pdf_rules(write, name, body):
+    report = analyse(write(name, body))
+    return _rules_of(report.data["yara"])
+
+
+@needs_yara
+def test_a_pdf_that_runs_javascript_on_open_is_matched(write):
+    """The case the rule exists for. It had no test at all until the first
+    Windows run with YARA, which is how a 74% chance-match rate on 8 MB of
+    compressed data went unnoticed."""
+    body = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /OpenAction 5 0 R >> endobj\n"
+            b"5 0 obj << /S /JavaScript /JS (app.alert(1)) >> endobj\n%%EOF\n")
+    assert _PDF_RULE in _pdf_rules(write, "form.pdf", body)
+
+
+@needs_yara
+def test_a_form_field_action_is_an_automatic_action(write):
+    """`/AA` is the additional-actions dictionary on a page or a field, and a
+    calculating form fires its scripts through it."""
+    body = (b"%PDF-1.7\n1 0 obj << /Type /Annot /AA << /K 6 0 R >> >> endobj\n"
+            b"6 0 obj << /S/JavaScript/JS(AFNumber_Format(2)) >> endobj\n%%EOF\n")
+    assert _PDF_RULE in _pdf_rules(write, "quote.pdf", body)
+
+
+@needs_yara
+def test_three_bytes_inside_a_compressed_stream_are_not_an_action(write):
+    """The measured defect, made deterministic. On 207 real documents the
+    first version fired on every PDF of 8 MB or more, and 23 of its 28
+    matches were `/JS` turning up by chance in compressed data. Here the
+    bytes are planted rather than left to chance, beside an ordinary
+    view-setting `/OpenAction`, and there is no JavaScript anywhere."""
+    body = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /OpenAction [3 0 R /FitH null] >> endobj\n"
+            b"4 0 obj << /Length 64 /Filter /FlateDecode >> stream\n"
+            b"\x8f/JS(\x02\x91/js \x13/Js<\xee/AA \x7f/aa[\x01\nendstream\nendobj\n%%EOF\n")
+    assert _PDF_RULE not in _pdf_rules(write, "book.pdf", body)
+
+
+@needs_yara
+def test_a_subset_font_name_is_not_an_additional_action(write):
+    """Word and most PDF printers name subset fonts `/AAAAAB+Calibri`, and
+    the first version read the `/AA` at the front of that as an action. A
+    PDF name ends at whitespace or a delimiter, so this one is `/AAAAAB+...`
+    and nothing else."""
+    body = (b"%PDF-1.7\n2 0 obj << /Type /Font /BaseFont /AAAAAB+Calibri >> endobj\n"
+            b"7 0 obj << /S /JavaScript /JS (print()) >> endobj\n%%EOF\n")
+    assert _PDF_RULE not in _pdf_rules(write, "manual.pdf", body)
+
+
+@needs_yara
+def test_pdf_names_are_case_sensitive(write):
+    """ISO 32000-1, 7.3.5: `/javascript` and `/JavaScript` are different
+    names, and a reader does not run the first. `nocase` was never correct,
+    and it quadrupled the chance rate besides."""
+    body = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /openaction 5 0 R >> endobj\n"
+            b"5 0 obj << /S /javascript /JS (app.alert(1)) >> endobj\n%%EOF\n")
+    assert _PDF_RULE not in _pdf_rules(write, "odd.pdf", body)
+
+
+@needs_yara
+def test_the_rules_stated_false_negatives_are_still_false_negatives(write):
+    """Recorded rather than fixed, and pinned so that closing one is a
+    decision somebody makes on purpose. A hex-escaped name is the same name
+    to a reader and invisible here; document-level JavaScript runs on open
+    without `/OpenAction` or `/AA` and is not matched. The third, an action
+    inside a compressed object stream, needs decompression and is v0.6.
+
+    The escaped case is a regression, stated rather than hidden. The first
+    version caught `/J#61vaScript` beside an unescaped `/JS`, by accident: the
+    three bytes that caught it are the three bytes that matched every 8 MB
+    PDF. The answer to an escaped name is a rule about escaped names, since
+    no ordinary generator writes one, and it needs its own measurement."""
+    escaped = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /OpenAction 5 0 R >> endobj\n"
+               b"5 0 obj << /S /J#61vaScript /JS (app.alert(1)) >> endobj\n%%EOF\n")
+    document_level = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /Names << /JavaScript 8 0 R >> >> endobj\n"
+                      b"9 0 obj << /S /JavaScript /JS (app.alert(1)) >> endobj\n%%EOF\n")
+    assert _PDF_RULE not in _pdf_rules(write, "escaped.pdf", escaped)
+    assert _PDF_RULE not in _pdf_rules(write, "doclevel.pdf", document_level)
+
+
+@needs_yara
+def test_a_write_up_about_pdf_internals_is_not_a_pdf(write):
+    """The corpus this was measured on is a security practitioner's
+    documents, and a note explaining how a malicious PDF works contains every
+    name the rule looks for. The header anchor is what keeps an explanation
+    from being read as the thing it explains."""
+    body = (b"# How the dropper works\n\nThe catalog sets /OpenAction 5 0 R, and "
+            b"object 5 is << /S /JavaScript /JS (...) >>, so it runs on open.\n")
+    assert _PDF_RULE not in _pdf_rules(write, "notes.md", body)
+
+
+@needs_yara
+def test_the_rule_says_what_it_misses(write):
+    """AUTHORING.md: a rule that cannot state why it fires and what it misses
+    is a rule nobody can tune later. This one now states both, and the first
+    version stated neither."""
+    import yara as _yara
+    compiled = _yara.compile(filepath=str(RULE_DIR / "structural.yar"))
+    body = (b"%PDF-1.7\n1 0 obj << /OpenAction 5 0 R >> endobj\n"
+            b"5 0 obj << /S /JavaScript /JS (1) >> endobj\n")
+    meta = next(m.meta for m in compiled.match(data=body) if m.rule == _PDF_RULE)
+    assert "false_negative" in meta and "false_positive" in meta
+
+
 def test_a_switch_written_as_a_string_is_reported_rather_than_absorbed():
     """`"yara_fast_matching": "false"` and `: 0` are what somebody reaches for
     in a JSON config, and both left the switch on while the report stated the

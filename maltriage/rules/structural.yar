@@ -92,17 +92,30 @@ rule pdf_with_automatic_action : structural document
 {
     meta:
         severity = "low"
-        description = "a PDF that runs something when it is opened"
+        description = "a PDF that runs JavaScript when it is opened"
         rationale = "an automatic action plus embedded script is how a PDF does anything at all without being asked; common in legitimate forms, which is why this is low"
+        false_positive = "measured: the first version matched /JS and /AA as three bytes in any case, which occur about once every 4 MB of compressed stream data. On 207 real documents it fired on every PDF of 8 MB or more and on none under 1 MB, and 23 of its 28 matches were chance. The names are now matched as PDF name tokens: case-sensitive, as the specification requires, and ended by whitespace or a delimiter so /AAAAAB+Calibri is a font and not an action"
+        false_negative = "three, all stated. A name written with a hex escape, /J#61vaScript, is the same name to a PDF reader and invisible here. An action stored inside a compressed object stream, which PDF 1.5 and later allow, is invisible to any byte matcher; reading it means decompressing, which is v0.6. Document-level JavaScript in the /Names tree runs on open without /OpenAction or /AA and is not matched"
 
     strings:
-        $open = "/OpenAction" nocase
-        $auto = "/AA" nocase
-        $js   = "/JavaScript" nocase
-        $js2  = "/JS" nocase
+        // Each name followed by PDF whitespace or a delimiter (ISO 32000-1,
+        // 7.2.2 and 7.3.5): NUL HT LF FF CR SP % ( ) / < > [ ] { }
+        //
+        // The delimiter earns its place on /AA, where a subset font named
+        // /AAAAAB+Calibri otherwise reads as an action. On the two long
+        // names it is defensive rather than demonstrated: no real PDF name
+        // extends /OpenAction or /JavaScript, so mutation testing confirms no
+        // test can tell it apart, and it is kept so every name here is
+        // matched the same way rather than two of three.
+        $open = { 2F 4F 70 65 6E 41 63 74 69 6F 6E ( 00 | 09 | 0A | 0C | 0D | 20 | 25 | 28 | 29 | 2F | 3C | 3E | 5B | 5D | 7B | 7D ) }
+        $auto = { 2F 41 41 ( 00 | 09 | 0A | 0C | 0D | 20 | 25 | 28 | 29 | 2F | 3C | 3E | 5B | 5D | 7B | 7D ) }
+        // /S /JavaScript is required in every JavaScript action, so this
+        // eleven-byte name is present whenever a real /JS key is. The
+        // three-byte /JS added nothing but chance matches and is gone.
+        $js   = { 2F 4A 61 76 61 53 63 72 69 70 74 ( 00 | 09 | 0A | 0C | 0D | 20 | 25 | 28 | 29 | 2F | 3C | 3E | 5B | 5D | 7B | 7D ) }
 
     condition:
-        uint32be(0) == 0x25504446 and ($open or $auto) and ($js or $js2)
+        uint32be(0) == 0x25504446 and ($open or $auto) and $js
 }
 
 rule pdf_with_embedded_file : structural document

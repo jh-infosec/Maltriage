@@ -1,5 +1,105 @@
 # Changelog
 
+## Version 0.5.12 - the first Windows run with YARA, and the rule it caught
+
+Every Windows measurement before this one described a tool without YARA.
+Python 3.14 has no yara-python wheel; 4.5.4 ships up to cp313. With a 3.13
+environment the suite ran 537 passed and 3 skipped, against 498 and 42
+before, and the corpus report lost its `incomplete` line for the first time.
+
+The same run found two things.
+
+### A test that had never run on Windows
+
+`needs_yara` skipped it on every Windows run, so it never learned that
+Windows refuses to create a symlink without Developer Mode or elevation. Fixed
+in a separate commit: the symlink half is now conditional and the directory
+half, which every platform can check, still runs.
+
+### `pdf_with_automatic_action` was firing on compressed data
+
+I predicted `yara_match` would fire on no documents, because the bundled
+rules aim at executables. It fired on 28 of 207, 13.5%. All 28 were one
+rule, on top-level PDFs:
+
+```
+pdf_with_automatic_action, by PDF size:
+  < 1 MB       0 of  64  (0%)
+  >= 8 MB     12 of  12  (100%)
+
+where the matched /JS landed, per PDF it fired on:
+   23  every /JS hit inside a compressed stream: chance
+    5  a /JS or /JavaScript outside every stream: possibly real
+```
+
+The rule matched `"/JS" nocase` and `"/AA" nocase`: three bytes, in four case
+spellings each. Compressed stream data is random to a byte matcher, and on
+random data the rule fired 5% of the time at 1 MB, 36% at 4 MB and 74% at
+8 MB. An ordinary view-setting `/OpenAction` is enough to satisfy the other
+half of the condition, so a clean PDF carrying one 4 MB stream fired 14 times
+in 20.
+
+**It broke this project's own authoring guide.** `AUTHORING.md` says to
+prefer strings of six bytes or more and to assume random data, and the ELF
+rule two entries above it follows both and says why. This one did not, and it
+had no test, which is how nobody noticed.
+
+### The fix rests on the specification, not on tuning
+
+- **PDF names are case-sensitive** (ISO 32000-1, 7.3.5). `nocase` was never
+  correct, and it quadrupled the chance rate.
+- **Every JavaScript action carries `/S /JavaScript`.** So the eleven-byte
+  name is present whenever a real `/JS` key is, and the three-byte
+  alternative added nothing but chance matches. It is gone.
+- **A name ends at whitespace or a delimiter.** That is what makes
+  `/AAAAAB+Calibri`, the way Word names a subset font, a font rather than an
+  additional-actions dictionary.
+
+Measured on the same random data afterwards: zero matches at every size from
+0.25 MB to 8 MB, and zero in 20 on the clean PDF with a 4 MB stream.
+
+### What it now misses, stated
+
+The rule's meta now carries `false_positive` and `false_negative`, which it
+had neither of. Three false negatives, each pinned by a test so closing one is
+a decision rather than an accident:
+
+- **A hex-escaped name**, `/J#61vaScript`, is the same name to a reader and
+  invisible here. **This one is a regression, and is stated as one.** The
+  first version caught it beside an unescaped `/JS`, by accident: the three
+  bytes that caught it are the three bytes that matched every 8 MB PDF. Keeping
+  a case-sensitive, delimited `/JS` measures at roughly 3% on an 8 MB PDF,
+  which is the same defect at a lower rate. The real answer to an escaped name
+  is a rule about escaped names, since no ordinary generator writes one, and
+  it needs its own measurement.
+- **An action inside a compressed object stream** is invisible to any byte
+  matcher. Reading one means decompressing, which is v0.6.
+- **Document-level JavaScript** in the `/Names` tree runs on open without
+  `/OpenAction` or `/AA`, and is not matched.
+
+### Verified
+
+548 tests pass, eight of them new; the rule had none. Against the old rule,
+the five regression tests fail and the two positive tests pass, which is the
+split a fix that does not over-correct should produce.
+
+Mutation testing caught 6 of 8 against the rule file. The two survivors are
+the delimiters on `/OpenAction` and `/JavaScript`: no real name extends
+either, so nothing can tell them apart, and the rule says so in a comment.
+
+The first mutation run reported three more as caught, for the wrong reason.
+YARA refuses to compile a rule whose condition leaves a string unused, so
+those mutants failed `test_every_bundled_rule_compiles` before any behaviour
+test ran. A mutant that does not compile proves nothing about the tests meant
+to catch it. Rewritten to compile, each is caught by the test written for it.
+
+### What I expect your next run to show
+
+`yara_match` falls from 28 documents to at most 5, the ones the drill could
+not attribute to chance. If those 5 survive, they are real JavaScript actions
+in fillable forms, which is what the rule's own rationale says is common and
+why it is `low`.
+
 ## Version 0.5.11 - a list from outside, and one gate instead of two
 
 Known-good filtering, the last substantial v0.5 item, and the only place in
