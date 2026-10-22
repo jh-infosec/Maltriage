@@ -118,6 +118,32 @@ rule pdf_with_automatic_action : structural document
         uint32be(0) == 0x25504446 and ($open or $auto) and $js
 }
 
+rule pdf_with_escaped_name : structural document obfuscation
+{
+    meta:
+        severity = "low"
+        description = "a PDF that writes a security-relevant name with a hex escape"
+        rationale = "PDF lets any character in a name be written as #xx, and a letter never needs to be. A writer that spells /JavaScript as /J#61vaScript is not saving bytes or escaping a delimiter; it is hiding the name from anything that reads bytes, which is the only reason to do it. This is the answer to the regression stated in v0.5.12, where pdf_with_automatic_action stopped catching /J#61vaScript once its three-byte /JS was removed"
+        false_positive = "measured on random data, which is what compressed streams look like: 0% at 1, 4 and 8 MB. The obvious wider rule, any escaped letter in any name, measured 2% at 1 MB and 14% at 8 MB and was rejected on that number. An escaped space in a font name, /Times#20New#20Roman, is legitimate and is not matched: only letters, and only in these six names"
+        false_negative = "a name inside a compressed object stream is invisible to any byte matcher, as for every PDF rule here; and a name not on this list is not looked at, which is the price of the 0%"
+
+    strings:
+        // Generated, not hand-written: each pattern is an alternation over
+        // where the first escape falls, because YARA has no lookahead to
+        // demand "at least one". The generator is `_escaped_name_pattern` in
+        // the test suite, and a test fails if these drift from it. Each name
+        // must end at PDF whitespace or a delimiter, as in the rule above.
+        $esc_JavaScript = /\/(#4[aA](a|#61)(v|#76)(a|#61)(S|#53)(c|#63)(r|#72)(i|#69)(p|#70)(t|#74)|J#61(v|#76)(a|#61)(S|#53)(c|#63)(r|#72)(i|#69)(p|#70)(t|#74)|Ja#76(a|#61)(S|#53)(c|#63)(r|#72)(i|#69)(p|#70)(t|#74)|Jav#61(S|#53)(c|#63)(r|#72)(i|#69)(p|#70)(t|#74)|Java#53(c|#63)(r|#72)(i|#69)(p|#70)(t|#74)|JavaS#63(r|#72)(i|#69)(p|#70)(t|#74)|JavaSc#72(i|#69)(p|#70)(t|#74)|JavaScr#69(p|#70)(t|#74)|JavaScri#70(t|#74)|JavaScrip#74)[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]/
+        $esc_JS = /\/(#4[aA](S|#53)|J#53)[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]/
+        $esc_OpenAction = /\/(#4[fF](p|#70)(e|#65)(n|#6[eE])(A|#41)(c|#63)(t|#74)(i|#69)(o|#6[fF])(n|#6[eE])|O#70(e|#65)(n|#6[eE])(A|#41)(c|#63)(t|#74)(i|#69)(o|#6[fF])(n|#6[eE])|Op#65(n|#6[eE])(A|#41)(c|#63)(t|#74)(i|#69)(o|#6[fF])(n|#6[eE])|Ope#6[eE](A|#41)(c|#63)(t|#74)(i|#69)(o|#6[fF])(n|#6[eE])|Open#41(c|#63)(t|#74)(i|#69)(o|#6[fF])(n|#6[eE])|OpenA#63(t|#74)(i|#69)(o|#6[fF])(n|#6[eE])|OpenAc#74(i|#69)(o|#6[fF])(n|#6[eE])|OpenAct#69(o|#6[fF])(n|#6[eE])|OpenActi#6[fF](n|#6[eE])|OpenActio#6[eE])[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]/
+        $esc_AA = /\/(#41(A|#41)|A#41)[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]/
+        $esc_Launch = /\/(#4[cC](a|#61)(u|#75)(n|#6[eE])(c|#63)(h|#68)|L#61(u|#75)(n|#6[eE])(c|#63)(h|#68)|La#75(n|#6[eE])(c|#63)(h|#68)|Lau#6[eE](c|#63)(h|#68)|Laun#63(h|#68)|Launc#68)[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]/
+        $esc_EmbeddedFile = /\/(#45(m|#6[dD])(b|#62)(e|#65)(d|#64)(d|#64)(e|#65)(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|E#6[dD](b|#62)(e|#65)(d|#64)(d|#64)(e|#65)(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|Em#62(e|#65)(d|#64)(d|#64)(e|#65)(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|Emb#65(d|#64)(d|#64)(e|#65)(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|Embe#64(d|#64)(e|#65)(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|Embed#64(e|#65)(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|Embedd#65(d|#64)(F|#46)(i|#69)(l|#6[cC])(e|#65)|Embedde#64(F|#46)(i|#69)(l|#6[cC])(e|#65)|Embedded#46(i|#69)(l|#6[cC])(e|#65)|EmbeddedF#69(l|#6[cC])(e|#65)|EmbeddedFi#6[cC](e|#65)|EmbeddedFil#65)[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]/
+
+    condition:
+        uint32be(0) == 0x25504446 and any of them
+}
+
 rule pdf_with_embedded_file : structural document
 {
     meta:

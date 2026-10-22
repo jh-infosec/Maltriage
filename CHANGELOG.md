@@ -1,5 +1,81 @@
 # Changelog
 
+## Version 0.5.13 - the escape is the signal
+
+v0.5.12 stated a regression and did not hide it. The old
+`pdf_with_automatic_action` caught `/S /J#61vaScript` beside an unescaped
+`/JS`, by accident, with the same three bytes that matched every 8 MB PDF.
+Removing those bytes removed the accident. This release answers it properly.
+
+That run, re-measured: `yara_match` fell from 28 documents to 1, against a
+prediction of at most 5. Four of the five the drill called "possibly real"
+were chance too, which means the drill's stream detection was conservative
+rather than right. The one survivor is not yet attributed.
+
+### Why the escape, and not the name
+
+PDF lets any character in a name be written as `#xx`, and a letter never
+needs to be. A writer that spells `/JavaScript` as `/J#61vaScript` is not
+escaping a delimiter or saving a byte; it is hiding the name from anything
+that reads bytes, and that is the only reason to do it. So the escape is the
+finding, not the name.
+
+### The obvious rule was measured and rejected
+
+"Any escaped letter in any name" is the natural first version. On random
+data, which is what compressed streams look like:
+
+| | 1 MB | 4 MB | 8 MB |
+|---|---|---|---|
+| any escaped letter, any name | 2% | 4% | 14% |
+| six named, at least one escape | 0% | 0% | 0% |
+
+The wider rule is the defect v0.5.12 fixed, at a lower rate.
+**`pdf_with_escaped_name` looks at six names only**: `JavaScript`, `JS`, `OpenAction`,
+`AA`, `Launch` and `EmbeddedFile`. The shortest possible match is five fixed
+bytes. A name not on the list is not looked at, which is the stated price of
+the 0%.
+
+An escaped space, `/Times#20New#20Roman`, is how a font name legitimately
+carries a space, and is not matched: only letters, only these names.
+
+### "At least one escape" in a language with no lookahead
+
+A pattern where every character may be literal or escaped also matches the
+plain name, and YARA cannot demand that something occurred. So each pattern
+is an alternation over where the first escape falls: every character before
+it literal, that one escaped, every one after it either. Hex digits in an
+escape are case-insensitive in PDF and both cases are matched.
+
+Those patterns are machine-shaped, so the rule carries them generated rather
+than hand-written. The generator lives in the test suite, and a test fails if
+the rule file and the generator disagree.
+
+### Severity and ATT&CK
+
+**`low`.** An escaped security-relevant name has no benign reading I can
+think of, and that is the same argument that took `archive_path_traversal`
+to `high`. It stays `low` anyway, because the document corpus has not run
+against it yet and the counterfactual is what should move it.
+
+**No technique declared**, although T1027 is the obvious one. Every bundled
+rule describes the shape of a file rather than a behaviour, and
+`test_no_bundled_rule_declares_a_technique` makes that a decision.
+
+### Verified
+
+560 tests pass, twelve of them new. Mutation testing caught 6 of 6 with the
+generator comparison deselected, so that each mutant had to be caught by a
+test of what the rule does rather than by a test noticing the text changed.
+The lesson is the one v0.5.12 learned from the other side: a mutant caught
+for an unrelated reason proves nothing about the test meant to catch it.
+
+### What I expect your next run to show
+
+`pdf_with_escaped_name` fires on **none** of the 207 documents. If it fires
+on one, that document is worth opening, because ordinary PDF writers do not
+produce what this rule looks for.
+
 ## Version 0.5.12 - the first Windows run with YARA, and the rule it caught
 
 Every Windows measurement before this one described a tool without YARA.

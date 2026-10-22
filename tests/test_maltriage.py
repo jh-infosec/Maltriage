@@ -2364,16 +2364,18 @@ def test_the_rules_stated_false_negatives_are_still_false_negatives(write):
     without `/OpenAction` or `/AA` and is not matched. The third, an action
     inside a compressed object stream, needs decompression and is v0.6.
 
-    The escaped case is a regression, stated rather than hidden. The first
-    version caught `/J#61vaScript` beside an unescaped `/JS`, by accident: the
-    three bytes that caught it are the three bytes that matched every 8 MB
-    PDF. The answer to an escaped name is a rule about escaped names, since
-    no ordinary generator writes one, and it needs its own measurement."""
+    The escaped case was a regression in v0.5.12, stated rather than hidden:
+    the first version caught `/J#61vaScript` beside an unescaped `/JS`, by
+    accident, with the three bytes that matched every 8 MB PDF. It is
+    answered by `pdf_with_escaped_name`, a rule about the escape itself, and
+    this rule still does not see it, which is correct."""
     escaped = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /OpenAction 5 0 R >> endobj\n"
                b"5 0 obj << /S /J#61vaScript /JS (app.alert(1)) >> endobj\n%%EOF\n")
     document_level = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /Names << /JavaScript 8 0 R >> >> endobj\n"
                       b"9 0 obj << /S /JavaScript /JS (app.alert(1)) >> endobj\n%%EOF\n")
-    assert _PDF_RULE not in _pdf_rules(write, "escaped.pdf", escaped)
+    escaped_rules = _pdf_rules(write, "escaped.pdf", escaped)
+    assert _PDF_RULE not in escaped_rules
+    assert "pdf_with_escaped_name" in escaped_rules
     assert _PDF_RULE not in _pdf_rules(write, "doclevel.pdf", document_level)
 
 
@@ -2398,6 +2400,125 @@ def test_the_rule_says_what_it_misses(write):
     body = (b"%PDF-1.7\n1 0 obj << /OpenAction 5 0 R >> endobj\n"
             b"5 0 obj << /S /JavaScript /JS (1) >> endobj\n")
     meta = next(m.meta for m in compiled.match(data=body) if m.rule == _PDF_RULE)
+    assert "false_negative" in meta and "false_positive" in meta
+
+
+_ESCAPE_RULE = "pdf_with_escaped_name"
+_ESCAPED_NAMES = ["JavaScript", "JS", "OpenAction", "AA", "Launch", "EmbeddedFile"]
+_PDF_DELIMITER = r"[\x00\x09\x0a\x0c\x0d\x20\x25\x28\x29\x2f\x3c\x3e\x5b\x5d\x7b\x7d]"
+
+
+def _escaped_name_pattern(name):
+    """The regex `pdf_with_escaped_name` uses for one name.
+
+    A pattern where every position may be literal or `#xx` also matches the
+    plain name, and YARA has no lookahead to demand an escape. So it is an
+    alternation over where the first escape falls: every character before it
+    literal, that one escaped, every one after it either. The hex digits of
+    an escape are case-insensitive in PDF, and the name ends at a delimiter.
+    """
+    def escape(ch):
+        hi, lo = f"{ord(ch):02x}"
+        def digit(d):
+            return d if d.isdigit() else f"[{d}{d.upper()}]"
+        return "#" + digit(hi) + digit(lo)
+
+    def literal(ch):
+        return ch if ch.isalnum() else "\\" + ch
+
+    branches = []
+    for k in range(len(name)):
+        branches.append("".join(literal(c) for c in name[:k]) + escape(name[k])
+                        + "".join(f"({literal(c)}|{escape(c)})" for c in name[k + 1:]))
+    return r"\/(" + "|".join(branches) + ")" + _PDF_DELIMITER
+
+
+def _escaped(name, positions, upper=False):
+    """`name` with the characters at `positions` written as `#xx`."""
+    out = []
+    for index, ch in enumerate(name):
+        if index in positions:
+            code = f"{ord(ch):02x}"
+            out.append("#" + (code.upper() if upper else code))
+        else:
+            out.append(ch)
+    return "/" + "".join(out)
+
+
+def test_the_escaped_name_patterns_are_what_the_generator_says():
+    """The patterns are machine-shaped, so the rule file carries them
+    generated rather than hand-written, and this is what stops a hand edit
+    quietly breaking the "at least one escape" property. Change the
+    generator, regenerate, and this passes again."""
+    source = (RULE_DIR / "structural.yar").read_text(encoding="utf-8")
+    for name in _ESCAPED_NAMES:
+        line = f"$esc_{name} = /{_escaped_name_pattern(name)}/"
+        assert line in source, name
+
+
+@needs_yara
+@pytest.mark.parametrize("name", _ESCAPED_NAMES)
+def test_every_listed_name_is_caught_however_it_is_escaped(write, name):
+    """One escape at the front, one at the back, every character escaped,
+    and the hex digits in either case. A rule that only knew `/J#61vaScript`
+    would be a signature for one sample rather than for the technique."""
+    spellings = {
+        _escaped(name, {0}),
+        _escaped(name, {len(name) - 1}),
+        _escaped(name, set(range(len(name)))),
+        _escaped(name, set(range(len(name))), upper=True),
+    }
+    for spelling in spellings:
+        body = b"%PDF-1.7\n1 0 obj << " + spelling.encode() + b" 5 0 R >> endobj\n%%EOF\n"
+        assert _ESCAPE_RULE in _pdf_rules(write, "x.pdf", body), spelling
+
+
+@needs_yara
+def test_a_plain_name_is_not_an_escaped_one(write):
+    """The escape is the signal. A PDF that writes `/JavaScript` plainly is
+    the other rule's business, and this one staying quiet on it is what
+    keeps the two findings meaning different things."""
+    body = (b"%PDF-1.7\n1 0 obj << /Type /Catalog /OpenAction 5 0 R >> endobj\n"
+            b"5 0 obj << /S /JavaScript /JS (app.alert(1)) >> endobj\n%%EOF\n")
+    rules = _pdf_rules(write, "form.pdf", body)
+    assert _ESCAPE_RULE not in rules
+    assert _PDF_RULE in rules
+
+
+@needs_yara
+def test_an_escaped_space_in_a_font_name_is_legitimate(write):
+    """`#20` is how a name carries a space, and generators write
+    `/Times#20New#20Roman` for good reason. The obvious wider rule, any
+    escape in any name, would have matched this; it also matched 14% of
+    random 8 MB PDFs and was rejected on that number."""
+    body = (b"%PDF-1.7\n2 0 obj << /Type /Font /BaseFont /Times#20New#20Roman >> endobj\n"
+            b"3 0 obj << /Type /Font /BaseFont /ABCDEF+Segoe#20UI >> endobj\n%%EOF\n")
+    assert _ESCAPE_RULE not in _pdf_rules(write, "letter.pdf", body)
+
+
+@needs_yara
+def test_a_longer_name_that_begins_like_a_listed_one_is_not_it(write):
+    """A name ends at a delimiter, so `/J#61vaScriptX` is a different name.
+    Same rule as `/AAAAAB+Calibri` in the automatic-action rule."""
+    body = b"%PDF-1.7\n1 0 obj << /J#61vaScriptX 5 0 R >> endobj\n%%EOF\n"
+    assert _ESCAPE_RULE not in _pdf_rules(write, "x.pdf", body)
+
+
+@needs_yara
+def test_a_write_up_about_escaped_names_is_not_a_pdf(write):
+    """The same header anchor, for the same corpus: a note explaining the
+    obfuscation contains the obfuscated name."""
+    body = b"# Evasion\n\nThe dropper spells it /J#61vaScript so byte scanners miss it.\n"
+    assert _ESCAPE_RULE not in _pdf_rules(write, "notes.md", body)
+
+
+@needs_yara
+def test_the_escaped_name_rule_says_what_it_misses(write):
+    import yara as _yara
+    compiled = _yara.compile(filepath=str(RULE_DIR / "structural.yar"))
+    meta = next(m.meta for m in compiled.match(data=b"%PDF-1.7\n/J#61vaScript ")
+                if m.rule == _ESCAPE_RULE)
+    assert meta["severity"] == "low"
     assert "false_negative" in meta and "false_positive" in meta
 
 
