@@ -262,6 +262,14 @@ findings, what could not be run, and a content hash - and no path, no
 filename and no extraction data, so it does not leak the directory layout and
 username that every other output here does.
 
+An archive produces one envelope for itself and one for every member, container
+first. A member is linked to its container by content hash (`contained_in`)
+and a container lists its members the same way (`contains`), so the names
+members had inside the archive never leave the machine. A container's
+`severity` counts what is inside it: a ZIP carrying a disguised executable
+reads `high` even though its own findings list is empty. That is envelope
+`0.2`; `0.1` reported such a ZIP as `info`, which is why the version moved.
+
 Measure what the findings cost, against files you already know the nature of
 
 ```bash

@@ -40,6 +40,7 @@ the scan of them finishes, successfully or not.
 from __future__ import annotations
 
 import gzip
+import struct
 import tarfile
 import time
 import zipfile
@@ -80,9 +81,21 @@ class Budget:
     max_member_bytes: int = 67108864        # 64 MiB for any single member
     min_ratio_bytes: int = 1048576          # below this, ratio is not judged
     max_ratio: int = 200                    # uncompressed:compressed
+    #: Entries looked at, of any kind, across the tree. `max_entries` bounds
+    #: what is unpacked; this bounds what is merely listed. They are two
+    #: limits because the first one never saw a directory, an encrypted
+    #: member or a tar link, and an archive made of nothing else walked past
+    #: it: 3,000 encrypted entries against a cap of 10 were all recorded, and
+    #: `truncated` stayed false.
+    max_listed: int = 10000
+    #: The largest ZIP central directory opened at all. `zipfile` parses the
+    #: whole directory inside its own constructor, before any loop or budget
+    #: here runs: 200,000 empty entries in a 17 MB file cost 114 MB to open.
+    max_directory_bytes: int = 4194304
     deadline: float | None = None
 
     entries_used: int = 0
+    listed_used: int = 0
     bytes_used: int = 0
     #: Why the walk stopped early, if it did. Carried into the report, because
     #: a scan that ran out of budget is thinner than one that did not and the
@@ -104,6 +117,14 @@ class Budget:
             self.note(f"entry limit of {self.max_entries} reached")
             return False
         self.entries_used += 1
+        return True
+
+    def take_listing(self) -> bool:
+        """Whether one more entry of any kind may be looked at."""
+        if self.listed_used >= self.max_listed:
+            self.note(f"listing limit of {self.max_listed} entries reached")
+            return False
+        self.listed_used += 1
         return True
 
     def room_for(self, want: int) -> int:
@@ -128,6 +149,8 @@ def budget_from(config: dict[str, Any]) -> Budget:
         max_member_bytes=config_int(config, "archive_max_member_bytes", 67108864),
         min_ratio_bytes=config_int(config, "archive_ratio_floor_bytes", 1048576),
         max_ratio=config_int(config, "archive_max_ratio", 200),
+        max_listed=config_int(config, "archive_max_listed_entries", 10000),
+        max_directory_bytes=config_int(config, "archive_max_directory_bytes", 4194304),
         deadline=time.monotonic() + seconds,
     )
 
@@ -163,6 +186,92 @@ def safe_member_path(root: Path, name: str) -> Path | None:
     if candidate != root and root not in candidate.parents:
         return None
     return candidate
+
+
+#: Names Windows maps to a device rather than a file, in any case and with any
+#: extension. A member written as `NUL` was discarded by the device, then
+#: failed `is_file()`, and was skipped without a word.
+_WINDOWS_DEVICES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{n}" for n in range(1, 10)} | {f"LPT{n}" for n in range(1, 10)}
+    | {f"COM{n}" for n in "\u00b9\u00b2\u00b3"} | {f"LPT{n}" for n in "\u00b9\u00b2\u00b3"})
+
+#: Characters no Windows filename may hold. `:` is the one that matters most:
+#: `a.pdf:hidden` writes an alternate data stream onto `a.pdf`.
+_WINDOWS_FORBIDDEN = set('<>:"|?*') | {chr(c) for c in range(32)}
+
+
+def staging_name(raw_name: str, limit: int = 120) -> str:
+    """The base name a member is written under, safe on any filesystem.
+
+    Only the last component of the sample's name, because each member already
+    has a directory of its own. The extension survives, since
+    `extension_mismatch` reads it and a member renamed to `member` would hide
+    exactly the disguise that rule exists to find. Everything a filesystem
+    would reinterpret is neutralised: forbidden characters, a trailing dot or
+    space that Windows silently strips, and device names.
+    """
+    base = raw_name.replace("\\", "/").rsplit("/", 1)[-1]
+    base = "".join("_" if ch in _WINDOWS_FORBIDDEN else ch for ch in base)
+    base = base.rstrip(". ")
+    if not base:
+        return "member"
+    if base.split(".", 1)[0].upper() in _WINDOWS_DEVICES:
+        base = "_" + base
+    if len(base) > limit:
+        stem, dot, suffix = base.rpartition(".")
+        if dot and 0 < len(suffix) <= 16:
+            base = stem[: limit - len(suffix) - 1] + "." + suffix
+        else:
+            base = base[:limit]
+    return base
+
+
+def central_directory_bytes(path: Path) -> int | None:
+    """How large a ZIP says its central directory is, read without opening it.
+
+    `zipfile` parses the whole directory in its constructor, so this has to
+    run first and has to agree with it exactly: a check that read a different
+    end record from the one `zipfile` then uses would guard nothing. So it
+    asks `zipfile`'s own end-record reader, and falls back to a minimal
+    parser only if a future Python removes that private function. A test
+    holds the two to the same answer. `None` means no end record was found,
+    in which case `zipfile` will refuse the file itself.
+
+    The size is a claim by the sample, and that is safe here in one
+    direction: `zipfile` reads exactly this many bytes of directory, so a
+    file that understates it is parsed less, not more.
+    """
+    try:
+        with path.open("rb") as handle:  # binary API
+            reader = getattr(zipfile, "_EndRecData", None)
+            if reader is not None:
+                record = reader(handle)
+                return None if record is None else int(record[zipfile._ECD_SIZE])
+            return _central_directory_bytes_fallback(handle)
+    except (OSError, struct.error, IndexError, ValueError):
+        return None
+
+
+def _central_directory_bytes_fallback(handle) -> int | None:
+    """The end-record search, for a Python whose `zipfile` no longer exposes it."""
+    handle.seek(0, 2)
+    size = handle.tell()
+    start = max(size - 65535 - 22, 0)
+    handle.seek(start)
+    tail = handle.read()
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or len(tail) - at < 22:
+        return None
+    directory = struct.unpack_from("<L", tail, at + 12)[0]
+    locator = at - 20
+    if locator >= 0 and tail[locator:locator + 4] == b"PK\x06\x07":
+        offset = struct.unpack_from("<Q", tail, locator + 8)[0]
+        handle.seek(offset)
+        record = handle.read(56)
+        if len(record) == 56 and record[:4] == b"PK\x06\x06":
+            directory = struct.unpack_from("<Q", record, 40)[0]
+    return directory
 
 
 def _copy_bounded(source, target: Path, budget: Budget,
@@ -267,6 +376,7 @@ class ArchiveExtractor(RandomAccessExtractor):
         # is why a corpus of 58 real documents reported `zip 58` and nothing
         # more useful.
         data["container_kind"] = _container_kind(data["entries"])
+        data["duplicate_names"], data["case_collisions"] = _name_collisions(data["entries"])
         data["macro_project"] = _has_macro_project(data["entries"])
         data["macro_capable_name"] = (
             path.suffix.lower() in config_list(config, "macro_capable_extensions", []))
@@ -284,9 +394,22 @@ class ArchiveExtractor(RandomAccessExtractor):
 
     def _zip(self, path: Path, staging: Path | None, budget: Budget,
              data: dict[str, Any]) -> None:
+        # Before `zipfile` is constructed, because construction is where the
+        # cost is: it parses the whole central directory into memory, and no
+        # loop below can take that back.
+        directory = central_directory_bytes(path)
+        if directory is not None and directory > budget.max_directory_bytes:
+            budget.note(f"central directory larger than "
+                        f"{budget.max_directory_bytes} bytes")
+            data["truncated"] = True
+            data["parse_errors"].append(
+                f"zip: central directory of {directory} bytes is larger than "
+                f"archive_max_directory_bytes ({budget.max_directory_bytes}), "
+                "so the archive was not opened")
+            return
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
-                if budget.out_of_time():
+                if budget.out_of_time() or not budget.take_listing():
                     data["truncated"] = True
                     return
                 if info.is_dir():
@@ -314,7 +437,9 @@ class ArchiveExtractor(RandomAccessExtractor):
              data: dict[str, Any]) -> None:
         with tarfile.open(path) as archive:  # binary API
             for member in archive:
-                if budget.out_of_time():
+                # `TarFile` keeps every member it has read in a list, so the
+                # listing limit is also what bounds its memory.
+                if budget.out_of_time() or not budget.take_listing():
                     data["truncated"] = True
                     return
                 if not member.isfile():
@@ -369,13 +494,27 @@ class ArchiveExtractor(RandomAccessExtractor):
             data["entries"].append(entry)
             return
 
-        target = safe_member_path(staging, raw_name)
-        if target is None:
+        if safe_member_path(staging, raw_name) is None:
             data["refused"].append(
                 {"name": entry["name"], "reason": "path escapes the container"})
             entry["staged"] = False
             data["entries"].append(entry)
             return
+
+        # Checked above, and then not used. The name decides whether a member
+        # may be written; it no longer decides where. Two entries both called
+        # `invoice.pdf` used to share one file, the second overwrote the
+        # first, and recursion analysed the second payload twice and the
+        # first not at all. On a case-insensitive filesystem `Payload.exe`
+        # and `payload.exe` collided the same way without even matching. Each
+        # member now gets a slot of its own, and keeps only its base name, so
+        # its extension still means what `extension_mismatch` needs it to.
+        # Every reader counts a member before staging it, so the count is
+        # unique within this container, and each container stages into a
+        # directory of its own.
+        slot = staging / f"{data['member_count']:06d}"
+        slot.mkdir(exist_ok=False)
+        target = slot / staging_name(raw_name)
 
         with handle:
             written, truncated = _copy_bounded(handle, target, budget)
@@ -398,6 +537,23 @@ class ArchiveExtractor(RandomAccessExtractor):
     def findings(self, data: dict[str, Any],
                  config: dict[str, Any]) -> list[dict[str, Any]]:
         out = []
+
+        duplicates = (data.get("duplicate_names") or 0) + (data.get("case_collisions") or 0)
+        if duplicates:
+            # Every one of them was analysed; that is the fix. The finding is
+            # the ambiguity that remains: an extractor writes one file per
+            # name, so what a person gets by opening this archive depends on
+            # which entry their tool keeps, and that need not be the one that
+            # looked harmless here. `low`, because appending to a ZIP without
+            # rewriting it produces the same shape for an innocent reason.
+            out.append(mk_finding(
+                self.name, "archive_duplicate_entry",
+                f"{duplicates} entr{'y' if duplicates == 1 else 'ies'} share a name "
+                f"with another ({data.get('duplicate_names') or 0} exactly, "
+                f"{data.get('case_collisions') or 0} by case only); each was "
+                "analysed, and an extractor will keep only one", "low",
+                evidence=[{"name": "duplicate_names", "value": data.get("duplicate_names") or 0},
+                          {"name": "case_collisions", "value": data.get("case_collisions") or 0}]))
 
         if data.get("macro_project"):
             # Both at `low`, and that is a decision rather than an oversight.
@@ -516,6 +672,28 @@ JAR_MARKER = "meta-inf/manifest.mf"
 #: The compiled VBA project. Its presence is what "this document carries
 #: macros" means structurally, whatever the extension claims.
 MACRO_MEMBER = "vbaproject.bin"
+
+
+def _name_collisions(entries: list[dict[str, Any]]) -> tuple[int, int]:
+    """Entries that share a name with an earlier one, exactly and by case.
+
+    Both counts are of the later entries, so one pair is one collision. Case
+    is counted separately because it is a different claim: two identical
+    names collide on every filesystem, two names differing only in case
+    collide where the person opening the archive is most likely to be,
+    which is Windows.
+    """
+    seen, folded = set(), set()
+    exact = by_case = 0
+    for entry in entries:
+        name = str(entry.get("name") or "").replace("\\", "/")
+        if name in seen:
+            exact += 1
+        elif name.casefold() in folded:
+            by_case += 1
+        seen.add(name)
+        folded.add(name.casefold())
+    return exact, by_case
 
 
 def _member_names(entries: list[dict[str, Any]]) -> list[str]:

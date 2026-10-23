@@ -399,6 +399,14 @@ Serialises a `Report` into the interchange format in `findings-envelope.md`.
 Lossy on purpose: `report.data` does not cross, and neither does
 `report.path`.
 
+Its `severity` is `report.severity`, the same propagating property the exit
+code and the corpus harness ask. Until envelope 0.2 it computed its own
+answer from the report's own findings, which is the v0.5.5 defect living in a
+third place: the exit code failed a ZIP carrying a disguised executable while
+the envelope for that ZIP said `info`. An external review found it. Members
+are emitted as subjects of their own, linked to their container by content
+hash only.
+
 The only thing worth restating here is why `report.errors` does cross, as
 `incomplete`. Every other output this project produces has a channel for what
 could not be run, because a report that looks clean while omitting the

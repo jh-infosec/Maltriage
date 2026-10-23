@@ -278,6 +278,15 @@ DEFAULT_CONFIG = {
     # than skipped, because the first 64 MiB of a large file still identifies
     # it.
     "archive_max_entries": 1000,
+    # Entries looked at, of any kind: directories, encrypted members and tar
+    # links included. `archive_max_entries` counts only what is unpacked, and
+    # an archive made of nothing but the other kinds walked straight past it.
+    "archive_max_listed_entries": 10000,
+    # The largest ZIP central directory this tool will open. `zipfile` parses
+    # every entry in it during construction, before any limit here applies,
+    # and that cost 114 MB for a 17 MB file of empty entries. Read from the
+    # archive's own end record first, so an oversized one is refused unopened.
+    "archive_max_directory_bytes": 4194304,
     "archive_max_total_bytes": 268435456,
     "archive_max_member_bytes": 67108864,
 
@@ -549,6 +558,8 @@ def validate_config(config):
     check_bool("archive_recursion")
     check_int("archive_max_depth")
     check_int("archive_max_entries")
+    check_int("archive_max_listed_entries")
+    check_int("archive_max_directory_bytes")
     check_int("archive_max_total_bytes")
     check_int("archive_max_member_bytes")
     check_int("archive_max_seconds")

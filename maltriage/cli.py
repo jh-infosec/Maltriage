@@ -30,7 +30,7 @@ from . import known
 from .models import SEVERITY_RANK, Report, at_gate, max_severity
 from .pipeline import analyse, analyse_directory
 from .fixtures import write_samples
-from .envelope import to_envelope
+from .envelope import envelopes_for
 from . import corpus as corpus_module
 
 APP_NAME = "maltriage"
@@ -321,7 +321,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.envelope:
         with args.envelope.open("w", encoding="utf-8") as fh:
             for report in reports:
-                fh.write(json.dumps(to_envelope(report)) + "\n")
+                for envelope in envelopes_for(report):
+                    fh.write(json.dumps(envelope) + "\n")
 
     if any(at_gate(report, GATE_SEVERITY) for report in reports):
         return EXIT_FINDINGS

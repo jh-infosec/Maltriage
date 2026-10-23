@@ -1,5 +1,122 @@
 # Changelog
 
+## Version 0.5.14 - an outside review, verified before it was believed
+
+A static review of `a2ac366` by another model, which did not run anything,
+reported three P1 defects in how archive members are handled. Each was
+reproduced before anything changed, because a review that cannot be wrong is
+a review nobody checked. **All three were real.** Fixing them turned up three
+more of the same family, and one of the reviewer's mechanisms was in the
+wrong place.
+
+### 1. Two members with one name: the first was never analysed
+
+A member's on-disk path came from its name, so two entries called
+`invoice.pdf` were written to one file and the second overwrote the first.
+Recursion runs after extraction, so both records pointed at the final bytes:
+
+```
+children analysed: 2 | what each child was: ['unknown', 'unknown'] | severity: info
+```
+
+The payload was first and was never seen. **Wider than reported:** on
+Windows, `Invoice.pdf` and `invoice.pdf` are one file, so the names did not
+even have to match.
+
+**Each member now gets a slot directory of its own** and keeps only its base
+name, so its extension still means what `extension_mismatch` needs it to.
+The name decides whether a member may be written; it no longer decides
+where. A new `archive_duplicate_entry` finding, at `low`, reports what is
+left: every entry was analysed, but an extractor keeps one file per name, so
+what a person gets depends on their tool. Exact duplicates and case-only
+collisions are counted separately.
+
+### 2. `--envelope` dropped every archive member
+
+`to_envelope` wrote `max_severity(report.findings)`, the report's own
+findings only, and emitted nothing for members. A ZIP carrying a disguised PE:
+
+```
+report.severity: high | envelope severity: info | envelope findings: 0
+```
+
+The format defines `info` with no findings as "examined, nothing found".
+**This is the v0.5.5 defect in a third place.** v0.5.5 moved the corpus
+harness onto the propagating `report.severity`, v0.5.11 moved the exit code
+onto one shared gate, and the envelope kept computing its own answer. The
+docstring on `Report.severity` has said since v0.5.5 that the envelope asks
+it. It never did. I fixed this class twice and missed the third instance.
+
+**Envelope 0.2.** Every member is a subject of its own, emitted after its
+container, linked by content hash: `contained_in` on the member, `contains` on
+the container. A container's `severity` is `report.severity`, so it counts
+what is inside. The version moved rather than the fix landing quietly,
+because the specification tells a consumer to reject a version it does not
+recognise, and a 0.1 consumer would read a 0.2 container's meaning wrongly.
+Member names still never leave the machine.
+
+The module's other entry point, the list form `to_envelopes`, had the same
+defect and is fixed through the same walk.
+
+### 3. The entry limit counted only what was unpacked
+
+**Directory and encrypted entries never touched it.** 3,000 encrypted
+entries against a cap of 10 were all recorded, and `truncated` stayed false.
+A new `archive_max_listed_entries` (10,000) counts every entry looked at,
+separately from `archive_max_entries`, which still counts what is unpacked.
+
+**The reviewer's mechanism was slightly off, and the real one is worse.** It
+blamed `infolist()`. `zipfile` parses the entire central directory inside its
+own constructor, before `infolist()` or any budget runs: 200,000 empty
+entries in a 17 MB file cost 114 MB to open. No change to the loop could
+reach that. **`archive_max_directory_bytes` (4 MiB)** reads the directory size
+from the archive's end record first, and an oversized one is refused
+unopened.
+
+That check guards nothing unless it reads the end record `zipfile` is about
+to use, and CPython's end-record search has changed between versions. So it
+asks `zipfile`'s own reader, which agrees by construction, with a small
+parser of its own only for a Python that removes that private function. A
+test holds both to `zipfile`'s answer on four archives, including the one the
+ZIP64 branch exists for: a 32-bit field claiming **100 bytes** while the ZIP64
+record holds **3,331,226**. `zipfile` believes the ZIP64 record, so a check
+that did not would approve the small number and let it parse the large one.
+
+### Found while fixing, not reported
+
+- **Tar link entries never touched the limit either.** 3,000 symlinks
+  produced 3,000 refusal records against a cap of 10. `TarFile` also keeps
+  every member it reads in a list, so the listing limit now bounds its memory.
+- **A member named after a Windows device was skipped without a word.**
+  `NUL` was written to the null device, failed `is_file()`, and was never
+  analysed: the same "member hidden from analysis" as defect 1, Windows only.
+- **`a.pdf:hidden` writes an NTFS alternate data stream**, and Windows strips
+  a trailing dot, so `evil.exe.` lands as something else. Member base names
+  are now neutralised: forbidden characters, trailing dots and spaces, and
+  device names, including `COM¹` and `CONIN$`.
+
+### A fixture that lied
+
+The first reproduction of defect 3 said it did not exist: 11 entries,
+truncated. `zipfile` silently drops an encryption flag set on write, so the
+"encrypted" entries were ordinary ones and the cap worked on them. With the
+flag patched into the bytes, as the existing encryption test already did,
+all 3,000 were recorded. The reviewer was right and my fixture was wrong.
+
+### Verified
+
+596 tests pass, 36 new. Against the pre-fix code, 30 of them fail, each for
+the defect it names. The rest pass on both and exist to stop the fix
+over-correcting: a member keeps its extension, an ordinary archive is
+untouched, a directory under the limit opens. One cannot fail on Linux at
+all: the case-only collision is a Windows defect, and the Windows run is what
+gives that test teeth.
+
+Mutation testing caught 17 of 17. The first run caught 16; the survivor was
+the ZIP64 branch of the fallback parser, because the ZIP64 fixture overflowed
+only the entry count and the directory still fit 32 bits, so the branch was
+never exercised. The understated-directory fixture above is what closed it.
+
 ## Version 0.5.13 - the escape is the signal
 
 v0.5.12 stated a regression and did not hide it. The old

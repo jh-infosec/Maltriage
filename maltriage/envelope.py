@@ -32,13 +32,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import Report, max_severity
+from .models import Report
 
 #: The version of `findings-envelope.md` this emitter writes to. Moves
 #: independently of `SCHEMA_VERSION`: one tracks what a maltriage report looks
 #: like, the other tracks what three tools have agreed to say to each other,
 #: and they change for different reasons.
-ENVELOPE_VERSION = "0.1"
+#:
+#: 0.2 changed what `severity` means for a container, and so it is a new
+#: version rather than a quiet fix: the specification tells a consumer to
+#: reject a version it does not recognise, which is exactly right for a
+#: consumer that would otherwise read a container's `info` as "examined,
+#: nothing found" when a member was `high`.
+ENVELOPE_VERSION = "0.2"
 
 #: Findings whose substance is a string the subject supplied. Nothing was
 #: tested to produce these, so `validated` is false: the emitter transcribed
@@ -83,8 +89,40 @@ def _validated(finding: dict[str, Any], report: Report) -> bool:
     return key not in TRANSCRIBED
 
 
+def envelopes_for(report: Report):
+    """A report and everything inside it, as envelopes, container first.
+
+    Each member is a subject of its own, identified by its own content hash
+    and linked to its container by the container's hash and nothing else: a
+    member's name inside an archive is a filename the sample chose, and the
+    envelope carries no filenames. Until 0.2 only the outermost report was
+    emitted, so a ZIP carrying a disguised PE produced one envelope saying
+    `info` with no findings while the scan itself failed on it.
+    """
+    yield to_envelope(report)
+    container = _subject_id(report)
+    for child in report.children:
+        for envelope in envelopes_for(child):
+            if envelope["subject"].get("contained_in") is None:
+                envelope["subject"]["contained_in"] = container
+            yield envelope
+
+
+def _subject_id(report: Report) -> str | None:
+    sha256 = (report.data.get("hashes") or {}).get("sha256")
+    return f"sha256:{sha256}" if sha256 else None
+
+
 def to_envelope(report: Report) -> dict[str, Any]:
-    """One report, as one envelope."""
+    """One report, as one envelope.
+
+    `severity` is `report.severity`, which counts what is inside. It was the
+    worst of this subject's own findings alone, which is the v0.5.5 defect
+    in a second place: the exit code and the corpus harness asked the
+    propagating property, and this asked something else, so the three
+    disagreed about the same file. `contains` names the members whose
+    envelopes explain a severity that this one's findings do not.
+    """
     hashes = report.data.get("hashes") or {}
     filetype = report.data.get("filetype") or {}
     sha256 = hashes.get("sha256")
@@ -107,16 +145,19 @@ def to_envelope(report: Report) -> dict[str, Any]:
 
     findings = [_finding(f, report) for f in report.findings]
 
-    return {
+    envelope = {
         "envelope_version": ENVELOPE_VERSION,
         "emitter": {"name": "maltriage", "version": _version()},
         "subject": subject,
         "observed_at": report.analyzed_at,
-        "severity": max_severity(report.findings),
+        "severity": report.severity,
         "findings": findings,
         "incomplete": [{"source": source, "reason": reason}
                        for source, reason in sorted(report.errors.items())],
     }
+    if report.children:
+        envelope["contains"] = [_subject_id(child) for child in report.children]
+    return envelope
 
 
 def _finding(finding: dict[str, Any], report: Report) -> dict[str, Any]:
@@ -148,7 +189,12 @@ def _finding(finding: dict[str, Any], report: Report) -> dict[str, Any]:
 
 
 def to_envelopes(reports: list[Report]) -> list[dict[str, Any]]:
-    return [to_envelope(r) for r in reports]
+    """Every report and every member, as one flat list of envelopes.
+
+    Built on `envelopes_for` rather than `to_envelope`, which is what it was
+    until 0.2 and which is how it dropped every archive member too.
+    """
+    return [envelope for report in reports for envelope in envelopes_for(report)]
 
 
 def _version() -> str:

@@ -6879,3 +6879,357 @@ def test_a_file_with_no_cut_strings_says_nothing_about_fragments(write):
     data = _strings(write("a.bin", b"\x00http://evil.example/x\x00"))
     assert data["indicators_fragments"] == 0
     assert not any("setting aside" in p for p in data.get("parse_errors") or [])
+
+
+# An external review, verified before it was believed
+#
+# Three P1 claims about archive members, from a static review that did not
+# run anything. All three reproduced; the third reproduced only once the
+# fixture stopped lying, because `zipfile` silently drops an encryption flag
+# set on write. Two more defects of the same family turned up while fixing
+# them: tar link entries, and members named after Windows devices.
+
+import warnings as _warnings
+
+_PE_BYTES = b"MZ" + b"\x00" * 1024
+_LETTER = b"an ordinary letter about nothing in particular " * 20
+
+
+def _zip_with_duplicates(entries):
+    """`_zip_bytes`, quiet about the duplicate names it is asked to write."""
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        return _zip_bytes(entries)
+
+
+def _child_families(report):
+    return sorted((child.data.get("filetype") or {}).get("family") or "unknown"
+                  for child in report.children)
+
+
+@pytest.mark.parametrize("order", ["payload first", "payload second"])
+def test_two_entries_with_one_name_are_both_analysed(write, order):
+    """The defect: both entries were written to the same file, the second
+    overwrote the first, and recursion analysed whichever came last twice.
+    Put the payload first and it was never seen at all."""
+    pair = [("invoice.pdf", _PE_BYTES), ("invoice.pdf", _LETTER)]
+    if order == "payload second":
+        pair.reverse()
+    report = analyse(write("bundle.zip", _zip_with_duplicates(pair)))
+
+    assert len(report.children) == 2
+    assert _child_families(report) == ["pe", "unknown"]
+    assert report.severity == "high"
+
+
+def test_names_that_differ_only_in_case_are_both_analysed(write):
+    """The same collision on a case-insensitive filesystem, which is where
+    the person opening the archive most likely is. The names do not even
+    match, so nothing that compared them as strings would have noticed."""
+    body = _zip_bytes([("Invoice.pdf", _PE_BYTES), ("invoice.pdf", _LETTER)])
+    report = analyse(write("bundle.zip", body))
+
+    assert _child_families(report) == ["pe", "unknown"]
+    assert report.severity == "high"
+
+
+def test_a_shared_name_is_reported_as_well_as_survived(write):
+    """Analysing both is the fix. What remains is the ambiguity: an
+    extractor keeps one file per name, so what a person gets depends on
+    their tool. `low`, because appending to a ZIP without rewriting it makes
+    the same shape innocently."""
+    body = _zip_with_duplicates([("a.txt", b"one" * 20), ("a.txt", b"two" * 20),
+                                 ("B.txt", b"three" * 20), ("b.txt", b"four" * 20),
+                                 ("c.txt", b"five" * 20)])
+    report = analyse(write("bundle.zip", body))
+    archive = _archive_data(report)
+
+    assert archive["duplicate_names"] == 1
+    assert archive["case_collisions"] == 1
+    finding = next(f for f in report.findings if f["key"] == "archive_duplicate_entry")
+    assert finding["severity"] == "low"
+    assert "1 exactly, 1 by case only" in finding["detail"]
+
+
+def test_an_ordinary_archive_has_no_shared_names(write):
+    report = analyse(write("bundle.zip", _zip_bytes([("a.txt", b"one" * 20),
+                                                     ("dir/a.txt", b"two" * 20)])))
+    assert _archive_data(report)["duplicate_names"] == 0
+    assert "archive_duplicate_entry" not in {f["key"] for f in report.findings}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("invoice.pdf", "invoice.pdf"),
+    ("deep/dir/invoice.pdf", "invoice.pdf"),
+    ("deep\\dir\\invoice.pdf", "invoice.pdf"),
+    ("NUL", "_NUL"),
+    ("nul.txt", "_nul.txt"),
+    ("COM1", "_COM1"),
+    ("lpt9.log", "_lpt9.log"),
+    ("CONIN$", "_CONIN$"),
+    ("COM¹", "_COM¹"),
+    ("a.pdf:hidden", "a.pdf_hidden"),
+    ("what?.exe", "what_.exe"),
+    ("evil.exe. ", "evil.exe"),
+    ("dir/", "member"),
+    ("...", "member"),
+])
+def test_a_member_is_written_under_a_name_every_filesystem_keeps(raw, expected):
+    """A member called `NUL` was written to the null device on Windows, then
+    failed `is_file()` and was skipped without a word. `a.pdf:hidden` writes
+    an alternate data stream. Windows strips a trailing dot, so `evil.exe.`
+    becomes something else on disk. Each is a member the sample could hide
+    from analysis by choosing its name, and only Windows would show it."""
+    assert archives_module.staging_name(raw) == expected
+
+
+def test_a_long_member_name_keeps_its_extension(write):
+    name = archives_module.staging_name("x" * 400 + ".pdf")
+    assert len(name) <= 120 and name.endswith(".pdf")
+
+
+def test_a_member_keeps_the_extension_its_disguise_depends_on(write):
+    """The reason the slot keeps the sample's base name rather than calling
+    every member `member`: `extension_mismatch` reads the extension, and
+    renaming members would hide the very disguise it exists to find."""
+    report = analyse(write("bundle.zip", _zip_bytes([("invoice.pdf", _PE_BYTES)])))
+    child = report.children[0]
+    assert child.filename == "invoice.pdf"
+    assert "extension_mismatch" in {f["key"] for f in child.findings}
+
+
+def _encrypted_zip(count):
+    """A ZIP of `count` encrypted entries, with the flag set in the bytes.
+
+    `zipfile` silently drops an encryption flag set on write, which is why
+    the first reproduction of this defect reported that it did not exist."""
+    raw = bytearray(_zip_bytes([(f"m{i}.bin", b"x") for i in range(count)]))
+    for marker, flag_at in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        at = raw.find(marker)
+        while at >= 0:
+            raw[at + flag_at] |= 0x01
+            at = raw.find(marker, at + 4)
+    return bytes(raw)
+
+
+def test_encrypted_entries_count_against_the_listing_limit(write):
+    """3,000 encrypted entries against a cap of 10 were all recorded and
+    `truncated` stayed false, because the cap counted only what was
+    unpacked and an encrypted member is never unpacked."""
+    report = analyse(write("locked.zip", _encrypted_zip(300)),
+                     config={**DEFAULT_CONFIG, "archive_max_listed_entries": 10})
+    archive = _archive_data(report)
+
+    assert len(archive["entries"]) <= 10
+    assert archive["truncated"] is True
+    assert any("listing limit" in problem for problem in archive["parse_errors"])
+
+
+def test_directory_entries_count_against_the_listing_limit(write):
+    """Directories were skipped before any budget was consulted, so an
+    archive of nothing but directories was walked to the end however long it
+    was."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(200):
+            archive.writestr(f"d{index}/", b"")
+        archive.writestr("last.txt", b"the only file")
+    report = analyse(write("dirs.zip", buffer.getvalue()),
+                     config={**DEFAULT_CONFIG, "archive_max_listed_entries": 10})
+
+    assert _archive_data(report)["truncated"] is True
+    assert report.children == []
+
+
+def test_tar_link_entries_count_against_the_listing_limit(write):
+    """Not in the review: the tar reader had the same shape. Each link
+    entry added a refusal record and never touched the budget, so 3,000
+    links produced 3,000 records against a cap of 10. `TarFile` also keeps
+    every member it reads in a list, so this limit bounds its memory too."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:  # binary API
+        for index in range(300):
+            info = tarfile.TarInfo(f"l{index}")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            archive.addfile(info)
+    report = analyse(write("links.tar", buffer.getvalue()),
+                     config={**DEFAULT_CONFIG, "archive_max_listed_entries": 10})
+    archive = _archive_data(report)
+
+    assert len(archive["refused"]) <= 10
+    assert archive["truncated"] is True
+
+
+def test_an_ordinary_archive_is_untouched_by_the_listing_limit(write):
+    body = _zip_bytes([(f"f{i}.txt", b"content " * 10) for i in range(20)])
+    report = analyse(write("bundle.zip", body))
+    assert _archive_data(report)["truncated"] is False
+    assert len(report.children) == 20
+
+
+def test_an_oversized_central_directory_is_refused_before_zipfile_opens_it(
+        write, monkeypatch):
+    """`zipfile` parses the entire directory inside its constructor: 200,000
+    empty entries in a 17 MB file cost 114 MB to open, before any limit here
+    ran. So the size is read from the end record first, and the proof that
+    the refusal happens early enough is that constructing `ZipFile` is made
+    to fail."""
+    body = _zip_bytes([(f"f{i}", b"") for i in range(500)])
+    path = write("many.zip", body)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("ZipFile was constructed despite the directory limit")
+
+    monkeypatch.setattr(archives_module.zipfile, "ZipFile", refuse)
+    report = analyse(path, config={**DEFAULT_CONFIG, "archive_max_directory_bytes": 1024})
+    archive = _archive_data(report)
+
+    assert archive["truncated"] is True
+    assert any("central directory" in problem and "not opened" in problem
+               for problem in archive["parse_errors"])
+    assert report.children == []
+
+
+def test_a_central_directory_under_the_limit_is_opened(write):
+    path = write("few.zip", _zip_bytes([(f"f{i}.txt", b"x" * 40) for i in range(5)]))
+    report = analyse(path, config={**DEFAULT_CONFIG, "archive_max_directory_bytes": 1 << 20})
+    assert len(report.children) == 5
+
+
+def _zip_variants(tmp_path):
+    plain = tmp_path / "plain.zip"
+    plain.write_bytes(_zip_bytes([("a.txt", b"hello")]))
+    commented = tmp_path / "commented.zip"
+    with zipfile.ZipFile(commented, "w") as archive:
+        archive.writestr("a.txt", b"hello")
+        archive.comment = b"PK\x05\x06 is not where the record is " * 1000
+    zip64 = tmp_path / "zip64.zip"
+    with zipfile.ZipFile(zip64, "w", zipfile.ZIP_STORED) as archive:
+        for index in range(65536):
+            archive.writestr(str(index), b"")
+    # The attack the ZIP64 branch exists for. 65,536 entries overflow only
+    # the 16-bit count; the directory still fits the 32-bit size field, so
+    # the plain file above reads the same with or without ZIP64 handling and
+    # proved nothing about it. Here the 32-bit field claims 100 bytes while
+    # the ZIP64 record holds the real size. `zipfile` believes the ZIP64
+    # record, so a check that did not would approve 100 and let it parse
+    # the rest.
+    understated = tmp_path / "understated.zip"
+    raw = bytearray(zip64.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + 12:end + 16] = (100).to_bytes(4, "little")
+    understated.write_bytes(bytes(raw))
+    return [plain, commented, zip64, understated]
+
+
+def test_the_directory_size_agrees_with_zipfiles_own_reader(tmp_path):
+    """The check guards nothing unless it reads the same end record `zipfile`
+    is about to use. Held against `zipfile`'s private reader on an ordinary
+    archive, one whose comment contains a decoy end-record signature, and one
+    large enough to need ZIP64. The fallback parser is held to the same
+    answers, for the Python that removes the private function."""
+    for path in _zip_variants(tmp_path):
+        with path.open("rb") as handle:  # binary API
+            expected = zipfile._EndRecData(handle)[zipfile._ECD_SIZE]
+        with path.open("rb") as handle:  # binary API
+            fallback = archives_module._central_directory_bytes_fallback(handle)
+        assert archives_module.central_directory_bytes(path) == expected, path.name
+        assert fallback == expected, path.name
+
+
+def test_a_file_with_no_end_record_has_no_directory_size(tmp_path):
+    path = tmp_path / "not.zip"
+    path.write_bytes(b"PK\x03\x04" + os.urandom(2000))
+    assert archives_module.central_directory_bytes(path) is None
+
+
+def test_an_archive_member_is_a_subject_in_the_envelope_stream(write):
+    """The envelope defect: a ZIP carrying a disguised PE produced one
+    envelope reading `info` with no findings, which the format defines as
+    "examined, nothing found", while the scan failed on that very file."""
+    report = analyse(write("bundle.zip", _zip_bytes([("invoice.pdf", _PE_BYTES)])))
+    container, member = envelope_module.envelopes_for(report)
+
+    assert container["severity"] == "high"
+    assert container["findings"] == []
+    assert container["contains"] == [member["subject"]["id"]]
+    assert member["subject"]["contained_in"] == container["subject"]["id"]
+    assert "extension_mismatch" in {f["key"] for f in member["findings"]}
+
+
+def test_every_envelope_agrees_with_the_report_it_came_from(write):
+    """`Report.severity`'s docstring has said since v0.5.5 that the corpus
+    harness, the envelope and the exit code all ask it what a file is worth.
+    The envelope never did. Now every envelope in the tree, at every depth,
+    carries the severity of the report it was made from."""
+    inner = _zip_bytes([("invoice.pdf", _PE_BYTES), ("notes.txt", _LETTER)])
+    outer = _zip_bytes([("inner.zip", inner), ("readme.txt", _LETTER)])
+    report = analyse(write("outer.zip", outer))
+
+    def walk(node):
+        yield node
+        for child in node.children:
+            yield from walk(child)
+
+    nodes = list(walk(report))
+    envelopes = list(envelope_module.envelopes_for(report))
+    assert len(envelopes) == len(nodes) == 5
+    assert [e["severity"] for e in envelopes] == [n.severity for n in nodes]
+    assert envelopes[0]["severity"] == "high"
+
+
+def test_a_nested_member_points_at_its_own_container(write):
+    inner = _zip_bytes([("invoice.pdf", _PE_BYTES)])
+    report = analyse(write("outer.zip", _zip_bytes([("inner.zip", inner)])))
+    outer_env, inner_env, pe_env = envelope_module.envelopes_for(report)
+
+    assert inner_env["subject"]["contained_in"] == outer_env["subject"]["id"]
+    assert pe_env["subject"]["contained_in"] == inner_env["subject"]["id"]
+    assert "contained_in" not in outer_env["subject"]
+
+
+def test_a_members_name_never_reaches_an_envelope(write):
+    """The rule that predates members: no path and no filename. A member's
+    name inside an archive is a filename the sample chose, so members are
+    linked by content hash and by nothing else."""
+    body = _zip_bytes([("Q3-payroll-hendricks.pdf", _PE_BYTES)])
+    report = analyse(write("outer.zip", body))
+    rendered = json.dumps(envelope_module.to_envelopes([report]))
+    assert "hendricks" not in rendered
+    assert "outer.zip" not in rendered
+
+
+def test_the_list_form_includes_members_too(write):
+    """`to_envelopes` was the other way in, and it called `to_envelope` on
+    the top-level reports only, so it had the same defect."""
+    report = analyse(write("bundle.zip", _zip_bytes([("invoice.pdf", _PE_BYTES)])))
+    assert len(envelope_module.to_envelopes([report])) == 2
+
+
+def test_the_cli_writes_an_envelope_for_every_member(write, tmp_path):
+    write("bundle.zip", _zip_bytes([("invoice.pdf", _PE_BYTES), ("a.txt", _LETTER)]))
+    out = tmp_path / "env.jsonl"
+    code = cli.main(["scan", str(tmp_path / "bundle.zip"), "--envelope", str(out), "-q"])
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+
+    assert code == cli.EXIT_FINDINGS
+    assert len(lines) == 3
+    assert lines[0]["severity"] == "high"
+    assert all(line["envelope_version"] == "0.2" for line in lines)
+    assert all(line["subject"].get("contained_in") == lines[0]["subject"]["id"]
+               for line in lines[1:])
+
+
+def test_a_directory_exactly_at_the_limit_is_opened_and_one_byte_over_is_not(write):
+    """The limit is the largest directory opened, so a directory of exactly
+    that size is opened. Pinned because an off-by-one here is invisible
+    everywhere else."""
+    path = write("five.zip", _zip_bytes([(f"f{i}.txt", b"x" * 40) for i in range(5)]))
+    size = archives_module.central_directory_bytes(path)
+
+    at_limit = analyse(path, config={**DEFAULT_CONFIG, "archive_max_directory_bytes": size})
+    under = analyse(path, config={**DEFAULT_CONFIG, "archive_max_directory_bytes": size - 1})
+
+    assert len(at_limit.children) == 5
+    assert under.children == [] and _archive_data(under)["truncated"] is True

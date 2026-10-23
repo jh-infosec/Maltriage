@@ -1,4 +1,4 @@
-# Findings Envelope 0.1
+# Findings Envelope 0.2
 
 A wire format for one tool's findings about one subject, meant to be read by a
 tool that did not produce them.
@@ -12,10 +12,22 @@ it left open, and adds one field it did not mention. maltriage is the first
 emitter, so this shape is a proposal that claude-recon-agent and Shadowfax
 should argue with rather than a contract they are bound by.
 
-`envelope_version` is `0.1` and moves independently of maltriage's
+`envelope_version` is `0.2` and moves independently of maltriage's
 `SCHEMA_VERSION`. Two different things change for two different reasons: the
 schema version tracks what a maltriage report looks like, the envelope version
 tracks what three tools have agreed to say to each other.
+
+**0.2 changed what `severity` means for a container, and added two fields.**
+In 0.1 an archive was one envelope whose `severity` was the worst of its own
+findings, and the emitter wrote nothing for its members. A ZIP carrying a
+disguised executable therefore produced one envelope reading `info` with no
+findings, which this document defines as "examined, nothing found", while the
+scan that produced it failed on exactly that file. An external review caught
+it; the emitter's own exit code and corpus harness had already been corrected
+for the same mistake, and this was the third place it lived. Because a 0.1
+consumer reading a 0.2 container would believe the old meaning, the version
+moved rather than the fix landing quietly, and this document's own rule is
+that a consumer rejects a version it does not recognise.
 
 
 ## Why it exists
@@ -34,7 +46,7 @@ native formats, and converting to it is lossy on purpose.
 
 ```json
 {
-  "envelope_version": "0.1",
+  "envelope_version": "0.2",
   "emitter": {"name": "maltriage", "version": "0.4.0"},
   "subject": {
     "id": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -92,6 +104,10 @@ What the findings are about.
 - `size_bytes`, `media_type` (optional) - descriptive, never authoritative.
   maltriage's `media_type` is its own family string (`pe`, `elf`, `pdf`),
   which is a claim from magic bytes and not a MIME type.
+- `contained_in` (optional, 0.2) - the `id` of the subject this one was found
+  inside, present on the envelope of every archive member. Members are
+  subjects of their own, each identified by its own content hash, and emitted
+  after their container.
 
 **There is no path field, and adding one is a change to this document rather
 than a convenience.** maltriage's own `Report.path` is a resolved absolute
@@ -111,13 +127,19 @@ created or when the envelope was ingested.
 
 ### `severity` (required, string)
 
-The highest severity among `findings`, repeated at the top so a consumer can
-triage a stream without walking every finding. One of `info`, `low`, `medium`,
-`high`.
+The highest severity among this subject's `findings` **and among everything
+it contains**, so a consumer can triage a stream by its containers without
+walking every member. One of `info`, `low`, `medium`, `high`.
 
-An empty `findings` array with `severity: "info"` is a meaningful message - 
-"this was examined and nothing was found" - and is not the same as no envelope
-at all.
+A container whose own `findings` are empty can therefore carry `high`. The
+envelope says why in its optional **`contains`** field, a list of the member
+`id`s whose envelopes appear in the same stream with `contained_in` pointing
+back. Members are linked by content hash only: the name a member had inside
+the archive is a filename the sample chose, and this format carries none.
+
+An empty `findings` array with `severity: "info"` is still a meaningful
+message - "this was examined, everything inside it was examined, and nothing
+was found" - and is not the same as no envelope at all.
 
 ### `findings` (required, array)
 
@@ -333,7 +355,10 @@ name instead.
 - `key` comes from a set the emitter can enumerate on request.
 - Absence of a finding means the emitter did not produce one, **unless
   `incomplete` names its source**, in which case it means nothing at all.
-- `severity` is the emitter's opinion, calibrated to the emitter's own gate.
+- `severity` is the emitter's opinion, calibrated to the emitter's own gate,
+  and it accounts for everything the subject contains.
+- Every `id` in a `contains` list has an envelope of its own in the same
+  stream, unless hashing failed, in which case that entry is `null`.
 - No field carries a secret, a credential, a matched byte or a filesystem path.
 
 
