@@ -16,7 +16,10 @@ envelope is the artefact most likely to be handed to somebody else, so it is
 the one that must not carry that. Subjects are identified by content hash and
 by nothing else.
 
-**`report.errors` does cross, as `incomplete`.** This is the field that keeps
+**`report.errors` does cross, as `incomplete`, and so does every extractor's
+`parse_errors` and `warnings`, through `Report.thin()`.** The second half was
+missing until 0.5.15, which made the sentence below untrue for every parser
+that stopped short rather than raising. This is the field that keeps
 the format honest. An envelope carrying only findings turns "I could not look"
 into "I looked and found nothing", and that distinction is the one this project
 has spent five releases defending: `imports_parsed`, `entropy_skipped`,
@@ -30,6 +33,9 @@ a sample.
 
 from __future__ import annotations
 
+import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from .models import Report
@@ -152,12 +158,60 @@ def to_envelope(report: Report) -> dict[str, Any]:
         "observed_at": report.analyzed_at,
         "severity": report.severity,
         "findings": findings,
-        "incomplete": [{"source": source, "reason": reason}
-                       for source, reason in sorted(report.errors.items())],
+        "incomplete": _incomplete(report),
     }
     if report.children:
         envelope["contains"] = [_subject_id(child) for child in report.children]
     return envelope
+
+
+def _incomplete(report: Report) -> list[dict[str, str]]:
+    """Everything that did not run, and everything that ran and came back
+    short, with the scanning machine scrubbed out of it.
+
+    Until this, only `report.errors` crossed. A parser that stopped early
+    writes to its `parse_errors` instead, and those never reached the
+    envelope, so a ZIP refused unopened by `archive_max_directory_bytes`
+    went out as `info`, no findings, nothing incomplete: the exact "examined,
+    nothing found" this module's docstring says the field exists to prevent.
+    `Report.thin()` is the same computation the human report prints.
+    """
+    entries = sorted(report.errors.items()) + sorted(report.thin().items())
+    return [{"source": _scrub(source, report), "reason": _scrub(reason, report)}
+            for source, reason in entries]
+
+
+#: A quoted string with a path separator in it, which is how Python quotes the
+#: file in every `OSError`.
+_QUOTED_PATH = re.compile(r"""(['"])[^'"\n]*[\\/][^'"\n]*\1""")
+#: A drive-letter or UNC path, which may appear unquoted.
+_WINDOWS_PATH = re.compile(r"""(?<![\w])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"]*""")
+#: A POSIX absolute path of at least two components. `/JS` and `/AA` are
+#: PDF names in a YARA message and are one component, so they survive.
+_POSIX_PATH = re.compile(r"""(?<![\w.:/\\])/(?:[^\s'"/]+/)+[^\s'"/]*""")
+
+
+def _scrub(text: str, report: Report) -> str:
+    """`text` with every filesystem path and the subject's own name removed.
+
+    The envelope promises no filesystem path and no filename, and `incomplete`
+    is the one field built from messages written for a person at the
+    scanning machine: exception text quotes the file it failed on, and a
+    rule-directory error names the directory. Findings are not scrubbed. A
+    Windows path inside a sample is an indicator about the sample, and
+    removing it would destroy the finding; what this removes is the machine
+    that did the looking.
+    """
+    known = [str(report.path), str(Path.home()), tempfile.gettempdir(), str(Path.cwd())]
+    for value in sorted({k for k in known if k and len(k) > 2}, key=len, reverse=True):
+        text = text.replace(value, "<path>")
+    text = _QUOTED_PATH.sub("'<path>'", text)
+    text = _WINDOWS_PATH.sub("<path>", text)
+    text = _POSIX_PATH.sub("<path>", text)
+    name = report.filename or ""
+    if len(name) >= 3:
+        text = re.sub(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", "<file>", text)
+    return text
 
 
 def _finding(finding: dict[str, Any], report: Report) -> dict[str, Any]:

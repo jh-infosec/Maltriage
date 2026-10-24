@@ -233,7 +233,7 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     # A section entry is (name, characteristics, body) or, when the section
     # should claim more memory than the file provides for it,
     # (name, characteristics, body, virtual_size). That fourth element is how
-    # the unpacker shape - a large VirtualSize over a small SizeOfRawData --
+    # the unpacker shape - a large VirtualSize over a small SizeOfRawData -
     # is built, and it is the only way to build it: everywhere else the two
     # are derived from the body and therefore agree by construction.
     placed = [{"name": entry[0], "chars": entry[1], "body": entry[2],
@@ -537,7 +537,7 @@ def build_elf(sections=None, segments=None, bitness=64, endian="<",
 
         The two are measured in different spaces and are not interchangeable.
         An SHT_NOBITS section occupies address space and no file space, so a
-        segment containing one has a memory size larger than its file size --
+        segment containing one has a memory size larger than its file size -
         which is the whole point of `.bss`. Computing both from file offsets
         produced a segment whose `p_memsz` stopped short of its own contents,
         and an entry point that fell outside every loadable segment, so the

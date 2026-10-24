@@ -192,6 +192,23 @@ looked and found nothing", which is the exact failure the tool spends its
 `report.errors` channel preventing. A consumer that ignores `incomplete` is
 free to; one that does not have it cannot tell the difference.
 
+**It covers analysis that ran and came back short, not only analysis that did
+not run.** Until maltriage 0.5.15 the emitter filled it from `report.errors`
+alone, so a parser that stopped early, which writes to its own
+`parse_errors`, was invisible here. A ZIP refused unopened for an oversized
+central directory went out as `info`, no findings, nothing incomplete: the
+very statement this section exists to prevent. The emitter now carries the
+same list its human report prints. The field's shape did not change and a
+0.2 consumer reads more entries rather than different ones, which is why the
+version did not move.
+
+**A `reason` never carries the scanning machine.** These messages were
+written for a person at that machine, and exception text quotes the file it
+failed on. The emitter removes filesystem paths, the machine's home and
+temporary directories, and the subject's own name before they cross. Only
+this field is scrubbed: a path inside `findings` is something found in the
+subject, an indicator, and removing it would destroy the finding.
+
 
 ## `validated`
 

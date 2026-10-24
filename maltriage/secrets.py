@@ -111,7 +111,7 @@ class Candidate:
 # confidence.
 
 #: Guards on every known pattern. `AKIA` followed by sixteen uppercase
-#: characters occurs inside longer runs of uppercase in ordinary binaries --
+#: characters occurs inside longer runs of uppercase in ordinary binaries -
 #: measured, it fired on `wget` and `xkbprint` - and a known-format match is
 #: `medium`, which is a non-zero exit on somebody's build. A credential is a
 #: whole token, so requiring it to be one costs nothing and removed both.

@@ -57,7 +57,7 @@ class EntropyExtractor(StreamExtractor):
         self._pending = bytearray()
         self._totals = [0] * BYTE_VALUES
         # Running aggregates, not a list. Every figure this extractor
-        # reports about its windows - the maximum, the mean and the count --
+        # reports about its windows - the maximum, the mean and the count -
         # is computable in constant space, and keeping one float per window
         # instead made peak memory linear in sample size. It went unnoticed
         # from v0.1.2 because a float is small: 2441 of them for a 20 MB

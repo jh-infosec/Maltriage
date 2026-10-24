@@ -202,7 +202,7 @@ carries an absolute file position across chunks, and an offset is pinned to be
 independent of `read_chunk_bytes` exactly as a string already was.
 
 **The detector runs on the shared pass and the policy runs in `findings()`.**
-"Lives in `findings()`, never in `parse()`" is impossible as written --
+"Lives in `findings()`, never in `parse()`" is impossible as written -
 `strings_include_text` is off by default, so by the time `findings()` runs
 there are no strings left to scan. What holds instead is the intent: matching
 happens where the strings are, it produces a candidate with an offset and no

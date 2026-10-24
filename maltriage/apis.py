@@ -63,7 +63,7 @@ Windows code there is:
 
 v0.4 said "when the corpus can state the cost, that is the release that may
 change it". The cost is stated. Nothing here reaches medium, and the sentence
-above is no longer an argument that could be revisited by a better argument --
+above is no longer an argument that could be revisited by a better argument -
 it is a measurement, and it would take a different measurement to move it.
 
 The v0.4.2 run over 6,688 Linux files produced zero capability findings, which
@@ -283,7 +283,7 @@ STRING_AMBIGUOUS = frozenset({
 #: `VirtualAllocEx@16` matched, and `j` * 63 followed by the same text did
 #: not, because the bound split the padding at exactly the point that left the
 #: API name starting a token of its own. Whether a name was found depended on
-#: its offset modulo 64, and the version that found it was the wrong one --
+#: its offset modulo 64, and the version that found it was the wrong one -
 #: that is the substring match on `PreloadLibraryPath` that this pattern
 #: exists to refuse, arriving by a different route. Unbounded, a run of
 #: identifier characters is one token whatever its length, and
@@ -416,7 +416,7 @@ def match_text(text: str, token_limit: int = 128) -> list[tuple[str, tuple[str, 
     mangled C++ signature (`?CreateRemoteThread@@YAX`) and a delimited list
     (`kernel32.dll,CreateRemoteThread`), and not one of them has a space in
     it, so this drops nothing the token path was added to find. What it drops
-    is `a sentence mentioning CreateRemoteThread`, which is documentation --
+    is `a sentence mentioning CreateRemoteThread`, which is documentation -
     and a triage tool that reports the manual as an injector has learned
     nothing about the file. It is also, measured on a 100 MB sample with 2.8
     million strings, about a third of the cost of matching.

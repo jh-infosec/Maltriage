@@ -143,6 +143,37 @@ class Report:
             worst = max((worst, child.severity), key=SEVERITY_RANK.__getitem__)
         return worst
 
+    def thin(self) -> dict[str, str]:
+        """Analysis that ran and came back short, labelled by where.
+
+        `errors` is analysis that did not run at all; this is every
+        extractor's `parse_errors` and `warnings`, which mean the same thing
+        to someone reading an absence. It lived in the CLI's renderer until
+        an audit found the envelope asking a different question: the human
+        report said a ZIP refused unopened was incomplete, and its envelope
+        said "examined, nothing found". One computation now, so the two
+        cannot disagree again.
+        """
+        out: dict[str, str] = {}
+        for name, data in self.data.items():
+            if not isinstance(data, dict):
+                continue
+            for note in data.get("parse_errors") or []:
+                # Two rule files with the same basename, or two directories
+                # that both fail, produce the same label. A plain assignment
+                # rendered them as one line, which understates how thin the
+                # report is: the exact failure this block exists to prevent.
+                label = f"{name}.{note.split(':')[0]}"
+                suffix, index = "", 2
+                while label + suffix in out:
+                    suffix, index = f" ({index})", index + 1
+                out[label + suffix] = note.partition(": ")[2]
+            for index, warning in enumerate(data.get("warnings") or [], start=1):
+                # Numbered, because a malformed PE routinely produces five or
+                # more distinct warnings and a fixed key would print one.
+                out[f"{name}.warning {index}"] = warning
+        return out
+
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["severity"] = self.severity

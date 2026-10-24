@@ -457,7 +457,7 @@ class _RunScanner:
     since it lies inside the rejected span.
 
     A lookbehind has nothing to look at when a match starts at offset zero of
-    a buffer, which would make the result depend on where the chunks fell --
+    a buffer, which would make the result depend on where the chunks fell -
     the one thing this class exists to prevent. So every buffer is prefixed
     with the byte that preceded it, and offsets are shifted back by one to
     compensate. That byte cannot seed a false match of its own: it is only

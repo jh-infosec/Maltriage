@@ -238,16 +238,32 @@ def _recurse(report: Report, config: dict[str, Any],
         archive.pop("staged", None)
         return
 
-    for member in staged:
+    for position, member in enumerate(staged, start=1):
         child_path = Path(member["path"])
+        # Both failures are recorded, and neither record carries the member's
+        # name or where it was staged. The key used to be
+        # `archive.<member name>` and the reason the exception's text, which
+        # quotes the full staging path, so the envelope, the one output this
+        # project promises carries no filename and no path, published both.
+        # The member's name is still in `report.data["archive"]["entries"]`
+        # for a reader of the local report.
+        label = f"archive.member {position}"
         if not child_path.is_file():
+            # This used to be a silent `continue`. On Windows the usual cause
+            # is an antivirus quarantining what was just written to the temp
+            # directory, which removes exactly the members it recognised: a
+            # ZIP carrying a dropper read as a clean, empty ZIP.
+            report.errors[label] = (
+                "unpacked, then gone before it could be analysed; an antivirus "
+                "removing it from the staging directory is the usual cause")
             continue
         try:
             child = analyse(child_path, config, extractors,
                             _depth=depth + 1, _budget=budget)
         except OSError as exc:
-            report.errors[f"archive.{child_path.name}"] = \
-                f"{type(exc).__name__}: {exc}"
+            # `strerror` rather than `str(exc)`: the second quotes the path.
+            report.errors[label] = (
+                f"{type(exc).__name__}: {exc.strerror or 'could not be read'}")
             continue
         child.path = f"{report.filename}!/{member['inside']}"
         report.children.append(child)

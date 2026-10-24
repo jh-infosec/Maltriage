@@ -558,7 +558,7 @@ def test_peak_memory_does_not_track_sample_size(write):
     def peak_for(path):
         """The transient memory one run costs, isolated two ways.
 
-        Warm first, because a first run allocates caches a second does not --
+        Warm first, because a first run allocates caches a second does not -
         compiled patterns, numpy's import, interned tables - and charging
         those to whichever sample went first measures the order of the calls.
 
@@ -3733,7 +3733,7 @@ def _every_finding_key() -> set[str]:
     second list, which is the thing this test exists to catch."""
     # Every module of the package, not one file. Until v0.4.5 the extractors
     # were one module and this read it; after the split, reading only
-    # `extractors.py` would have found no keys at all and passed vacuously --
+    # `extractors.py` would have found no keys at all and passed vacuously -
     # the failure mode a test that greps for its own subject always has.
     package = Path(extractors_module.__file__).resolve().parent
     keys: set[str] = set()
@@ -7233,3 +7233,182 @@ def test_a_directory_exactly_at_the_limit_is_opened_and_one_byte_over_is_not(wri
 
     assert len(at_limit.children) == 5
     assert under.children == [] and _archive_data(under)["truncated"] is True
+
+
+# The fourth instance, found by looking for it
+#
+# After v0.5.14 the lesson recorded was: the next time two computations of one
+# question are found, search for every caller before fixing one. The search
+# found the human report and the envelope answering "was this fully examined?"
+# differently, a member removed by an antivirus vanishing without a record,
+# and the envelope publishing a member's filename and a staging path.
+
+def _refused_zip(write):
+    body = _zip_bytes([("invoice.pdf", _PE_BYTES)] + [(f"pad{i}", b"x") for i in range(200)])
+    return analyse(write("refused.zip", body),
+                   config={**DEFAULT_CONFIG, "archive_max_directory_bytes": 1024})
+
+
+def test_an_archive_refused_unopened_does_not_read_as_examined(write):
+    """`info`, no findings, nothing incomplete is "examined, nothing found".
+    For a ZIP the tool refused to open, that was a false statement, and the
+    human report beside it said the opposite."""
+    envelope = envelope_module.to_envelope(_refused_zip(write))
+
+    assert envelope["findings"] == []
+    reasons = " ".join(entry["reason"] for entry in envelope["incomplete"])
+    assert "not opened" in reasons
+
+
+def test_the_envelope_and_the_human_report_list_the_same_gaps(write):
+    """One computation, `Report.thin()`, behind both. They disagreed because
+    the renderer built its own list and the envelope read `errors` alone."""
+    report = _refused_zip(write)
+    report.errors["pe"] = "ValueError: something that did not run"
+    envelope = envelope_module.to_envelope(report)
+
+    assert len(envelope["incomplete"]) == len(report.errors) + len(report.thin())
+    rendered = cli.render_human(report)
+    for source in list(report.errors) + list(report.thin()):
+        assert source in rendered
+
+
+def test_a_member_removed_before_analysis_is_recorded(write, monkeypatch):
+    """The silent `continue`. On Windows an antivirus quarantines what was
+    just written to the temp directory, which removes exactly the members it
+    recognised, and the archive used to read as clean and empty."""
+    real_copy = archives_module._copy_bounded
+
+    def copy_then_quarantine(source, target, budget, chunk=262144):
+        result = real_copy(source, target, budget, chunk)
+        target.unlink()
+        return result
+
+    monkeypatch.setattr(archives_module, "_copy_bounded", copy_then_quarantine)
+    report = analyse(write("bundle.zip", _zip_bytes([("invoice.pdf", _PE_BYTES)])))
+
+    assert report.children == []
+    assert "gone before it could be analysed" in report.errors["archive.member 1"]
+    envelope = envelope_module.to_envelope(report)
+    assert any(entry["source"] == "archive.member 1" for entry in envelope["incomplete"])
+
+
+def test_an_unreadable_member_leaves_neither_its_name_nor_a_path(write, monkeypatch):
+    """The record of a failed member used to be keyed `archive.<its name>`
+    with the exception's own text as the reason, and that text quotes the
+    staging path. Both went into the envelope."""
+    real_analyse = pipeline_module.analyse
+
+    def unreadable_members(path, *args, **kwargs):
+        if kwargs.get("_depth", 0) > 0:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_analyse(path, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "analyse", unreadable_members)
+    report = real_analyse(write("bundle.zip",
+                                _zip_bytes([("Q3-payroll-hendricks.pdf", _PE_BYTES)])))
+    rendered = json.dumps(envelope_module.to_envelope(report))
+
+    assert "hendricks" not in rendered
+    assert "maltriage-" not in rendered and tempfile.gettempdir() not in rendered
+    assert report.errors["archive.member 1"] == "PermissionError: Permission denied"
+
+
+def _scrubbed(text, filename="sample.bin", path="/nowhere/sample.bin"):
+    report = Report(path=path, filename=filename, size_bytes=1)
+    return envelope_module._scrub(text, report)
+
+
+@pytest.mark.parametrize("message,gone", [
+    ("PermissionError: [Errno 13] Permission denied: "
+     "'C:\\\\Users\\\\johnh\\\\Documents\\\\Q3 payroll.xlsx'", ["johnh", "Q3", "payroll"]),
+    ('yara: could not open file "C:\\\\Cybersecutiy APPS\\\\rules\\\\x.yar"',
+     ["Cybersecutiy", "APPS", "rules"]),
+    ("config: 'C:\\\\Cybersecutiy APPS\\\\MAL-TRIAGE\\\\rules' is not a rule file or directory",
+     ["Cybersecutiy", "MAL-TRIAGE"]),
+    ("could not read C:\\\\Users\\\\johnh\\\\AppData\\\\Local\\\\Temp\\\\maltriage-x\\\\a",
+     ["johnh", "AppData", "maltriage-x"]),
+    ("share \\\\\\\\fileserver\\\\malware\\\\rules is offline", ["fileserver", "malware"]),
+    ("config: /home/john/rules/extra.yar could not be resolved", ["john", "extra.yar"]),
+])
+def test_the_scanning_machine_is_scrubbed_out_of_a_reason(message, gone):
+    """Windows messages, because that is where this tool is run and this
+    container never produces one. Python quotes the file in every `OSError`,
+    and this project's own rule-directory messages now quote theirs too: a
+    bare path is cut short at its first space by anything trying to remove
+    it, and `C:\\Cybersecutiy APPS` has one."""
+    scrubbed = _scrubbed(message)
+    for fragment in gone:
+        assert fragment not in scrubbed, (fragment, scrubbed)
+    assert "<path>" in scrubbed
+
+
+@pytest.mark.parametrize("message", [
+    "zip: central directory of 11147 bytes is larger than archive_max_directory_bytes",
+    "pdf_with_automatic_action matched /JS beside /AA",
+    "strings: only the first 2048 of 9000 strings were kept",
+])
+def test_a_reason_with_no_path_in_it_is_left_alone(message):
+    """`/JS` and `/AA` are one-component names, and a scrub that ate them
+    would make the reasons it protects useless."""
+    assert _scrubbed(message) == message
+
+
+def test_the_subjects_own_name_is_scrubbed_and_a_short_one_is_not_overreached():
+    assert "hendricks" not in _scrubbed(
+        "could not parse Q3-payroll-hendricks.xlsx at all", filename="Q3-payroll-hendricks.xlsx")
+    # A two-letter name would match inside half the words in a sentence.
+    assert _scrubbed("a failure in an area", filename="an") == "a failure in an area"
+
+
+def test_the_machines_own_directories_are_removed_even_with_spaces(monkeypatch):
+    """The exact-string pass, which is what catches a home or temp directory
+    whose name has a space in it and was written unquoted."""
+    monkeypatch.setattr(envelope_module.tempfile, "gettempdir",
+                        lambda: "C:\\Users\\John Bartlett\\AppData\\Local\\Temp")
+    text = _scrubbed("staging under C:\\Users\\John Bartlett\\AppData\\Local\\Temp was full")
+    assert "Bartlett" not in text
+
+
+@needs_yara
+def test_a_missing_rule_directory_is_reported_locally_and_scrubbed_remotely(write, tmp_path):
+    """The local report names the directory, which is what its reader needs.
+    The envelope must not, and the directory name has a space in it."""
+    missing = tmp_path / "Cybersecutiy APPS" / "rules"
+    report = analyse(write("a.bin", b"hello" * 40),
+                     config={**DEFAULT_CONFIG, "yara_rule_paths": [str(missing)]})
+
+    assert "Cybersecutiy APPS" in cli.render_human(report)
+    remote = json.dumps(envelope_module.to_envelope(report))
+    # Both halves. Unquoted, a path is cut at its first space by anything
+    # trying to remove it, so the half after the space is what would leak;
+    # checking only the first half passed with the quoting fix reverted.
+    assert "Cybersecutiy" not in remote and "APPS" not in remote
+
+
+def test_no_long_dashes_anywhere_in_the_repository():
+    """The owner asked for none, in any of the content. Three cleanups each
+    removed what they searched for, and each searched for ` -- ` with a space
+    on both sides, so a long dash ending a line had no trailing space and
+    survived every one of them: eighteen did. This checks all four
+    spellings, so the next one fails here rather than in a fifth cleanup.
+
+    One exemption: the changelog names the sequence it removed, in
+    backticks, which is a reference to the thing rather than a use of it."""
+    root = Path(__file__).resolve().parent.parent
+    # Assembled from parts, so this line does not contain what it searches
+    # for and is not its own first offender.
+    pair = "-" * 2
+    pattern = re.compile(f" {pair}$| {pair} |{chr(0x2014)}|{chr(0x2013)}", re.MULTILINE)
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix not in {".py", ".md", ".yar", ".toml", ".txt"} or not path.is_file():
+            continue
+        if any(part.startswith(".") or part in {"build", "dist"} or part.endswith(".egg-info")
+               for part in path.relative_to(root).parts):
+            continue
+        text = path.read_text(encoding="utf-8").replace(f"` {pair} `", "")
+        for match in pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            offenders.append(f"{path.relative_to(root)}:{line}")
+    assert not offenders, offenders

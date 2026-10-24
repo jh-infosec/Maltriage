@@ -173,24 +173,7 @@ def render_human(report: Report) -> str:
     # Two blocks rather than one, because they are two different facts and a
     # single heading that changed wording depending on which was present made
     # the more serious one disappear into the other whenever both occurred.
-    thin: dict[str, str] = {}
-    for name, data in report.data.items():
-        if not isinstance(data, dict):
-            continue
-        for note in data.get("parse_errors") or []:
-            # Two rule files with the same basename, or two directories that
-            # both fail, produce the same label. A plain assignment rendered
-            # them as one line, which understates how thin the report is --
-            # the exact failure this block was split out to prevent.
-            label = f"{name}.{note.split(':')[0]}"
-            suffix, index = "", 2
-            while label + suffix in thin:
-                suffix, index = f" ({index})", index + 1
-            thin[label + suffix] = note.partition(": ")[2]
-        for index, warning in enumerate(data.get("warnings") or [], start=1):
-            # Numbered, because a malformed PE routinely produces five or more
-            # distinct warnings and a fixed key would print only the first.
-            thin[f"{name}.warning {index}"] = warning
+    thin = report.thin()
 
     for heading, entries in (("errors", report.errors), ("incomplete", thin)):
         if not entries:

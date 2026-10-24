@@ -72,7 +72,11 @@ def rule_files(config: dict[str, Any]) -> tuple[list[Path], list[str]]:
         try:
             key = str(path.resolve())
         except OSError as exc:
-            problems.append(f"config: {path} could not be resolved: {exc}")
+            # Quoted, here and below. A path written bare is cut short at its
+            # first space by anything that later has to find and remove it,
+            # and the envelope does exactly that: `C:\\Cybersecutiy APPS\\...`
+            # unquoted would lose its drive and keep its folder names.
+            problems.append(f"config: {str(path)!r} could not be resolved: {exc}")
             return
         if key not in seen:
             seen.add(key)
@@ -98,9 +102,9 @@ def rule_files(config: dict[str, Any]) -> tuple[list[Path], list[str]]:
                 # The bundled directory being absent is a checkout problem and
                 # is reported by the extractor declining; a configured path
                 # that is not there is a configuration problem and is this.
-                problems.append(f"config: {root} is not a rule file or directory")
+                problems.append(f"config: {str(root)!r} is not a rule file or directory")
         except OSError as exc:
-            problems.append(f"config: {root} is unreadable: {exc}")
+            problems.append(f"config: {str(root)!r} is unreadable: {exc}")
     return found, problems
 
 

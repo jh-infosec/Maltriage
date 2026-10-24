@@ -350,7 +350,7 @@ cycle.
 
 `expected_random_entropy` takes an alphabet size as well as a length. A token
 drawn from base64 cannot reach eight bits per character however random it is,
-so scoring it against every byte value would call every credential ordinary --
+so scoring it against every byte value would call every credential ordinary -
 the same reasoning that made the reference length-aware in v0.1.1, applied to
 the other axis.
 

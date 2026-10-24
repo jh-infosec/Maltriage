@@ -34,7 +34,7 @@ producing a wrong answer.
 
 ## This file used to be all of it
 
-Until v0.4.5 every extractor lived here, and the file reached 3,091 lines --
+Until v0.4.5 every extractor lived here, and the file reached 3,091 lines -
 a quarter of the project, holding eight extractors for six formats. It was
 split one module per format, with no behaviour change: the ranges were moved
 rather than retyped, and the same 412 tests pass on both sides of the move.

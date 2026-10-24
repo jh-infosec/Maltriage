@@ -597,7 +597,7 @@ class ElfExtractor(RandomAccessExtractor):
         # Only sections the loader maps, and only those it maps writable or
         # executable. Measured against 7119 real binaries, scoring every
         # section fired this medium on 8.5% of them: 548 from `.debug_*`
-        # alone, because DWARF is dense, and the rest from read-only tables --
+        # alone, because DWARF is dense, and the rest from read-only tables -
         # a 256-byte byte-permutation table reaches a ratio above 1.0 while
         # being the most ordered data there is, since the reference is an
         # estimate of what a random *sample* reaches. Debug data is not mapped

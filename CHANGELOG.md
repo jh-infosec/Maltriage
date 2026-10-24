@@ -1,5 +1,104 @@
 # Changelog
 
+## Version 0.5.15 - looking for the fourth before someone else found it
+
+v0.5.14 recorded a lesson: the same defect, two computations of one question
+disagreeing, had been found three times, and each fix moved one caller onto
+the shared answer without looking for the others. This release is the
+search, run before an outside review had to run it. It found three defects,
+and two of them are worse than the one it was looking for.
+
+### The fourth instance: "was this fully examined?"
+
+Every consumer of severity was already on the shared answer. The question
+with the same shape that was not: whether a file was fully examined. The
+human report answers it from `report.errors` and from every extractor's
+`parse_errors` and `warnings`. The envelope's `incomplete` read
+`report.errors` alone. So a ZIP holding a disguised PE, refused unopened by
+the directory limit v0.5.14 added:
+
+```
+human report says incomplete: True
+envelope: severity info, findings 0, incomplete []
+```
+
+The specification defines that envelope as "examined, nothing found". The
+module's own docstring calls `incomplete` "the field that keeps the format
+honest" and names `parse_errors` as one of the things it exists to carry, and
+then did not carry them. Every parser that stopped short rather than raising
+has been invisible to envelope consumers since 0.1.
+
+**`Report.thin()`** is now the one computation, and both the human report and
+the envelope call it. The envelope's shape did not change and a 0.2 consumer
+reads more entries rather than different ones, so the version did not move.
+
+### A member removed by an antivirus vanished without a word
+
+`_recurse` skipped any staged member that was no longer a file, with a bare
+`continue`. On Windows the usual cause is an antivirus quarantining what was
+just written to the temp directory, and this project's own test runs saw
+Malwarebytes quarantine 103 such files. It removes exactly the members it
+recognises, so a ZIP carrying a dropper read as a clean, empty ZIP: no
+children, no errors, `info`. It is the bias v0.5.9's manifest exists for, one
+level down. It is now recorded as `archive.member N`, and the reason names
+the likely cause.
+
+### The envelope was already leaking
+
+Not new code: this has been true since envelope 0.1. A member that failed to
+read was recorded under `archive.<its name>`, with the exception's own text as
+the reason, and that text quotes the full staging path:
+
+```
+{"source": "archive.Q3-payroll-hendricks.pdf",
+ "reason": "PermissionError: ... '/tmp/maltriage-ox2ftsmv/000001/Q3-payroll-hendricks.pdf'"}
+```
+
+A filename and a machine path, on Windows `C:\Users\johnh\AppData\...`, in
+the one output that promises neither. The existing test checked a file that
+read cleanly, so it never saw a failure message.
+
+Fixed in two layers. At the source, the record is keyed by position and the
+reason uses `strerror`, which does not quote the path. In the envelope, every
+`incomplete` reason passes through a scrub that removes the machine's home,
+temporary and working directories, quoted paths, drive and UNC paths, POSIX
+paths of two or more components, and the subject's own name. One-component
+names such as `/JS` survive, because a scrub that ate them would ruin the
+messages it protects. **Findings are not scrubbed**: a Windows path inside a
+sample is an indicator about the sample, and removing it would destroy the
+finding.
+
+This project's own rule-directory messages now quote their paths. A bare path
+is cut short at its first space by anything trying to remove it, and
+`C:\Cybersecutiy APPS` has one. The test for this first checked only the half
+before the space, which is the half that gets removed anyway; it passed with
+the quoting fix reverted, and now checks the half after.
+
+### Eighteen long dashes every cleanup missed
+
+You asked for none, anywhere. Three cleanups each removed what they searched
+for, and each searched for a pair of hyphens with a space on both sides. A
+long dash ending a line has no trailing space, so eighteen survived all three,
+across twelve files, two of them comments I wrote. **A test now fails on any
+of the four spellings**, so the next one fails there rather than waiting for a
+fifth cleanup. The test is built so its own source contains none of them,
+having first flagged itself.
+
+### A mistake during this release, stated
+
+To undo a dash planted to prove the guard worked, I ran `git checkout` on a
+file that held uncommitted work, and it destroyed `Report.thin()`, the method
+this release is built on. It was caught immediately by checking the file
+before going further, and restored exactly. Test edits are now undone with a
+targeted reverse, never by checking out a file with uncommitted work in it.
+
+### Verified
+
+613 tests pass, 17 new. Against v0.5.14, 16 of them fail, each for its
+defect; the seventeenth passed there only because the old envelope dropped
+parse errors altogether, and it guards the new code that carries them.
+Mutation testing caught 13 of 13.
+
 ## Version 0.5.14 - an outside review, verified before it was believed
 
 A static review of `a2ac366` by another model, which did not run anything,
@@ -1390,7 +1489,7 @@ happen sooner.
 `--limit N` scans at most N files of each label, drawn at random with a fixed
 seed. Random rather than the first N: a sorted System32 opens with hundreds of
 `api-ms-win-*` stubs, which are a coherent group and nothing like the rest.
-Seeded, because a sample nobody can redraw is a measurement nobody can check --
+Seeded, because a sample nobody can redraw is a measurement nobody can check -
 and because it made the before-and-after below a controlled comparison on
 identical files rather than two samples of the same directory.
 
@@ -1919,7 +2018,7 @@ what MIME does to attachments.
 claim.** The roadmap recorded that "did the emitter compute it" was too weak
 without settling what replaces it. The test that discriminates asks the
 counterfactual: was there a version of this file for which the same work would
-have produced no finding? A string copied out of the subject is `false` --
+have produced no finding? A string copied out of the subject is `false` -
 nothing was tested, and a file can say anything. A comparison, a computation or
 a structural walk is `true`. That lands at ten keys false and the rest true,
 rather than the twelve-in-thirteen `true` the roadmap was worried about.
@@ -2292,7 +2391,7 @@ rather than the sample.
 
 - A rule could write the sample to the terminal. YARA's `console` module goes
   to the process's own stdout when nothing captures it, so a rule could dump
-  the file as hex under `--quiet` without a byte of it reaching the report --
+  the file as hex under `--quiet` without a byte of it reaching the report -
   the one channel that defeated "the extractor never reads `matched_data`".
   A `console_callback` now takes it to the debug log
 - A four-byte string against a crafted sample produced libyara's cap of a
