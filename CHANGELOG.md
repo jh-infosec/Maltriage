@@ -1,5 +1,78 @@
 # Changelog
 
+## Version 0.5.16 - a document that fetches something when it is opened
+
+The first v0.6 detection. A document with no macros at all can still make
+Office fetch something the moment it is opened: a template, an embedded
+object, a whole subdocument. Remote template injection works this way, and so
+did the Follina chain, whose payload sat behind an `oleObject` relationship
+with an `mhtml:` target in a `.docx` that carried no code.
+
+### The hard part is that every hyperlink is also one
+
+An OOXML document declares what it points at in `.rels` parts, and any
+relationship with `TargetMode="External"` points outside the file. So does
+every hyperlink, and most documents have some. A rule about external
+relationships would fire on most of a document corpus and say nothing.
+
+**The rule is about what loads by itself.** Hyperlinks are counted, not
+reported. These are reported, one finding per type with a count, so fifty
+linked images are one line:
+
+| Type | What it does on open |
+|---|---|
+| `attachedTemplate` | fetches the template: `ooxml_remote_template` |
+| `oleObject` | loads the object; the Follina path |
+| `frame`, `subDocument` | pull whole documents in |
+| `externalLinkPath` | Excel's linked workbook |
+| `image` | fetched to render; a UNC target makes Windows send a password hash to whoever serves it |
+
+Everything else external is `info`. **All of it is `low` at most**, for the
+macro keys' reason: a corporate template on SharePoint and a linked image on
+a file share are ordinary, and a document corpus prices that before anything
+here can fail a build. A UNC or `file:` target says, in the detail, what it
+costs.
+
+### Read with a pattern, so it has to do what Word's parser would
+
+The `.rels` parts are read with a pattern rather than an XML parser, which
+keeps attacker-shaped XML away from a parser here. That means doing what
+Word's parser does before Word acts, because everything a pattern does not
+decode is a way past it. Each of these is a test:
+
+- `TargetMode="Ext&#101;rnal"` and `&#x45;xternal`: character references,
+  which Word decodes. So are the type and target.
+- Single-quoted attributes, attributes split across lines, any order.
+- A namespace prefix on the element, `<r:Relationship>`.
+- A `.rels` part saved as UTF-16, where a UTF-8 pattern sees only NULs.
+
+Attribute names are matched exactly, prefix included. Stripping prefixes was
+in the first draft and was wrong: `foo:TargetMode` is a different attribute to
+Word, so stripping could only invent relationships Word treats as internal.
+
+Relationships are read only from a document, never from a `.rels` file inside
+an ordinary ZIP. They are read while the parts are staged, from at most 1 MiB
+of each part, and at most 256 are kept; past that the report says the list is
+partial. A walk the budget stopped says that finding none is not evidence
+there is none, the macro caveat's reasoning. Targets pass through the same
+display filter as every other sample-derived string.
+
+### Verified
+
+630 tests pass, 17 new. An older macro test asserted that no "not evidence"
+message appeared at all, which was the same thing until relationships gained
+a caveat of their own; it now asserts the macro caveat specifically, as its
+docstring always said. Mutation testing caught 14 of 14, after one survivor:
+nothing asserted that an external image was `low` rather than `info`, and an
+image is the one that leaks a hash without a click.
+
+### What I expect your next run to show
+
+On the 61 documents: `ooxml_remote_template` on **none**, and
+`ooxml_external_reference` on **at most three**, all of them images if any.
+If a remote template turns up, open that document's settings before anything
+else.
+
 ## Version 0.5.15 - looking for the fourth before someone else found it
 
 v0.5.14 recorded a lesson: the same defect, two computations of one question

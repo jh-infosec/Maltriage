@@ -360,7 +360,7 @@ which is the third kind doing what it was added for.
 - [x] OOXML identification and part listing *(v0.5.10)*
 - [~] VBA: presence is detected, extraction and stream listing are not
 - [ ] Auto-execute trigger detection
-- [ ] DDE and external relationship detection
+- [~] External relationships detected *(v0.5.16)*; DDE field codes not yet
 
 **Part of this arrived early, and the reason is worth keeping.** v0.5.10
 identifies OOXML and reports whether a document carries a compiled VBA

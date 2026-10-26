@@ -40,6 +40,8 @@ the scan of them finishes, successfully or not.
 from __future__ import annotations
 
 import gzip
+import html
+import re
 import struct
 import tarfile
 import time
@@ -378,6 +380,21 @@ class ArchiveExtractor(RandomAccessExtractor):
         data["container_kind"] = _container_kind(data["entries"])
         data["duplicate_names"], data["case_collisions"] = _name_collisions(data["entries"])
         data["macro_project"] = _has_macro_project(data["entries"])
+        if data["container_kind"] == "ooxml":
+            # Read now, while the parts are still staged: the directory is
+            # deleted once the members have been analysed.
+            data["relationships"] = external_relationships(data["staged"])
+            if data["relationships"]["truncated"]:
+                data["parse_errors"].append(
+                    "relationships: more external relationships than were kept, "
+                    "so the list is partial")
+            if data["truncated"] and not data["relationships"]["external"]:
+                # The macro caveat's reasoning: a document built to put the
+                # part that carries its remote template after the point the
+                # budget stops would otherwise read as having none.
+                data["parse_errors"].append(
+                    "relationships: the listing stopped at the budget, so finding "
+                    "no external relationship is not evidence that there is none")
         data["macro_capable_name"] = (
             path.suffix.lower() in config_list(config, "macro_capable_extensions", []))
         if data["truncated"] and not data["macro_project"]:
@@ -555,6 +572,33 @@ class ArchiveExtractor(RandomAccessExtractor):
                 evidence=[{"name": "duplicate_names", "value": data.get("duplicate_names") or 0},
                           {"name": "case_collisions", "value": data.get("case_collisions") or 0}]))
 
+        relationships = data.get("relationships") or {}
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for relation in relationships.get("external") or []:
+            by_type.setdefault(relation["type"], []).append(relation)
+        for kind, relations in sorted(by_type.items()):
+            first = relations[0]
+            more = f", and {len(relations) - 1} more" if len(relations) > 1 else ""
+            hashes = any(r["scheme"] in ("unc", "file") for r in relations)
+            if kind == "attachedTemplate":
+                key, what = "ooxml_remote_template", "fetches its template from"
+            else:
+                key, what = "ooxml_external_reference", f"loads an external {kind} from"
+            # `low`, every one, for the reason the macro keys are `low`. A
+            # corporate template on SharePoint and a linked image on a file
+            # share are ordinary, so neither reaches the gate without a
+            # measurement. What does not load by itself is `info`.
+            out.append(mk_finding(
+                self.name, key,
+                f"the document {what} {first['target']}{more}"
+                + ("; Windows authenticates to a UNC or file target, which hands "
+                   "a password hash to whoever serves it" if hashes else ""),
+                "low" if first["autoloads"] else "info",
+                evidence=[{"name": "count", "value": len(relations)},
+                          {"name": "scheme", "value": first["scheme"]},
+                          {"name": "part", "value": first["part"]}],
+                discriminator=kind))
+
         if data.get("macro_project"):
             # Both at `low`, and that is a decision rather than an oversight.
             # A macro-enabled document is ordinary in most organisations, and
@@ -694,6 +738,100 @@ def _name_collisions(entries: list[dict[str, Any]]) -> tuple[int, int]:
         seen.add(name)
         folded.add(name.casefold())
     return exact, by_case
+
+
+#: Relationship types that make Office fetch the target by itself, on open.
+#: A hyperlink is also an external relationship, and every document with a
+#: link in it has one, so the rule is about what loads without a click.
+#: `attachedTemplate` is remote template injection; `oleObject` is how the
+#: Follina chain reached its `mhtml:` payload; `frame` and `subDocument` pull
+#: whole documents in; `externalLinkPath` is Excel's linked workbook; an
+#: external `image` is fetched to render, which is how a UNC path leaks an
+#: NTLM hash to whoever serves it.
+AUTOLOADING_RELATIONSHIPS = ("attachedTemplate", "oleObject", "frame", "subDocument",
+                             "externalLinkPath", "image")
+
+_RELATIONSHIP = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?Relationship\b([^>]*)>")
+_ATTRIBUTE = re.compile(r"""([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+_RELS_READ_LIMIT = 1048576
+_RELATIONSHIPS_KEPT = 256
+
+
+def external_relationships(staged: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every external relationship in a document's `.rels` parts.
+
+    Read with a pattern rather than an XML parser, which keeps an
+    attacker-shaped XML document away from a parser here, and so it has to
+    do itself what Word's parser would do before acting: decode character
+    references (`Ext&#101;rnal` is `External` to Word), accept either quote,
+    accept a namespace prefix on the element, and honour a UTF-16 byte order
+    mark. Each of those was a way past the first version of this sketch.
+
+    Hyperlinks are counted and not listed: one in a document is ordinary,
+    and a rule that reported them would fire on every document with a link.
+    """
+    out: dict[str, Any] = {"external": [], "hyperlinks": 0, "truncated": False}
+    for member in staged:
+        if not str(member.get("inside", "")).lower().endswith(".rels"):
+            continue
+        try:
+            with open(member["path"], "rb") as handle:  # binary API
+                raw = handle.read(_RELS_READ_LIMIT)
+        except OSError:
+            continue
+        for found in _RELATIONSHIP.finditer(_as_utf8(raw)):
+            attributes = {}
+            for name, double, single in _ATTRIBUTE.findall(
+                    found.group(1).decode("utf-8", "replace")):
+                # Exact names. `foo:TargetMode` is a different attribute from
+                # `TargetMode` to Word, so stripping the prefix would only
+                # invent external relationships that Word treats as internal.
+                attributes[name] = html.unescape(
+                    double if double or not single else single)
+            if attributes.get("TargetMode") != "External":
+                continue
+            kind = attributes.get("Type", "").rstrip("/").rsplit("/", 1)[-1]
+            if kind == "hyperlink":
+                out["hyperlinks"] += 1
+                continue
+            if len(out["external"]) >= _RELATIONSHIPS_KEPT:
+                out["truncated"] = True
+                continue
+            target = attributes.get("Target", "")
+            out["external"].append({
+                "type": _display(kind or "unknown"),
+                "target": _display(target),
+                "scheme": _target_scheme(target),
+                "part": _inside(str(member["inside"])),
+                "autoloads": kind in AUTOLOADING_RELATIONSHIPS,
+            })
+    return out
+
+
+def _as_utf8(raw: bytes) -> bytes:
+    """`.rels` as UTF-8 bytes, honouring a UTF-16 byte order mark.
+
+    XML may be UTF-16, and a pattern written for UTF-8 sees nothing in it but
+    alternate NUL bytes, which is the cheapest evasion there is.
+    """
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", "replace").encode("utf-8")
+    return raw
+
+
+def _target_scheme(target: str) -> str:
+    """What kind of place the target is, which is most of what it means.
+
+    A UNC path or a `file:` URL makes Windows authenticate to whoever serves
+    it, so an external image pointing at one leaks a hash with no click.
+    """
+    lowered = target.strip().lower()
+    if lowered.startswith("\\\\") or lowered.startswith("//"):
+        return "unc"
+    for scheme in ("https", "http", "file", "mhtml", "ftp", "ms-msdt", "search-ms"):
+        if lowered.startswith(scheme + ":"):
+            return scheme
+    return "other"
 
 
 def _member_names(entries: list[dict[str, Any]]) -> list[str]:
