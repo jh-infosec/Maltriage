@@ -398,7 +398,7 @@ precision and recall, so it comes before the classifier rather than after.
 - [ ] A Program Files corpus, for the findings System32 cannot exercise
 - [ ] YARA measured on Windows, which needs a Python a wheel exists for
 - [x] A corpus of ordinary documents *(v0.5.7, v0.5.8)*
-- [x] A corpus manifest, so a sample set cannot shrink quietly *(v0.5.9)*
+- [x] A corpus manifest, so a sample set cannot shrink quietly *(v0.5.9; counts copies since v0.5.17)*
 
 **Two severity decisions are now waiting on this release rather than on an
 argument.** `entropy_hotspot` is the largest lever ever measured here:

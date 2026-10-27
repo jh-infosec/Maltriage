@@ -5015,6 +5015,89 @@ def test_the_hash_list_never_reaches_the_corpus_artefact(tmp_path):
     assert "per_file" not in result.to_dict()
 
 
+def test_a_manifest_notices_one_copy_of_a_file_going(tmp_path):
+    """A corpus with two copies of a file and one of them deleted has lost a
+    file. Compared as sets the two runs hold the same contents, and the
+    manifest said "all present" over a denominator that had shrunk."""
+    benign = _manifest_corpus(tmp_path, count=3)
+    (benign / "copy.bin").write_bytes((benign / "f0.bin").read_bytes())
+    manifest = tmp_path / "corpus.manifest.json"
+    corpus_module.write_manifest(corpus_module.scan_corpus(tmp_path), manifest)
+
+    (benign / "copy.bin").unlink()
+    result = corpus_module.scan_corpus(tmp_path)
+    result.manifest = corpus_module.compare_manifest(
+        result, corpus_module.read_manifest(manifest))
+
+    assert result.manifest["benign"] == {
+        "expected": 4, "seen": 3, "missing": 1, "unexpected": 0}
+    assert "benign manifest: 3 of 4, 1 MISSING" in corpus_module.render(result)
+
+
+def test_a_copy_added_since_the_manifest_is_unexpected(tmp_path):
+    benign = _manifest_corpus(tmp_path, count=3)
+    manifest = tmp_path / "corpus.manifest.json"
+    corpus_module.write_manifest(corpus_module.scan_corpus(tmp_path), manifest)
+
+    (benign / "copy.bin").write_bytes((benign / "f1.bin").read_bytes())
+    result = corpus_module.scan_corpus(tmp_path)
+    result.manifest = corpus_module.compare_manifest(
+        result, corpus_module.read_manifest(manifest))
+
+    assert result.manifest["benign"] == {
+        "expected": 3, "seen": 4, "missing": 0, "unexpected": 1}
+
+
+def test_the_corpus_report_says_how_many_files_are_copies(tmp_path):
+    """Every rate is over files, and a Downloads folder holds the same file
+    twice more often than not. The copies are counted, as a CI user meets
+    each one; the line says how many different contents that was."""
+    benign = _manifest_corpus(tmp_path, count=4)
+    (benign / "copy1.bin").write_bytes((benign / "f0.bin").read_bytes())
+    (benign / "copy2.bin").write_bytes((benign / "f0.bin").read_bytes())
+    (benign / "copy3.bin").write_bytes((benign / "f2.bin").read_bytes())
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.files["benign"] == 7
+    assert result.distinct() == {"benign": 4}
+    payload = result.to_dict()
+    assert payload["distinct"] == {"benign": 4}
+    assert payload["hashed"] == {"benign": 7}
+    assert "scanned" not in payload
+    assert ("benign distinct contents: 4 of 7 (3 are copies)"
+            in corpus_module.render(result))
+
+
+def test_a_corpus_without_copies_does_not_say_so(tmp_path):
+    _manifest_corpus(tmp_path, count=3)
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.to_dict()["distinct"] == {"benign": 3}
+    assert "distinct contents" not in corpus_module.render(result)
+
+
+def test_a_single_copy_reads_as_one(tmp_path):
+    benign = _manifest_corpus(tmp_path, count=2)
+    (benign / "copy.bin").write_bytes((benign / "f0.bin").read_bytes())
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert ("benign distinct contents: 2 of 3 (1 is a copy)"
+            in corpus_module.render(result))
+
+
+def test_a_file_without_a_hash_is_not_counted_as_distinct(tmp_path, monkeypatch):
+    """Distinct is a count of hashes, so a file the run could not hash is not
+    in it. Said out loud rather than read as a copy, which it is not."""
+    _manifest_corpus(tmp_path, count=2)
+    monkeypatch.setattr(corpus_module, "analyse",
+                        lambda path, *a, **k: _corpus_report({}))
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.to_dict()["hashed"] == {}
+    assert ("benign distinct contents: 0 of 2 (2 not hashed)"
+            in corpus_module.render(result))
+
+
 def test_writing_a_manifest_of_a_sample_is_refused(tmp_path, capsys):
     """A mistake that produces a plausible file rather than an error: a
     manifest of 500 sampled files looks exactly like a manifest of a 500 file

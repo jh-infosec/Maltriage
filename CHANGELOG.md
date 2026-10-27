@@ -1,5 +1,53 @@
 # Changelog
 
+## Version 0.5.17 - two copies of a file are two files
+
+Asked for as a one-line addition to the corpus report. Writing its tests
+found that the manifest had been comparing the wrong thing since v0.5.9.
+
+### The manifest compared contents, and every rate counts files
+
+The document corpus measured in v0.5.16 had 227 files and 30 of them were
+exact copies of another. The manifest stored every hash, copies included, and
+then read them back as a set. So a run that lost one copy of a duplicated
+file held the same set of contents as the run before it, and the manifest
+line said **all present** over a file count that had dropped by one.
+
+That is the failure the manifest exists to catch: a denominator that shrinks
+without saying so. It is also the fifth instance of the defect class this
+project keeps finding, two computations of one question. The file count
+counted files; the manifest counted contents; nothing said they were
+different questions.
+
+**The manifest now compares counts of each hash.** Losing one of two copies
+is one missing file, adding a copy is one unexpected file, and `expected`
+and `seen` are file counts that agree with the `corpus:` line above them.
+Manifests already written need no change: they always held every hash, copies
+included, and only the reading was wrong.
+
+### The corpus report says how many of its files are copies
+
+```
+benign distinct contents: 197 of 227 (30 are copies)
+```
+
+Every rate is over files, and that stays: a CI user meets each copy, so each
+copy is a file the gate either holds or passes. But a rate over 227 files is
+a rate over 197 different documents, and anybody asking how widely a rule
+was tried needs the second number. The line appears only when there are
+copies, so it is read when it does appear. A file the run could not hash is
+named as such rather than counted as a copy.
+
+The JSON gains `distinct` and `hashed`, both counts per label. The hashes
+themselves still never reach the artefact.
+
+### Tests
+
+Six new. Both manifest tests failed against the set comparison before it was
+changed. Nine mutants, all caught: distinct counted with copies, the line
+always suppressed, the singular wording, the unhashed clause dropped or
+miscounted, and each of the four manifest figures put back to a set.
+
 ## Version 0.5.16 - a document that fetches something when it is opened
 
 The first v0.6 detection. A document with no macros at all can still make

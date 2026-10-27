@@ -66,6 +66,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -176,6 +177,18 @@ class CorpusResult:
     def total_bytes(self) -> int:
         return sum(self.bytes.values())
 
+    def distinct(self) -> dict[str, int]:
+        """Distinct contents per label, by SHA-256.
+
+        A Downloads folder holds the same file twice more often than not, and
+        every rate here is over files, not over contents. Counting copies is
+        right for a CI user, who meets each copy, and wrong for anybody asking
+        how many different documents the rule was tried on. This number lets
+        a reader see which of those two the corpus can answer.
+        """
+        return {label: len(set(digests))
+                for label, digests in sorted(self.scanned.items())}
+
     def false_positive_rate(self) -> float | None:
         """Share of benign files the gate flagged.
 
@@ -239,6 +252,11 @@ class CorpusResult:
             # comparing two results can tell "no containers" from "a result
             # written before anything counted them".
             "known_good": dict(sorted(self.known_good.items())),
+            # Counts only. The hashes themselves stay out of `to_dict`, for
+            # the reason given on `scanned`.
+            "distinct": self.distinct(),
+            "hashed": {label: len(digests)
+                       for label, digests in sorted(self.scanned.items())},
             "containers": dict(sorted(self.containers.items())),
             "members": dict(sorted(self.members.items())),
             "families": {label: dict(sorted(counts.items()))
@@ -322,33 +340,39 @@ def write_manifest(result: CorpusResult, path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def read_manifest(path: Path) -> dict[str, set[str]]:
-    """A manifest as sets of hashes, per label."""
+def read_manifest(path: Path) -> dict[str, Counter]:
+    """A manifest as counts of each hash, per label.
+
+    Counts and not sets. Two copies of a file are two files in every rate,
+    and a corpus that loses one of them has lost a file: compared as sets the
+    two runs hold the same contents and the denominator shrinks unseen.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or "labels" not in payload:
         raise ValueError(f"not a corpus manifest: {path}")
-    return {label: set(digests)
+    return {label: Counter(digests)
             for label, digests in (payload["labels"] or {}).items()}
 
 
 def compare_manifest(result: CorpusResult,
-                     expected: dict[str, set[str]]) -> dict[str, Any]:
+                     expected: dict[str, Counter]) -> dict[str, Any]:
     """What this run saw against what the manifest said was there.
 
     `missing` is the number that were expected and not seen. On a corpus an
     antivirus is quarantining from, that number is the measurement's
     integrity: the samples it takes first are the ones it recognised, so a
-    recall figure computed over what survived is biased upward.
+    recall figure computed over what survived is biased upward. Every figure
+    counts files, copies included, so it agrees with the file count above it.
     """
     out: dict[str, Any] = {}
     for label in sorted(set(expected) | set(result.scanned)):
-        want = expected.get(label, set())
-        seen = set(result.scanned.get(label, []))
+        want = Counter(expected.get(label, ()))
+        seen = Counter(result.scanned.get(label, []))
         out[label] = {
-            "expected": len(want),
-            "seen": len(seen),
-            "missing": len(want - seen),
-            "unexpected": len(seen - want),
+            "expected": sum(want.values()),
+            "seen": sum(seen.values()),
+            "missing": sum((want - seen).values()),
+            "unexpected": sum((seen - want).values()),
         }
     return out
 
@@ -662,6 +686,24 @@ def render(result: CorpusResult) -> str:
     lines.append(f"  {result.total_bytes / 1e6:.1f} MB in {result.elapsed:.1f}s "
                  f"({speed['bytes_per_second'] / 1e6:.1f} MB/s, "
                  f"{speed['files_per_second']:.0f} files/s)")
+
+    distinct = result.distinct()
+    for label in sorted(result.files):
+        hashed = result.scanned.get(label, [])
+        # Only when there are copies, or files that could not be hashed: a
+        # line that says "all different" on every run is a line people stop
+        # reading, and this one has to be read when it does appear.
+        files = result.files.get(label, 0)
+        copies = len(hashed) - distinct.get(label, 0)
+        unhashed = files - len(hashed)
+        if not copies and not unhashed:
+            continue
+        parts = [f"{copies} {'is a copy' if copies == 1 else 'are copies'}"
+                 ] if copies else []
+        if unhashed:
+            parts.append(f"{unhashed} not hashed")
+        lines.append(f"  {label} distinct contents: {distinct.get(label, 0)} of "
+                     f"{files} ({', '.join(parts)})")
 
     for label, counts in sorted(result.manifest.items()):
         # Loud, and above the rates rather than below them. A run that lost
