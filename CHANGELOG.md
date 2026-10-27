@@ -1,5 +1,71 @@
 # Changelog
 
+## Version 0.5.18 - a field that starts a program
+
+The last piece of the external relationships item. In 2017 documents with no
+macro in them ran `cmd.exe` through a field code: `DDEAUTO`, which asks Word
+to start an application and talk to it when the document opens. Excel has
+the same thing as a `ddeLink`. Office asks first in both, and the prompt is
+all that stands between opening and running.
+
+### Two keys, and the first ooxml key above `low`
+
+| Key | When | Severity |
+|---|---|---|
+| `ooxml_dde_command` | a DDE field or link names a command interpreter: `cmd`, `powershell`, `mshta`, `rundll32` and the rest of a fixed list | `medium` |
+| `ooxml_dde` | any other DDE field or link | `low` |
+
+A DDE field that names `Excel` is a document linking to a range in a
+workbook: old, unusual, and ordinary, so it is `low` for the macro keys'
+reason. One that names a command interpreter has no ordinary reading. That
+is a claim, so it comes with a prediction: **`ooxml_dde_command` fires on
+none of the v0.5.16 document corpus**, and the counterfactual will say if
+that is wrong.
+
+The finding names the interpreter from this project's own list and the part
+it was found in. It does not carry the command line, which is the payload.
+
+### Word builds the instruction, so this has to as well
+
+A field's instruction is every `instrText` between its opening and dividing
+marks, joined. The ways past a reader that looked at one string are the ways
+Word itself allows, and each one is a test:
+
+- **Split across runs.** `DD`, `EAU`, `TO` in three runs is `DDEAUTO`.
+- **Named by another field.** `{ QUOTE 68 68 69 65 85 84 79 }` is
+  `DDEAUTO`, and the name never appears in the text at all. A numeric
+  `QUOTE` is evaluated; any other nested field contributes the result Word
+  cached when the document was saved.
+- **Character references and case.** `dd&#101;auto` is `DDEAUTO` to Word.
+- **Another prefix.** `w:` is a convention, so elements and attributes are
+  matched by local name. This is the opposite of the `.rels` rule in
+  v0.5.16, where attributes are unprefixed and a prefixed one is a
+  different attribute. The difference is the namespace, and both are right.
+- **Another part name.** OPC finds the main document through a
+  relationship, so every part is read, not only `word/document.xml`.
+- **UTF-16**, as in v0.5.16.
+
+What is not an instruction is not read as one: text in a field's result is
+what the page shows, a field nested in a result is part of that, and
+`DDEAUTO` typed into a paragraph is a word.
+
+### What it says about what it did not read
+
+A part larger than 8 MiB is read up to that point and says so. A listing
+that stopped at the budget says that finding no DDE field is not evidence
+there is none, as the macro and relationship caveats do. More than 256
+fields are capped and said to be.
+
+### Tests
+
+Twenty one new. Twelve of the first seventeen failed against v0.5.17; the
+other five are the negative cases, which are the mutants' job. Twenty two
+mutants, all caught in the end. Seven survived a first pass: two only
+because that run selected too few tests, one needed an assertion (the field
+name's case), and four became tests: an empty `instrText` or `w:t`
+swallowing the next one, a field nested in a result read as an instruction,
+and text before a nested field's dividing mark read as its result.
+
 ## Version 0.5.17 - two copies of a file are two files
 
 Asked for as a one-line addition to the corpus report. Writing its tests

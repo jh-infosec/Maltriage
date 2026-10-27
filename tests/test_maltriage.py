@@ -7673,3 +7673,220 @@ def test_no_relationship_finding_reaches_the_gate(write):
                                      ("oleObject", "mhtml:https://e/x", True),
                                      ("image", "\\\\h\\s\\x.png", True)))
     assert {f["severity"] for f in _ooxml_findings(report).values()} <= {"info", "low"}
+
+
+# DDE fields, the last piece of the external relationships item
+#
+# A DDE field asks Office to start an application and talk to it. In 2017 it
+# ran `cmd.exe` from documents with no macro in them. Word builds a field's
+# instruction from every `instrText` between its marks, so the fixtures here
+# split, nest, escape and rename the way an author would to get past a
+# reader that looked at one string.
+
+_W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+
+def _complex(*pieces, result="", prefix="w"):
+    p = prefix
+    runs = [f'<{p}:r><{p}:fldChar {p}:fldCharType="begin"/></{p}:r>']
+    for piece in pieces:
+        runs.append(piece if piece.startswith("<") else
+                    f'<{p}:r><{p}:instrText xml:space="preserve">{piece}</{p}:instrText></{p}:r>')
+    runs.append(f'<{p}:r><{p}:fldChar {p}:fldCharType="separate"/></{p}:r>')
+    runs.append(f'<{p}:r><{p}:t>{result}</{p}:t></{p}:r>')
+    runs.append(f'<{p}:r><{p}:fldChar {p}:fldCharType="end"/></{p}:r>')
+    return "".join(runs)
+
+
+def _document(body, prefix="w"):
+    namespace = _W.replace("xmlns:w=", f"xmlns:{prefix}=")
+    return (f'<?xml version="1.0"?><{prefix}:document {namespace}><{prefix}:body>'
+            f'<{prefix}:p>{body}</{prefix}:p></{prefix}:body></{prefix}:document>').encode()
+
+
+def _docx_document(write, xml, part="word/document.xml", name="letter.docx"):
+    parts = [(n, b) for n, b in _OOXML_PARTS if n != part] + [(part, xml)]
+    return analyse(write(name, _zip_bytes(parts)))
+
+
+_CMD = r'DDEAUTO "c:\\windows\\system32\\cmd.exe" "/k calc.exe"'
+
+
+def test_a_dde_field_that_starts_a_command_interpreter_is_reported(write):
+    report = _docx_document(write, _document(_complex(_CMD)))
+    finding = _ooxml_findings(report)["ooxml_dde_command"]
+
+    assert finding["severity"] == "medium"
+    assert finding["discriminator"] == "DDEAUTO"
+    assert "cmd" in finding["detail"]
+    # The command it would run is the payload, and stays out of the report.
+    assert "calc" not in finding["detail"]
+    assert at_gate(report, "medium")
+
+
+def test_a_dde_field_split_across_runs_is_one_field(write):
+    """The first thing an author tries: Word joins the pieces, so must this."""
+    report = _docx_document(write, _document(_complex(
+        "DD", "EAU", r'TO "c:\\Windows\\System32\\cmd.exe" "/c x"')))
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_a_dde_field_named_by_a_quote_field_is_found(write):
+    """`{ QUOTE 68 68 69 65 85 84 79 }` is `DDEAUTO`, and the name never
+    appears in the instruction text at all."""
+    codes = " ".join(str(ord(c)) for c in "DDEAUTO")
+    inner = _complex(f"QUOTE {codes}")
+    report = _docx_document(write, _document(_complex(
+        inner, r' "C:\\Programs\\Microsoft\\Office\\MSWord.exe\\..\\..\\..\\..\\windows'
+               r'\\system32\\WindowsPowerShell\\v1.0\\powershell.exe" "-c x"')))
+    finding = _ooxml_findings(report)["ooxml_dde_command"]
+    assert "powershell" in finding["detail"]
+
+
+def test_a_nested_field_contributes_its_cached_result(write):
+    inner = _complex('IF 1 = 1 "DDEAUTO" "PAGE"', result="DDEAUTO")
+    report = _docx_document(write, _document(_complex(inner, ' cmd "/c x"')))
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_a_dde_field_survives_character_references_and_case(write):
+    report = _docx_document(write, _document(_complex(
+        'dd&#101;auto &quot;c:\\\\windows\\\\system32\\\\cmd.exe&quot; &quot;/c x&quot;')))
+    assert _ooxml_findings(report)["ooxml_dde_command"]["discriminator"] == "DDEAUTO"
+
+
+def test_a_dde_field_under_another_prefix_is_found(write):
+    """`w:` is a convention. The namespace is what Word reads."""
+    report = _docx_document(write, _document(_complex(_CMD, prefix="q"), prefix="q"))
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_a_simple_dde_field_linking_a_workbook_is_low(write):
+    """DDE that names Excel is a document linking to a range: unusual, old,
+    and ordinary. It is reported and kept away from the gate."""
+    body = '<w:fldSimple w:instr=" DDE Excel &quot;C:\\\\q\\\\sales.xlsx&quot; R1C1 \\a"><w:r><w:t>4</w:t></w:r></w:fldSimple>'
+    report = _docx_document(write, _document(body))
+    findings = _ooxml_findings(report)
+
+    assert findings["ooxml_dde"]["severity"] == "low"
+    assert findings["ooxml_dde"]["discriminator"] == "DDE"
+    assert "Excel" in findings["ooxml_dde"]["detail"]
+    assert "ooxml_dde_command" not in findings
+    assert not at_gate(report, "medium")
+
+
+def test_ordinary_fields_are_not_dde(write):
+    body = (_complex("PAGE", result="3") + _complex('HYPERLINK "https://e.example/"')
+            + _complex('TOC \\o "1-3"') + '<w:r><w:t>DDEAUTO cmd /c in plain text</w:t></w:r>'
+            + '<w:r><w:tab/><w:instrText/></w:r>')
+    report = _docx_document(write, _document(body))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+def test_text_in_a_field_result_is_not_its_instruction(write):
+    """The cached result is what the reader sees on the page. A field whose
+    result reads DDEAUTO is a field showing that word, not running it."""
+    report = _docx_document(write, _document(_complex("PAGE", result="DDEAUTO cmd")))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+def test_dde_is_found_in_a_main_document_with_another_name(write):
+    """OPC finds the main document through a relationship, so its name is the
+    author's choice. A rule that read `word/document.xml` only would be a
+    rule about filenames."""
+    report = _docx_document(write, _document(_complex(_CMD)), part="x/main.xml")
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_dde_is_found_in_a_utf16_part(write):
+    xml = _document(_complex(_CMD)).decode().replace('version="1.0"?',
+                                                      'version="1.0" encoding="UTF-16"?')
+    report = _docx_document(write, b"\xff\xfe" + xml.encode("utf-16-le"))
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_an_excel_dde_link_to_a_command_interpreter_is_reported(write):
+    link = (b'<?xml version="1.0"?><externalLink xmlns="http://schemas.openxmlformats.org/'
+            b'spreadsheetml/2006/main"><ddeLink ddeService="cmd" ddeTopic="/c calc">'
+            b'<ddeItems><ddeItem name="A0"/></ddeItems></ddeLink></externalLink>')
+    parts = [("[Content_Types].xml", b"<Types/>" + b" " * 100),
+             ("xl/workbook.xml", b"<workbook/>" + b" " * 200),
+             ("xl/externalLinks/externalLink1.xml", link)]
+    report = analyse(write("book.xlsx", _zip_bytes(parts)))
+    finding = _ooxml_findings(report)["ooxml_dde_command"]
+
+    assert finding["discriminator"] == "ddeLink"
+    assert "calc" not in finding["detail"]
+
+
+def test_a_dde_server_cannot_put_a_terminal_escape_in_a_report(write):
+    body = '<w:fldSimple w:instr="DDE Ex\x1b[2Jcel x y"/>'
+    report = _docx_document(write, _document(body))
+    assert "\x1b" not in _ooxml_findings(report)["ooxml_dde"]["detail"]
+
+
+def test_dde_is_read_only_in_a_document(write):
+    """A ZIP that is not OOXML has no fields, whatever a member says."""
+    report = analyse(write("backup.zip", _zip_bytes([("notes.xml", _document(_complex(_CMD)))])))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+def test_a_part_larger_than_is_read_says_so(write, monkeypatch):
+    monkeypatch.setattr(archives_module, "_FIELD_READ_LIMIT", 64)
+    report = _docx_document(write, _document(_complex(_CMD)))
+    assert any("larger than was read" in note
+               for note in _archive_data(report)["parse_errors"])
+
+
+def test_a_truncated_listing_cannot_prove_there_is_no_dde_field(write):
+    parts = _OOXML_PARTS + [(f"word/media/image{n}.png", b"\x89PNG\r\n\x1a\n" + bytes(64))
+                            for n in range(40)]
+    report = analyse(write("report.docx", _zip_bytes(parts)),
+                     config={**DEFAULT_CONFIG, "archive_max_entries": 5})
+    assert any("no DDE field is not evidence" in note
+               for note in _archive_data(report)["parse_errors"])
+
+
+def test_dde_fields_are_counted_once_per_kind(write):
+    report = _docx_document(write, _document(_complex(_CMD) * 3))
+    findings = [f for f in report.findings if f["key"] == "ooxml_dde_command"]
+
+    assert len(findings) == 1
+    assert "3 in all" in findings[0]["detail"]
+
+
+def test_an_empty_instruction_piece_does_not_swallow_the_next(write):
+    """`<w:instrText/>` is empty. Read as an opening tag, it would run on to
+    the next piece's closing tag and turn that piece into markup."""
+    report = _docx_document(write, _document(_complex(
+        '<w:r><w:instrText/></w:r>', _CMD)))
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_a_field_in_another_fields_result_is_not_its_instruction(write):
+    """Only what sits before the dividing mark is the instruction. A field
+    nested in the result is part of what the page shows."""
+    codes = " ".join(str(ord(c)) for c in "DDEAUTO")
+    body = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            + _complex(f"QUOTE {codes}") +
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+    report = _docx_document(write, _document(body))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+def test_only_result_text_is_a_nested_fields_value(write):
+    """Text before a nested field's dividing mark is not its cached result."""
+    inner = _complex("<w:r><w:t>DDEAUTO</w:t></w:r>", 'IF 1 = 1 "x" "y"')
+    report = _docx_document(write, _document(_complex(inner, ' cmd "/c x"')))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+def test_an_empty_result_run_does_not_swallow_the_next(write):
+    inner = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+             '<w:r><w:instrText>IF 1 = 1 "DDEAUTO" "x"</w:instrText></w:r>'
+             '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+             '<w:r><w:t/></w:r><w:r><w:t>DDEAUTO</w:t></w:r>'
+             '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+    report = _docx_document(write, _document(_complex(inner, ' cmd "/c x"')))
+    assert "ooxml_dde_command" in _ooxml_findings(report)

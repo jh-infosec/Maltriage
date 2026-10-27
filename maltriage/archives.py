@@ -384,6 +384,18 @@ class ArchiveExtractor(RandomAccessExtractor):
             # Read now, while the parts are still staged: the directory is
             # deleted once the members have been analysed.
             data["relationships"] = external_relationships(data["staged"])
+            data["dde"] = dde_fields(data["staged"])
+            if data["dde"]["partial_parts"]:
+                data["parse_errors"].append(
+                    f"fields: {data['dde']['partial_parts']} part(s) larger than "
+                    "was read, so a DDE field past that point would not be seen")
+            if data["dde"]["truncated"]:
+                data["parse_errors"].append(
+                    "fields: more DDE fields than were kept, so the list is partial")
+            if data["truncated"] and not data["dde"]["fields"]:
+                data["parse_errors"].append(
+                    "fields: the listing stopped at the budget, so finding no "
+                    "DDE field is not evidence that there is none")
             if data["relationships"]["truncated"]:
                 data["parse_errors"].append(
                     "relationships: more external relationships than were kept, "
@@ -599,6 +611,38 @@ class ArchiveExtractor(RandomAccessExtractor):
                           {"name": "part", "value": first["part"]}],
                 discriminator=kind))
 
+        by_field: dict[str, list[dict[str, Any]]] = {}
+        for field_ in (data.get("dde") or {}).get("fields") or []:
+            by_field.setdefault(field_["field"], []).append(field_)
+        for kind, fields in sorted(by_field.items()):
+            commands = sorted({f["command"] for f in fields if f["command"]})
+            more = f", {len(fields)} in all" if len(fields) > 1 else ""
+            where = "a DDE link" if kind == "ddeLink" else f"a {kind} field"
+            if commands:
+                # The one ooxml key above `low`. A DDE field that names a
+                # workbook is a document linking to data; one that names a
+                # command interpreter starts it, and there is no ordinary
+                # document that does that. Predicted to fire on none of the
+                # v0.5.16 document corpus, and the counterfactual will say.
+                out.append(mk_finding(
+                    self.name, "ooxml_dde_command",
+                    f"the document carries {where} that starts "
+                    f"{', '.join(commands)}{more}; Office asks before it runs, "
+                    "and that prompt is the only thing between opening and execution",
+                    "medium",
+                    evidence=[{"name": "count", "value": len(fields)},
+                              {"name": "part", "value": fields[0]["part"]}],
+                    discriminator=kind))
+            else:
+                out.append(mk_finding(
+                    self.name, "ooxml_dde",
+                    f"the document carries {where} naming {fields[0]['server'] or 'no server'}"
+                    f"{more}; DDE starts the application it names and talks to it",
+                    "low",
+                    evidence=[{"name": "count", "value": len(fields)},
+                              {"name": "part", "value": fields[0]["part"]}],
+                    discriminator=kind))
+
         if data.get("macro_project"):
             # Both at `low`, and that is a decision rather than an oversight.
             # A macro-enabled document is ordinary in most organisations, and
@@ -804,6 +848,165 @@ def external_relationships(staged: list[dict[str, Any]]) -> dict[str, Any]:
                 "scheme": _target_scheme(target),
                 "part": _inside(str(member["inside"])),
                 "autoloads": kind in AUTOLOADING_RELATIONSHIPS,
+            })
+    return out
+
+
+#: Applications that, named as a DDE server, mean the field runs a command.
+#: A DDE field that links a document to a range in a workbook names `Excel`;
+#: one that names a command interpreter has no reading but the one the 2017
+#: DDE campaigns gave it.
+DDE_COMMAND_SERVERS = ("cmd", "powershell", "pwsh", "mshta", "wscript", "cscript",
+                       "rundll32", "regsvr32", "msiexec", "certutil", "bitsadmin",
+                       "msdt", "conhost", "forfiles", "wmic", "schtasks")
+_DDE_FIELDS = ("DDE", "DDEAUTO")
+_PREFIX = rb"(?:[A-Za-z_][\w.-]*:)?"
+#: One pass over a part, in document order. Each alternative is one thing a
+#: field is made of: the marks that open, divide and close a complex field,
+#: the pieces of its instruction, the runs of its cached result, a simple
+#: field, and Excel's DDE link. The self-closing forms come first so an empty
+#: element cannot swallow everything up to the next one's closing tag.
+_FIELD_TOKEN = re.compile(
+    rb"<" + _PREFIX + rb"fldChar\b(?P<char>[^>]*)>"
+    rb"|<" + _PREFIX + rb"instrText\b[^>]*/>"
+    rb"|<" + _PREFIX + rb"instrText\b[^>]*>(?P<instr>.*?)</" + _PREFIX + rb"instrText\s*>"
+    rb"|<" + _PREFIX + rb"t\b[^>]*/>"
+    rb"|<" + _PREFIX + rb"t\b[^>]*>(?P<text>.*?)</" + _PREFIX + rb"t\s*>"
+    rb"|<" + _PREFIX + rb"fldSimple\b(?P<simple>[^>]*)>"
+    rb"|<" + _PREFIX + rb"ddeLink\b(?P<dde>[^>]*)>",
+    re.DOTALL)
+_FIELD_READ_LIMIT = 8 * 1048576
+_FIELDS_KEPT = 256
+
+
+def _local_attributes(raw: bytes) -> dict[str, str]:
+    """Attributes by local name, decoded the way Word decodes them.
+
+    By local name, unlike `.rels`. There the attributes are unprefixed and a
+    prefixed one is a different attribute; here they live in the
+    WordprocessingML namespace under whatever prefix the author bound to it,
+    and `w:` is a convention, not a requirement.
+    """
+    out = {}
+    for name, double, single in _ATTRIBUTE.findall(raw.decode("utf-8", "replace")):
+        out[name.rsplit(":", 1)[-1]] = html.unescape(
+            double if double or not single else single)
+    return out
+
+
+def _field_words(instruction: str) -> list[str]:
+    """A field instruction split as Word splits it: on spaces, quotes kept
+    together, and the quotes themselves dropped."""
+    return [double if double or not single else single
+            for double, single in re.findall(r'"([^"]*)"|(\S+)', instruction)]
+
+
+def _quote_result(words: list[str]) -> str | None:
+    """What a `QUOTE` field of character codes evaluates to, or `None`.
+
+    `{ QUOTE 68 68 69 }` is `DDE`. A field name built that way never appears
+    in the instruction text at all, so reading the instruction alone sees a
+    field with no name. Only the all-numeric form is evaluated; anything else
+    falls back to the result Word cached when the document was saved.
+    """
+    if len(words) < 2 or words[0].upper() != "QUOTE":
+        return None
+    try:
+        return "".join(chr(int(word)) for word in words[1:])
+    except (ValueError, OverflowError):
+        return None
+
+
+def _command_server(server: str) -> str | None:
+    """The interpreter a DDE server names, from this module's own list.
+
+    Returned from the list rather than from the sample, so the finding says
+    which interpreter without carrying the bytes that named it.
+    """
+    base = re.split(r"[\\/]+", server.strip().strip('"'))[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    return base if base in DDE_COMMAND_SERVERS else None
+
+
+def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every DDE field in a document, and every DDE link in a workbook.
+
+    A DDE field asks Office to start an application and talk to it. Word
+    updates a `DDEAUTO` field when the document opens; Excel does the same
+    for a `ddeLink`. Both ask first, and both were used in 2017 to run
+    `cmd.exe` from a document with no macros in it.
+
+    Every part is read, not only `word/document.xml`. OPC finds the main
+    document through a relationship, so its name is the author's choice, and
+    a rule that read one name would be a rule about filenames.
+
+    A complex field's instruction is the concatenation of every `instrText`
+    between its opening and dividing marks, because Word builds it that way
+    and splitting `DDE` and `AUTO` across two runs is the first thing an
+    author tries. A nested field contributes its value, as it does in Word:
+    a numeric `QUOTE` evaluated here, anything else its cached result.
+    """
+    out: dict[str, Any] = {"fields": [], "truncated": False, "partial_parts": 0}
+    for member in staged:
+        inside = str(member.get("inside", ""))
+        if inside.lower().endswith(".rels"):
+            continue
+        try:
+            with open(member["path"], "rb") as handle:  # binary API
+                raw = handle.read(_FIELD_READ_LIMIT + 1)
+        except OSError:
+            continue
+        if len(raw) > _FIELD_READ_LIMIT:
+            raw = raw[:_FIELD_READ_LIMIT]
+            out["partial_parts"] += 1
+        text = _as_utf8(raw)
+        if b"instr" not in text and b"ddeLink" not in text:
+            continue
+
+        found: list[tuple[str, str, str]] = []
+        #: Open complex fields, innermost last: [instruction, result, state].
+        stack: list[list[str]] = []
+        for token in _FIELD_TOKEN.finditer(text):
+            if token.group("char") is not None:
+                kind = _local_attributes(token.group("char")).get("fldCharType")
+                if kind == "begin":
+                    stack.append(["", "", "instr"])
+                elif kind == "separate" and stack:
+                    stack[-1][2] = "result"
+                elif kind == "end" and stack:
+                    instruction, result, _ = stack.pop()
+                    words = _field_words(instruction)
+                    if words:
+                        found.append(("field", words[0], " ".join(words[1:2])))
+                    value = _quote_result(words)
+                    if stack and stack[-1][2] == "instr":
+                        stack[-1][0] += value if value is not None else result
+            elif token.group("instr") is not None:
+                if stack and stack[-1][2] == "instr":
+                    stack[-1][0] += html.unescape(token.group("instr").decode("utf-8", "replace"))
+            elif token.group("text") is not None:
+                if stack and stack[-1][2] == "result":
+                    stack[-1][1] += html.unescape(token.group("text").decode("utf-8", "replace"))
+            elif token.group("simple") is not None:
+                words = _field_words(_local_attributes(token.group("simple")).get("instr", ""))
+                if words:
+                    found.append(("field", words[0], " ".join(words[1:2])))
+            elif token.group("dde") is not None:
+                attributes = _local_attributes(token.group("dde"))
+                found.append(("link", "ddeLink", attributes.get("ddeService", "")))
+
+        for kind, name, server in found:
+            if kind == "field" and name.upper() not in _DDE_FIELDS:
+                continue
+            if len(out["fields"]) >= _FIELDS_KEPT:
+                out["truncated"] = True
+                continue
+            out["fields"].append({
+                "field": "ddeLink" if kind == "link" else name.upper(),
+                "server": _display(server),
+                "command": _command_server(server),
+                "part": _inside(inside),
             })
     return out
 
