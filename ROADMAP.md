@@ -356,10 +356,10 @@ where the safety work lives. Both formats wrap structure no forward pass
 reaches, so both are random-access extractors gating on the header phase,
 which is the third kind doing what it was added for.
 
-- [~] OLE2 structured storage: structure, kinds, VBA, packages and encryption detected *(v0.5.19)*; stream content not yet read
+- [x] OLE2 structured storage: structure, kinds, VBA, packages and encryption *(v0.5.19)*, stream content *(v0.5.20)*
 - [x] OOXML identification and part listing *(v0.5.10)*
-- [~] VBA: presence is detected, extraction and stream listing are not
-- [ ] Auto-execute trigger detection
+- [x] VBA: presence *(v0.5.10)*, module listing and source extraction *(v0.5.20)*
+- [~] Auto-execute triggers: declared document and workbook events *(v0.5.20)*; ActiveX control events and p-code without source (VBA stomping) not yet
 - [x] External relationships *(v0.5.16)* and DDE fields and links *(v0.5.18)*
 
 **Part of this arrived early, and the reason is worth keeping.** v0.5.10

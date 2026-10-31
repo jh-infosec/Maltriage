@@ -295,6 +295,13 @@ DEFAULT_CONFIG = {
     # size, not by configuration.
     "ole_max_directory_entries": 8192,
     "ole_max_listed_streams": 256,
+    # VBA source is decompressed, and a compressed chunk can grow from three
+    # bytes to 4096. So the output is capped per module and per project, and
+    # a stream is not read at all past `vba_max_stream_bytes`.
+    "vba_max_stream_bytes": 16777216,
+    "vba_max_module_bytes": 4194304,
+    "vba_max_source_bytes": 16777216,
+    "vba_max_modules": 256,
     "archive_max_member_bytes": 67108864,
 
     # Wall-clock seconds for the recursion. The known gap `architecture.md`
@@ -575,6 +582,10 @@ def validate_config(config):
     check_str("archive_staging_dir")
     check_int("ole_max_directory_entries")
     check_int("ole_max_listed_streams")
+    check_int("vba_max_stream_bytes")
+    check_int("vba_max_module_bytes")
+    check_int("vba_max_source_bytes")
+    check_int("vba_max_modules")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

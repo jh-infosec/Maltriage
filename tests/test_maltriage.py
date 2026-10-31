@@ -47,6 +47,7 @@ from maltriage import corpus as corpus_module
 from maltriage import extractors as extractors_module
 from maltriage import archives as archives_module
 from maltriage import ole as ole_module
+from maltriage import vba as vba_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -2939,7 +2940,8 @@ def test_strings_the_sample_supplies_cannot_repaint_the_terminal(write):
     assert "\x1b" not in report.data["elf"]["runpath"]
     rendered = cli.render_human(report)
     assert "\x1b" not in rendered and "\n      [clean]" not in rendered
-    assert "\x1b" not in json.dumps(report.to_dict())
+    # JSON spells ESC as six characters, so look for those.
+    assert r"\u001b" not in json.dumps(report.to_dict())
 
 
 @needs_pefile
@@ -3194,7 +3196,8 @@ def test_extracted_strings_cannot_carry_a_terminal_escape(write):
     assert "\x1b" not in everything and "\x07" not in everything
     # and the escape really did split the run, rather than being carried
     assert "before" in everything and "after-the-escape" in everything
-    assert "\x1b" not in json.dumps(analyse(write("b.bin", body)).to_dict())
+    # JSON spells ESC as six characters, so look for those.
+    assert r"\u001b" not in json.dumps(analyse(write("b.bin", body)).to_dict())
 
 
 def test_window_statistics_match_an_independent_calculation(write):
@@ -8061,7 +8064,8 @@ def test_a_compound_file_is_listed_by_path_and_size(write):
     # Control characters are part of real stream names and never of a report.
     assert streams["CompObj"] == 80
     assert data["stream_count"] == 6 and data["storage_count"] == 2
-    assert data["parse_errors"] == []
+    # The VBA streams here are filler, so only the project read complains.
+    assert [n for n in data["parse_errors"] if not n.startswith("vba:")] == []
 
 
 def test_a_word_document_with_a_vba_project_is_reported(write):
@@ -8288,7 +8292,8 @@ def test_an_entry_the_tree_cannot_reach_is_counted(write):
 def test_a_stream_name_cannot_put_a_terminal_escape_in_a_report(write):
     blob, _ = _cfb({"WordDocument": b"w" * 600, "x\x1b[2Jy": b"z" * 600})
     report = analyse(write("escape.doc", blob))
-    assert "\x1b" not in json.dumps(_ole(report))
+    # Checked on the value, not on JSON, which spells ESC as an escape.
+    assert "x[2Jy" in {s["path"] for s in _ole(report)["streams"]}
 
 
 def test_a_truncated_compound_file_is_read_as_far_as_it_goes(write):
@@ -8380,3 +8385,362 @@ def test_a_corpus_says_which_kind_of_compound_file_it_held(tmp_path):
     result = corpus_module.scan_corpus(tmp_path)
 
     assert result.families["benign"] == {"ole-word": 1, "ole-excel": 1, "ole": 1}
+
+
+# VBA source, read out of the project
+#
+# Fixtures are compressed by a writer here that was checked against
+# oletools in both directions, and the source this reads was compared with
+# what olevba extracts from the same files.
+
+def _ovba_compress(data):
+    """MS-OVBA 2.4.1 compression: greedy, longest match first, so the copy
+    tokens a real project carries are exercised and not only literals."""
+    out = bytearray(b"\x01")
+    for chunk_start in range(0, len(data), 4096):
+        chunk = data[chunk_start:chunk_start + 4096]
+        body = bytearray()
+        pos = 0
+        while pos < len(chunk):
+            flag_index = len(body)
+            body.append(0)
+            flags = 0
+            for bit in range(8):
+                if pos >= len(chunk):
+                    break
+                bits = max((pos - 1).bit_length(), 4)
+                max_len, max_off = (0xFFFF >> bits) + 3, 1 << (16 - bits)
+                best_len = best_off = 0
+                for off in range(1, min(pos, max_off) + 1):
+                    length = 0
+                    while (length < max_len and pos + length < len(chunk)
+                           and chunk[pos + length - off] == chunk[pos + length]):
+                        length += 1
+                    if length > best_len:
+                        best_len, best_off = length, off
+                        if length == max_len:
+                            break
+                if best_len >= 3:
+                    body += struct.pack("<H", ((best_off - 1) << (16 - bits)) | (best_len - 3))
+                    flags |= 1 << bit
+                    pos += best_len
+                else:
+                    body.append(chunk[pos])
+                    pos += 1
+            body[flag_index] = flags
+        if len(body) > 4096:
+            # Stored raw, which the format allows only for a whole chunk: a
+            # raw chunk is always 4096 bytes. Real source is text and never
+            # needs it short; a fixture that would is a fixture mistake.
+            assert len(chunk) == 4096, "an incompressible final chunk"
+            out += struct.pack("<H", 0x3FFF) + chunk
+        else:
+            out += struct.pack("<H", 0xB000 | (len(body) - 1)) + body
+    return bytes(out)
+
+
+def _record(ident, body=b""):
+    return struct.pack("<HI", ident, len(body)) + body
+
+
+def _vba_storage(modules, code_page=1252, pcode=b"\x01\x16\x03\x00" + b"\x00" * 60):
+    """A `VBA` storage: a `dir` stream naming `modules` and one stream each.
+
+    `modules` maps a module name to (source text, kind), kind being
+    "procedural" or "document". Source sits after `pcode`, as Office puts it.
+    """
+    records = (_record(0x0001, struct.pack("<I", 1)) + _record(0x0002, struct.pack("<I", 0x409))
+               + _record(0x0014, struct.pack("<I", 0x409))
+               + _record(0x0003, struct.pack("<H", code_page))
+               + _record(0x0004, b"VBAProject") + _record(0x0005) + _record(0x0040)
+               + _record(0x0006) + _record(0x003D) + _record(0x0007, b"\x00" * 4)
+               + _record(0x0008, b"\x00" * 4)
+               # PROJECTVERSION: a size of 4 and six bytes, as the format says.
+               + struct.pack("<HI", 0x0009, 4) + struct.pack("<IH", 1, 2)
+               + _record(0x000C) + _record(0x003C)
+               + _record(0x000F, struct.pack("<H", len(modules)))
+               + _record(0x0013, b"\xff\xff"))
+    storage = {}
+    for name, (source, kind) in modules.items():
+        encoded = name.encode("cp1252", "replace")
+        records += (_record(0x0019, encoded) + _record(0x0047, name.encode("utf-16-le"))
+                    + _record(0x001A, encoded) + _record(0x0032, name.encode("utf-16-le"))
+                    + _record(0x001C) + _record(0x0048)
+                    + _record(0x0031, struct.pack("<I", len(pcode)))
+                    + _record(0x001E, b"\x00" * 4) + _record(0x002C, b"\xff\xff")
+                    + _record(0x0021 if kind == "procedural" else 0x0022) + _record(0x002B))
+        text = source.encode("cp1252") if isinstance(source, str) else source
+        storage[name] = pcode + _ovba_compress(text)
+    records += _record(0x0010)
+    storage["dir"] = _ovba_compress(records)
+    storage["_VBA_PROJECT"] = b"\xcc\x61\xff\xff\x00\x00\x00"
+    return storage
+
+
+def _macro_doc(modules, **kwargs):
+    project = b'ID="{00000000-0000-0000-0000-000000000000}"\r\n' + b"".join(
+        (b"Module=" if kind == "procedural" else b"Document=") + name.encode() + b"\r\n"
+        for name, (_, kind) in modules.items())
+    return {"WordDocument": b"w" * 5000, "Macros": {
+        "PROJECT": project, "PROJECTwm": b"\x00\x00",
+        "VBA": _vba_storage(modules, **kwargs)}}
+
+
+_DROPPER = ('Attribute VB_Name = "ThisDocument"\r\n'
+            "Private Sub Document_Open()\r\n"
+            '  Shell "calc_marker_7731.exe", vbHide\r\nEnd Sub\r\n')
+_AUTO_ONLY = ('Attribute VB_Name = "ThisWorkbook"\r\n'
+              "Private Sub Workbook_Open()\r\n  Sheets(1).Calculate\r\nEnd Sub\r\n")
+_SHELL_ONLY = ('Attribute VB_Name = "Module1"\r\n'
+               'Sub RunReport()\r\n  Shell "notepad.exe"\r\nEnd Sub\r\n')
+
+
+def _vba(report):
+    return report.data["ole"]["vba"]
+
+
+def _vba_findings(report):
+    return {f["key"]: f for f in report.findings if f["key"].startswith("vba_")}
+
+
+def _macro_report(write, modules, name="letter.doc", config=None, **kwargs):
+    blob, _ = _cfb(_macro_doc(modules, **kwargs))
+    return analyse(write(name, blob), config=config)
+
+
+def test_vba_source_is_read_out_of_every_module(write):
+    report = _macro_report(write, {"ThisDocument": (_DROPPER, "document"),
+                                   "Module1": (_SHELL_ONLY, "procedural")})
+    modules = {m["name"]: m for m in _vba(report)["modules"]}
+
+    assert modules["ThisDocument"]["kind"] == "document"
+    assert modules["Module1"]["kind"] == "procedural"
+    assert modules["ThisDocument"]["source_bytes"] == len(_DROPPER)
+    assert modules["ThisDocument"]["sha256"] == hashlib.sha256(_DROPPER.encode()).hexdigest()
+    assert _vba(report)["code_page"] == 1252
+    assert report.data["ole"]["parse_errors"] == []
+
+
+def test_a_macro_that_shells_out_on_open_reaches_the_gate(write):
+    report = _macro_report(write, {"ThisDocument": (_DROPPER, "document")})
+    findings = _vba_findings(report)
+
+    assert findings["vba_autorun_execution"]["severity"] == "medium"
+    assert "Document_Open" in findings["vba_autorun_execution"]["detail"]
+    assert "Shell" in findings["vba_autorun_execution"]["detail"]
+    assert findings["vba_auto_exec"]["severity"] == "low"
+    assert findings["vba_execution"]["severity"] == "low"
+    assert at_gate(report, "medium")
+
+
+def test_the_source_never_reaches_the_report(write):
+    """It is sample content. A finding names entries from this module's
+    lists; the line they were on stays in the sample."""
+    report = _macro_report(write, {"ThisDocument": (_DROPPER, "document")})
+    text = json.dumps({"data": report.data, "findings": report.findings}, default=str)
+
+    assert "calc_marker_7731" not in text
+    assert "vbHide" not in text
+
+
+def test_a_macro_that_runs_on_open_and_nothing_else_stays_low(write):
+    """A workbook that recalculates when it opens is ordinary."""
+    report = _macro_report(write, {"ThisWorkbook": (_AUTO_ONLY, "document")})
+    findings = _vba_findings(report)
+
+    assert set(findings) == {"vba_auto_exec"}
+    assert not at_gate(report, "medium")
+
+
+def test_a_macro_that_shells_out_on_a_click_stays_low(write):
+    report = _macro_report(write, {"Module1": (_SHELL_ONLY, "procedural")})
+    assert set(_vba_findings(report)) == {"vba_execution"}
+
+
+def test_the_trigger_and_the_call_may_be_in_different_modules(write):
+    """`Document_Open` calling a routine in another module is the usual
+    shape, so the gate key is about the project, not one module."""
+    opener = ('Attribute VB_Name = "ThisDocument"\r\n'
+              "Private Sub Document_Open()\r\n  RunReport\r\nEnd Sub\r\n")
+    report = _macro_report(write, {"ThisDocument": (opener, "document"),
+                                   "Module1": (_SHELL_ONLY, "procedural")})
+    assert "vba_autorun_execution" in _vba_findings(report)
+
+
+def test_a_trigger_is_a_declaration_not_a_mention(write):
+    source = ('Attribute VB_Name = "Module1"\r\n'
+              "' Do not add an AutoOpen here, see Document_Open in the template\r\n"
+              "Sub Helper()\r\n  Call AutoOpenHelper\r\n  MsgBox \"Sub AutoOpen\"\r\nEnd Sub\r\n")
+    report = _macro_report(write, {"Module1": (source, "procedural")})
+    assert _vba(report)["auto_exec"] == []
+
+
+@pytest.mark.parametrize("declaration", [
+    "Sub AutoOpen()", "Public Sub autoopen()", "Private Sub Document_Open()",
+    "Function Auto_Open()", "  Private Static Sub Workbook_Open ( )",
+])
+def test_triggers_are_matched_however_they_are_declared(write, declaration):
+    source = f'Attribute VB_Name = "M"\r\n{declaration}\r\nEnd Sub\r\n'
+    assert _vba(_macro_report(write, {"M": (source, "procedural")}))["auto_exec"]
+
+
+def test_capability_is_reported_as_information(write):
+    source = ('Attribute VB_Name = "Module1"\r\n'
+              'Private Declare PtrSafe Function URLDownloadToFileA Lib "urlmon" () As Long\r\n'
+              "Sub Fetch()\r\nEnd Sub\r\n")
+    finding = _vba_findings(_macro_report(write, {"Module1": (source, "procedural")}))["vba_capability"]
+
+    assert finding["severity"] == "info"
+    assert "URLDownloadToFile" in finding["detail"]
+    assert "Declare Lib" in finding["detail"]
+
+
+def test_an_excel_workbook_open_is_found(write):
+    blob, _ = _cfb({"Workbook": b"b" * 5000, "_VBA_PROJECT_CUR": {
+        "PROJECT": b"Document=ThisWorkbook\r\n",
+        "VBA": _vba_storage({"ThisWorkbook": (_AUTO_ONLY + 'Sub X()\r\n CreateObject("WScript.Shell").Run "x"\r\nEnd Sub\r\n',
+                                              "document")})}})
+    findings = _vba_findings(analyse(write("book.xls", blob)))
+    assert "vba_autorun_execution" in findings
+
+
+def test_the_project_inside_a_docm_is_read_and_its_container_is_held(write):
+    """The `vbaProject.bin` of a macro OOXML document is where its source
+    lives, and a member's severity is its container's."""
+    project, _ = _cfb({"PROJECT": b"Document=ThisDocument\r\n",
+                       "VBA": _vba_storage({"ThisDocument": (_DROPPER, "document")})})
+    report = analyse(write("report.docm", _zip_bytes(_OOXML_PARTS + [("word/vbaProject.bin", project)])))
+    member = next(child for child in report.children if child.data.get("ole"))
+
+    assert member.data["ole"]["kind"] == "vba_project"
+    assert "vba_autorun_execution" in _vba_findings(member)
+    assert at_gate(report, "medium")
+
+
+def test_a_module_that_decompresses_past_its_cap_says_so(write):
+    """Three bytes of copy token are 4096 bytes of output, so the output is
+    capped, and a module cut at the cap does not read as complete."""
+    bomb = 'Attribute VB_Name = "M"\r\n' + "A" * 2_000_000
+    report = _macro_report(write, {"M": (bomb, "procedural")},
+                           config={**DEFAULT_CONFIG, "vba_max_module_bytes": 65536})
+    data = report.data["ole"]
+
+    assert _vba(report)["modules"][0]["source_bytes"] == 65536
+    assert _vba(report)["truncated"] is True
+    assert any("source cut at 65536 bytes" in note for note in data["parse_errors"])
+
+
+def test_the_project_cap_holds_across_modules(write):
+    modules = {f"M{n}": (f'Attribute VB_Name = "M{n}"\r\n' + "B" * 40000, "procedural")
+               for n in range(5)}
+    report = _macro_report(write, modules,
+                           config={**DEFAULT_CONFIG, "vba_max_source_bytes": 100000})
+
+    assert sum(m["source_bytes"] for m in _vba(report)["modules"]) <= 100000
+    assert _vba(report)["truncated"] is True
+
+
+def test_the_module_count_is_capped(write):
+    modules = {f"M{n}": (f'Attribute VB_Name = "M{n}"\r\n', "procedural") for n in range(6)}
+    report = _macro_report(write, modules, config={**DEFAULT_CONFIG, "vba_max_modules": 3})
+
+    assert len(_vba(report)["modules"]) == 3
+    assert any("more than 3 modules" in note for note in report.data["ole"]["parse_errors"])
+
+
+def test_a_stream_above_the_read_limit_is_not_read(write):
+    report = _macro_report(write, {"M": (_SHELL_ONLY, "procedural")},
+                           config={**DEFAULT_CONFIG, "vba_max_stream_bytes": 4096},
+                           pcode=b"\x00" * 9000)
+    notes = report.data["ole"]["parse_errors"]
+    assert any("above vba_max_stream_bytes" in note for note in notes)
+
+
+def test_a_module_without_its_stream_is_said(write):
+    tree = _macro_doc({"Module1": (_SHELL_ONLY, "procedural")})
+    del tree["Macros"]["VBA"]["Module1"]
+    report = analyse(write("letter.doc", _cfb(tree)[0]))
+    assert any("no stream of that name" in note for note in report.data["ole"]["parse_errors"])
+
+
+def test_a_source_offset_outside_the_stream_is_said(write):
+    tree = _macro_doc({"Module1": (_SHELL_ONLY, "procedural")})
+    tree["Macros"]["VBA"]["Module1"] = b"\x00" * 20
+    report = analyse(write("letter.doc", _cfb(tree)[0]))
+    assert any("offset is outside" in note for note in report.data["ole"]["parse_errors"])
+
+
+def test_a_corrupt_dir_stream_is_said_and_not_fatal(write):
+    tree = _macro_doc({"Module1": (_SHELL_ONLY, "procedural")})
+    tree["Macros"]["VBA"]["dir"] = b"\x02garbage"
+    report = analyse(write("letter.doc", _cfb(tree)[0]))
+
+    assert report.data["ole"]["vba_project"] == "Macros/VBA"
+    assert any("dir stream" in note for note in report.data["ole"]["parse_errors"])
+    assert "ole_macros" in _ole_findings(report)
+
+
+def test_a_module_name_cannot_put_a_terminal_escape_in_a_report(write):
+    report = _macro_report(write, {"M\x1b[2J": (_SHELL_ONLY, "procedural")})
+    # Checked on the value, not on JSON, which spells ESC as an escape.
+    assert [m["name"] for m in _vba(report)["modules"]] == ["M[2J"]
+
+
+def test_a_module_is_named_by_its_unicode_record(write):
+    """The MBCS name is in the project's code page, which may not hold the
+    name at all; the UTF-16 record beside it does."""
+    report = _macro_report(write, {"\u041c\u043e\u0434\u0443\u043b\u044c": (_SHELL_ONLY, "procedural")})
+    assert [m["name"] for m in _vba(report)["modules"]] == ["\u041c\u043e\u0434\u0443\u043b\u044c"]
+
+
+def test_decompression_round_trips_what_the_writer_compresses():
+    texts = [b"", b"a", b"abcabcabcabc", b"Sub AutoOpen()\r\n" * 500,
+             bytes(range(256)) * 16 + b"tail after a raw chunk"]
+    for text in texts:
+        assert vba_module.decompress(_ovba_compress(text), 1 << 30) == (text, False)
+
+
+def test_a_copy_token_reaching_before_its_chunk_is_refused():
+    # Flag byte with bit 0 set: the first token is a copy, with nothing yet
+    # decompressed for it to copy from.
+    chunk = b"\x01" + struct.pack("<H", 0x0000)
+    container = b"\x01" + struct.pack("<H", 0xB000 | (len(chunk) - 1)) + chunk
+    with pytest.raises(vba_module.DecompressionError, match="before its chunk"):
+        vba_module.decompress(container, 1 << 20)
+
+
+def test_a_container_without_its_signature_is_refused():
+    with pytest.raises(vba_module.DecompressionError, match="container signature"):
+        vba_module.decompress(b"\x00" + struct.pack("<H", 0xB002) + b"\x00abc", 1 << 20)
+
+
+def test_a_chunk_with_the_wrong_signature_is_refused():
+    with pytest.raises(vba_module.DecompressionError, match="signature"):
+        vba_module.decompress(b"\x01" + struct.pack("<H", 0x0005) + b"abc", 1 << 20)
+
+
+def test_the_dir_stream_is_read_past_the_version_record():
+    """PROJECTVERSION says 4 bytes and carries 6. Trusting it reads every
+    record after it two bytes out of step, and finds no modules."""
+    storage = _vba_storage({"Module1": (_SHELL_ONLY, "procedural")})
+    directory, _ = vba_module.decompress(storage["dir"], 1 << 20)
+    assert [m["name"] for m in vba_module.parse_dir(directory)["modules"]] == [b"Module1"]
+
+
+def test_an_unknown_code_page_falls_back_rather_than_failing():
+    assert vba_module._codec(31337) == "latin-1"
+    assert vba_module._codec(65001) == "utf-8"
+    assert vba_module._codec(1251) == "cp1251"
+
+
+def test_the_source_agrees_with_olevba(write):
+    """`oletools` is the reference and not a dependency."""
+    olevba = pytest.importorskip("oletools.olevba")
+    modules = {"ThisDocument": (_DROPPER, "document"), "Module1": (_SHELL_ONLY * 40, "procedural")}
+    path = write("letter.doc", _cfb(_macro_doc(modules))[0])
+    ours = {m["name"]: m["sha256"] for m in _vba(analyse(path))["modules"]}
+    parser = olevba.VBA_Parser(str(path))
+    theirs = {stream.rsplit("/", 1)[-1]: hashlib.sha256(code.encode("cp1252")).hexdigest()
+              for _, stream, _, code in parser.extract_macros()}
+    parser.close()
+    assert ours == theirs

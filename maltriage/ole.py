@@ -40,6 +40,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from . import vba
 from .base import RandomAccessExtractor, safe_text
 from .config import config_int
 from .models import mk_finding
@@ -379,13 +380,38 @@ def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
         else:
             out["truncated"] = True
 
-    for storage, names in children.items():
+    vba_storage = None
+    for storage, names in sorted(children.items()):
         if storage.rsplit("/", 1)[-1] == "vba" and {"dir", "_vba_project"} <= names:
             # The location as the file spells it, for the finding.
             for path, _ in reachable:
                 if path.lower() == storage:
                     out["vba_project"] = safe_text(path, 256)
+                    vba_storage = storage
                     break
+            break
+
+    if vba_storage is not None:
+        by_path = {path.lower(): index for path, index in reachable}
+        stream_cap = config_int(config, "vba_max_stream_bytes", 16777216)
+
+        def read(name: str) -> bytes | None:
+            index = by_path.get(f"{vba_storage}/{name.lower()}")
+            if index is None or entries[index]["type"] != TYPE_STREAM:
+                return None
+            entry = entries[index]
+            if entry["size"] > stream_cap:
+                problems.append(f"vba: stream {safe_text(name, 64)!r} is "
+                                f"{entry['size']} bytes, above vba_max_stream_bytes")
+                return None
+            return _read(compound, entry, mini_stream, mini_count, mini_next)
+
+        out["vba"] = vba.extract(read, {
+            "module": config_int(config, "vba_max_module_bytes", 4194304),
+            "total": config_int(config, "vba_max_source_bytes", 16777216),
+            "modules": config_int(config, "vba_max_modules", 256),
+        })
+        problems.extend(out["vba"].pop("problems"))
 
     out["unreachable"] = sum(1 for index, entry in enumerate(entries)
                              if index not in visited
@@ -406,6 +432,36 @@ def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
         extra = len(problems) - _PROBLEMS_KEPT
         problems[:] = problems[:_PROBLEMS_KEPT] + [f"and {extra} more problems like these"]
     return out
+
+
+def _read(compound: CompoundFile, entry: dict[str, Any], mini_stream: list[int],
+          mini_count: int, mini_next) -> bytes:
+    """A stream's bytes, as far as its chain goes.
+
+    The chain was already walked once, when the stream's size was checked
+    against it, and what went wrong then was said then. So this walk's
+    problems are discarded rather than repeated.
+    """
+    size = entry["size"]
+    said, compound.problems = compound.problems, []
+    try:
+        if size < compound.mini_cutoff:
+            sids = compound._walk(entry["start"], "", -(-size // _MINI_SECTOR_SIZE),
+                                  mini_count, mini_next)
+            pieces = []
+            for sid in sids:
+                where = sid * _MINI_SECTOR_SIZE
+                sector = mini_stream[where // compound.sector_size]
+                base = compound._offset(sector) + where % compound.sector_size
+                pieces.append(bytes(compound.data[base:base + _MINI_SECTOR_SIZE]))
+        else:
+            sids = compound.chain(entry["start"], "", -(-size // compound.sector_size))
+            pieces = [bytes(compound.data[compound._offset(sid):
+                                          compound._offset(sid) + compound.sector_size])
+                      for sid in sids]
+    finally:
+        compound.problems = said
+    return b"".join(pieces)[:size]
 
 
 class OleExtractor(RandomAccessExtractor):
@@ -454,6 +510,38 @@ class OleExtractor(RandomAccessExtractor):
                 f"{packages} embedded package object(s): a file of any kind, "
                 "shown as an icon and run by opening it", "low",
                 evidence=[{"name": "count", "value": packages}]))
+
+        project = data.get("vba") or {}
+        auto, execution = project.get("auto_exec") or [], project.get("execution") or []
+        if auto and execution:
+            # The one VBA key at the gate. A macro that runs by itself is
+            # ordinary (a workbook that refreshes on open), and so is one
+            # that shells out when a button is pressed. A project with both
+            # starts a process because a document was opened, which is what
+            # a macro dropper is. Predicted to fire on none of the document
+            # corpus, which has no macro document in it to be wrong about.
+            out.append(mk_finding(
+                self.name, "vba_autorun_execution",
+                f"a macro runs when the document opens ({', '.join(auto)}) and the "
+                f"project can start a process ({', '.join(execution)})", "medium",
+                evidence=[{"name": "auto_exec", "value": auto},
+                          {"name": "execution", "value": execution}]))
+        if auto:
+            out.append(mk_finding(
+                self.name, "vba_auto_exec",
+                f"a macro runs by itself: {', '.join(auto)}", "low",
+                evidence=[{"name": "auto_exec", "value": auto}]))
+        if execution:
+            out.append(mk_finding(
+                self.name, "vba_execution",
+                f"the macros can start a process: {', '.join(execution)}", "low",
+                evidence=[{"name": "execution", "value": execution}]))
+        capability = project.get("capability") or []
+        if capability:
+            out.append(mk_finding(
+                self.name, "vba_capability",
+                f"the macros can fetch, write or call native code: {', '.join(capability)}",
+                "info", evidence=[{"name": "capability", "value": capability}]))
 
         if data.get("encrypted"):
             # Not suspicious by itself, and not nothing: an encrypted document

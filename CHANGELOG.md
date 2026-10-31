@@ -1,5 +1,92 @@
 # Changelog
 
+## Version 0.5.20 - what the macro does when the document opens
+
+The second half of OLE2. v0.5.19 could say a document carried a VBA
+project; this one reads the source out of it and says whether a macro runs
+by itself, and whether the project can start a process. It reads the
+project wherever it is: a `.doc` or `.xls`, and the `vbaProject.bin` inside
+a `.docm`, which is where every macro OOXML document keeps its code.
+
+### Reading the source
+
+A project's `dir` stream lists its modules, and each module stream holds
+compiled p-code followed by the source, compressed with the scheme in
+MS-OVBA 2.4.1. Both are read through the chain walker v0.5.19 built, so a
+stream read is bounded the way a stream listing is.
+
+- **Decompression is capped.** A copy token is two bytes and can produce up
+  to 4096, so output is capped per module (4 MiB) and per project (16 MiB),
+  and a module cut at the cap says so. An 8 MB bomb that compresses to
+  11 KB stops at the cap in a third of a second.
+- **Every token is checked before it is used.** A copy reaching before the
+  start of its chunk is an error, not a read of whatever is there.
+- **PROJECTVERSION says 4 bytes and carries 6.** The specification says so,
+  and a reader that trusts the size field reads the rest of the `dir`
+  stream two bytes out of step and finds no modules. A test pins it.
+- **Names come from the UTF-16 record** where there is one, because the
+  project's code page may not hold the name at all.
+
+`oletools` was the reference, as `olefile` was for the container. The suite's
+compressor round trips through `olevba`'s decompressor on two hundred inputs,
+including raw chunks, and the source this reads from a fixture matches what
+`olevba` extracts from it byte for byte. A test compares hashes wherever
+`oletools` is installed. Neither is a dependency.
+
+### The source never reaches a report
+
+It is sample content, and this tool reports names and offsets, never
+matched bytes. A module is reported as its name, kind, size and the SHA-256
+of its source. A finding names entries from this module's own lists:
+`Document_Open` and `Shell`, never the line they were on. A test plants a
+marker string in a dropper's command line and checks it appears nowhere in
+the report.
+
+### Four keys, one at the gate
+
+| Key | When | Severity |
+|---|---|---|
+| `vba_autorun_execution` | a macro runs by itself and the project can start a process | `medium` |
+| `vba_auto_exec` | a procedure Office runs by name: `AutoOpen`, `Document_Open`, `Workbook_Open` and the rest of a fixed list | `low` |
+| `vba_execution` | `Shell`, `WScript.Shell`, `Shell.Application`, `Win32_Process`, `powershell` and the like | `low` |
+| `vba_capability` | downloads, file writes, `Declare ... Lib`, `VirtualAlloc`, `CallByName` | `info` |
+
+A workbook that recalculates on open is ordinary, and so is a macro that
+opens Notepad from a button. A project that does both starts a process
+because a document was opened, which is what a macro dropper is. That is the
+one combination held at the gate, and it is about the project rather than a
+module, because `Document_Open` calling a routine elsewhere is the usual
+shape. The prediction: it fires on none of the document corpus, which has no
+macro document in it to be wrong about. Labelled macro samples are what will
+actually price it.
+
+A trigger is a declaration, not a mention. A comment that says "do not add
+an AutoOpen", a call to `AutoOpenHelper` and a string containing
+`Sub AutoOpen` match nothing.
+
+### Assertions that could never fail
+
+The VBA escape test was first written as `"\x1b" not in json.dumps(...)`, and
+a mutant that removed the sanitising survived it: JSON spells ESC as six
+characters, so that assertion holds for every input. The v0.5.19 stream name
+test had the same line, so both now check the value itself. The suite
+already knew this, in a docstring written after the same mistake once
+before, and two older tests still carried the vacuous line beside a real
+check; both now look for the six characters instead, and still pass.
+
+### Not yet
+
+Triggers from ActiveX controls (`TextBox1_Change`, `InkPicture1_Painted`),
+which run on open without a document event. VBA stomping, where the p-code
+runs and the source is a decoy: detecting it means reading the p-code. DDE
+in a `.doc`, which lives in the `WordDocument` stream.
+
+### Tests
+
+Thirty one new. Thirty mutants; three survived a first pass and each became
+a test: a container without its signature byte, a module named only by its
+UTF-16 record, and the escape check above.
+
 ## Version 0.5.19 - a file system in a file
 
 The first half of OLE2, the container behind `.doc`, `.xls`, `.ppt`, `.msg`,
