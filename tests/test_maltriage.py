@@ -46,6 +46,7 @@ from maltriage import cli
 from maltriage import corpus as corpus_module
 from maltriage import extractors as extractors_module
 from maltriage import archives as archives_module
+from maltriage import ole as ole_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -7890,3 +7891,492 @@ def test_an_empty_result_run_does_not_swallow_the_next(write):
              '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
     report = _docx_document(write, _document(_complex(inner, ' cmd "/c x"')))
     assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+# OLE2 compound files, the v0.6 container
+#
+# Fixtures are built here by a writer checked against olefile, then broken
+# the ways a hostile file would break them: chains that loop or leave the
+# file, sibling pointers that cycle, headers that claim a billion sectors.
+
+
+def _cfb(tree, root_clsid=b"\x00" * 16):
+    """A version 3 compound file holding `tree`, plus where things landed.
+
+    `tree` maps a name to bytes (a stream) or to another mapping (a storage).
+    Siblings are chained through their right pointers, a degenerate tree
+    every reader accepts. Streams under 4096 bytes go in the mini stream, as
+    Office puts them.
+    """
+    SS, END, FREE, FATS, NONE = 512, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFFF
+    entries = [{"name": "Root Entry", "type": 5, "left": NONE, "right": NONE,
+                "child": NONE, "clsid": root_clsid, "start": END, "size": 0, "data": None}]
+
+    def add(mapping, parent):
+        previous = None
+        for name, value in mapping.items():
+            index = len(entries)
+            entry = {"name": name, "type": 1 if isinstance(value, dict) else 2,
+                     "left": NONE, "right": NONE, "child": NONE, "clsid": b"\x00" * 16,
+                     "start": END, "size": 0, "data": None}
+            entries.append(entry)
+            if previous is None:
+                entries[parent]["child"] = index
+            else:
+                entries[previous]["right"] = index
+            previous = index
+            if isinstance(value, dict):
+                add(value, index)
+            else:
+                entry["data"] = value
+                entry["size"] = len(value)
+    add(tree, 0)
+
+    mini = bytearray()
+    minifat = []
+    regular = []  # (entry index, data)
+    for index, entry in enumerate(entries):
+        if entry["data"] is None:
+            continue
+        data = entry["data"]
+        if len(data) < 4096:
+            if not data:
+                entry["start"] = END
+                continue
+            first = len(mini) // 64
+            count = -(-len(data) // 64)
+            entry["start"] = first
+            minifat.extend(list(range(first + 1, first + count)) + [END])
+            mini += data + b"\x00" * (count * 64 - len(data))
+        else:
+            regular.append((index, data))
+
+    dir_sectors = -(-len(entries) * 128 // SS)
+    minifat_sectors = -(-len(minifat) * 4 // SS) if minifat else 0
+    mini_sectors = -(-len(mini) // SS) if mini else 0
+    data_sectors = sum(-(-len(d) // SS) for _, d in regular)
+    content = dir_sectors + minifat_sectors + mini_sectors + data_sectors
+    fat_sectors, difat_sectors = 1, 0
+    while fat_sectors * 128 < content + fat_sectors + difat_sectors:
+        fat_sectors += 1
+        difat_sectors = max(0, -(-(fat_sectors - 109) // 127))
+
+    fat = [FATS] * fat_sectors + [0xFFFFFFFC] * difat_sectors
+    layout = {"fat": list(range(fat_sectors)),
+              "difat": list(range(fat_sectors, fat_sectors + difat_sectors))}
+
+    def allocate(count):
+        start = len(fat)
+        fat.extend(list(range(start + 1, start + count)) + [END])
+        return start
+
+    layout["directory"] = allocate(dir_sectors)
+    layout["minifat"] = allocate(minifat_sectors) if minifat_sectors else END
+    if mini_sectors:
+        entries[0]["start"] = allocate(mini_sectors)
+        entries[0]["size"] = len(mini)
+    for index, data in regular:
+        entries[index]["start"] = allocate(-(-len(data) // SS))
+    layout["entries"] = {e["name"]: (i, e["start"]) for i, e in enumerate(entries)}
+    fat += [FREE] * (fat_sectors * 128 - len(fat))
+
+    header = struct.pack("<8s16sHHHHH6sIIIIIIIII", bytes.fromhex("d0cf11e0a1b11ae1"),
+                         b"\x00" * 16, 0x3E, 3, 0xFFFE, 9, 6, b"\x00" * 6, 0,
+                         fat_sectors, layout["directory"], 0, 4096, layout["minifat"],
+                         minifat_sectors, layout["difat"][0] if difat_sectors else END,
+                         difat_sectors)
+    header_ids = layout["fat"][:109]
+    header += struct.pack("<109I", *(header_ids + [FREE] * (109 - len(header_ids))))
+    difat = b""
+    rest = layout["fat"][109:]
+    for number, sid in enumerate(layout["difat"]):
+        ids = rest[number * 127:(number + 1) * 127]
+        following = layout["difat"][number + 1] if number + 1 < difat_sectors else END
+        difat += struct.pack("<128I", *(ids + [FREE] * (127 - len(ids)) + [following]))
+
+    def entry_bytes(e):
+        name = e["name"].encode("utf-16-le")
+        return struct.pack("<64sHBBIII16sIQQIQ", name + b"\x00\x00", len(name) + 2,
+                           e["type"], 1, e["left"], e["right"], e["child"], e["clsid"],
+                           0, 0, 0, e["start"], e["size"])
+
+    directory = b"".join(entry_bytes(e) for e in entries)
+    directory += b"\x00" * (dir_sectors * SS - len(directory))
+    body = struct.pack(f"<{len(fat)}I", *fat)
+    body = body[:fat_sectors * SS] + difat + body[fat_sectors * SS:] + directory
+    if minifat_sectors:
+        packed = struct.pack(f"<{len(minifat)}I", *minifat)
+        body += packed + b"\xff" * (minifat_sectors * SS - len(packed))
+    if mini_sectors:
+        body += bytes(mini) + b"\x00" * (mini_sectors * SS - len(mini))
+    for _, data in regular:
+        body += data + b"\x00" * (-(-len(data) // SS) * SS - len(data))
+    layout["sector_size"] = SS
+    return header + body, layout
+
+
+def _ole(report):
+    return report.data["ole"]
+
+
+def _ole_findings(report):
+    return {f["key"]: f for f in report.findings if f["key"].startswith("ole_")}
+
+
+def _sector(layout, sid):
+    return (sid + 1) * layout["sector_size"]
+
+
+def _set_fat(blob, layout, sid, value):
+    blob = bytearray(blob)
+    struct.pack_into("<I", blob, _sector(layout, layout["fat"][sid // 128]) + (sid % 128) * 4, value)
+    return bytes(blob)
+
+
+def _set_entry(blob, layout, index, field, value):
+    offsets = {"type": 66, "left": 68, "right": 72, "child": 76, "start": 116, "size": 120}
+    fmt = {"type": "<B", "size": "<Q"}.get(field, "<I")
+    blob = bytearray(blob)
+    base = _sector(layout, layout["directory"] + index * 128 // 512) + (index * 128) % 512
+    struct.pack_into(fmt, blob, base + offsets[field], value)
+    return bytes(blob)
+
+
+_MACRO_DOC = {"WordDocument": b"w" * 5000, "\x01CompObj": b"c" * 80,
+              "Macros": {"PROJECT": b"p" * 300,
+                         "VBA": {"dir": b"d" * 200, "_VBA_PROJECT": b"v" * 7,
+                                 "Module1": b"m" * 9000}}}
+
+
+def test_a_compound_file_is_listed_by_path_and_size(write):
+    blob, _ = _cfb(_MACRO_DOC)
+    data = _ole(analyse(write("letter.doc", blob)))
+
+    assert data["kind"] == "word"
+    assert data["version"] == 3
+    streams = {s["path"]: s["size"] for s in data["streams"]}
+    assert streams["WordDocument"] == 5000
+    assert streams["Macros/VBA/Module1"] == 9000
+    assert streams["Macros/VBA/dir"] == 200
+    # Control characters are part of real stream names and never of a report.
+    assert streams["CompObj"] == 80
+    assert data["stream_count"] == 6 and data["storage_count"] == 2
+    assert data["parse_errors"] == []
+
+
+def test_a_word_document_with_a_vba_project_is_reported(write):
+    report = analyse(write("letter.doc", _cfb(_MACRO_DOC)[0]))
+    finding = _ole_findings(report)["ole_macros"]
+
+    assert finding["severity"] == "low"
+    assert finding["discriminator"] == "word"
+    assert "Macros/VBA" in finding["detail"]
+
+
+def test_an_excel_project_is_found_where_excel_keeps_it(write):
+    blob, _ = _cfb({"Workbook": b"b" * 5000, "_VBA_PROJECT_CUR": {
+        "PROJECT": b"p" * 100, "VBA": {"dir": b"d" * 50, "_VBA_PROJECT": b"v" * 7}}})
+    report = analyse(write("book.xls", blob))
+
+    assert _ole(report)["kind"] == "excel"
+    assert _ole(report)["vba_project"] == "_VBA_PROJECT_CUR/VBA"
+    assert _ole_findings(report)["ole_macros"]["discriminator"] == "excel"
+
+
+def test_vba_names_are_matched_without_case(write):
+    """The format compares names without case, so Office does too."""
+    blob, _ = _cfb({"WordDocument": b"w" * 600,
+                    "macros": {"vba": {"DIR": b"d" * 50, "_vba_project": b"v" * 7}}})
+    assert _ole(analyse(write("letter.doc", blob)))["vba_project"] == "macros/vba"
+
+
+def test_a_bare_vba_project_is_not_reported_as_a_document_with_macros(write):
+    """`vbaProject.bin` is a VBA project by definition, and the OOXML
+    container it came from has already said so. Reporting it again would
+    count one macro twice in every corpus rate."""
+    blob, _ = _cfb({"PROJECT": b"p" * 100,
+                    "VBA": {"dir": b"d" * 50, "_VBA_PROJECT": b"v" * 7}})
+    report = analyse(write("vbaProject.bin", blob))
+
+    assert _ole(report)["kind"] == "vba_project"
+    assert _ole(report)["vba_project"] == "VBA"
+    assert "ole_macros" not in _ole_findings(report)
+
+
+def test_a_document_without_vba_reports_none(write):
+    report = analyse(write("plain.doc", _cfb({"WordDocument": b"w" * 600,
+                                               "1Table": b"t" * 700})[0]))
+    assert _ole(report)["vba_project"] is None
+    assert _ole_findings(report) == {}
+
+
+@pytest.mark.parametrize("tree, kind", [
+    ({"PowerPoint Document": b"p" * 600}, "powerpoint"),
+    ({"Book": b"b" * 600}, "excel"),
+    ({"__properties_version1.0": b"p" * 64, "__substg1.0_0037001F": b"s" * 64}, "outlook"),
+    ({"Data": b"d" * 600}, None),
+])
+def test_a_compound_file_says_what_it_is(write, tree, kind):
+    assert _ole(analyse(write("thing.bin", _cfb(tree)[0])))["kind"] == kind
+
+
+def test_an_installer_is_known_by_its_class_id(write):
+    clsid = bytes.fromhex("84100c0000000000c000000000000046")
+    blob, _ = _cfb({"䡀㼿": b"x" * 600}, root_clsid=clsid)
+    assert _ole(analyse(write("setup.msi", blob)))["kind"] == "msi"
+
+
+def test_an_embedded_package_is_reported(write):
+    """Packager's `Ole10Native` carries any file, shown as an icon and run
+    by opening it: an executable in a document with no macro at all."""
+    blob, _ = _cfb({"WordDocument": b"w" * 600, "ObjectPool": {
+        "_1": {"\x01Ole10Native": b"n" * 6000}, "_2": {"\x01Ole10Native": b"n" * 100}}})
+    finding = _ole_findings(analyse(write("invoice.doc", blob)))["ole_embedded_package"]
+
+    assert finding["severity"] == "low"
+    assert finding["evidence"][0]["value"] == 2
+
+
+def test_an_encrypted_document_says_it_was_not_examined(write):
+    """Nothing can see inside it, which is why a password in an email body is
+    a delivery technique. The report must not read as a clean document."""
+    blob, _ = _cfb({"EncryptionInfo": b"i" * 200, "EncryptedPackage": b"e" * 9000})
+    report = analyse(write("invoice.docx", blob))
+
+    assert _ole(report)["kind"] == "encrypted_ooxml"
+    assert _ole_findings(report)["ole_encrypted"]["severity"] == "low"
+    assert any("encrypted" in note for note in report.thin().values())
+
+
+def test_a_chain_that_loops_is_stopped_and_said(write):
+    blob, layout = _cfb({"WordDocument": b"w" * 5000})
+    start = layout["entries"]["WordDocument"][1]
+    blob = _set_fat(blob, layout, start + 3, start)
+    data = _ole(analyse(write("loop.doc", blob)))
+
+    assert any("loops" in note for note in data["parse_errors"])
+    assert any("claims 5000 bytes" in note for note in data["parse_errors"])
+
+
+def test_a_chain_that_leaves_the_file_is_stopped_and_said(write):
+    blob, layout = _cfb({"WordDocument": b"w" * 5000})
+    start = layout["entries"]["WordDocument"][1]
+    blob = _set_fat(blob, layout, start, 0x00FFFFFF)
+    data = _ole(analyse(write("away.doc", blob)))
+
+    assert any("points past the end" in note for note in data["parse_errors"])
+
+
+def test_a_mini_chain_that_loops_is_stopped_and_said(write):
+    blob, layout = _cfb({"WordDocument": b"w" * 600})
+    blob = bytearray(blob)
+    # The first mini FAT entry points at itself.
+    struct.pack_into("<I", blob, _sector(layout, layout["minifat"]), 0)
+    data = _ole(analyse(write("mini.doc", bytes(blob))))
+
+    assert any("loops" in note for note in data["parse_errors"])
+
+
+def test_a_sibling_pointer_back_into_the_tree_is_not_followed(write):
+    blob, layout = _cfb({"A": b"a" * 600, "B": b"b" * 600})
+    index = layout["entries"]["B"][0]
+    blob = _set_entry(blob, layout, index, "right", layout["entries"]["A"][0])
+    data = _ole(analyse(write("cycle.doc", blob)))
+
+    assert data["stream_count"] == 2
+    assert any("reachable twice" in note for note in data["parse_errors"])
+
+
+def test_a_storage_that_contains_itself_is_not_followed(write):
+    blob, layout = _cfb({"S": {"x": b"x" * 600}})
+    index = layout["entries"]["S"][0]
+    blob = _set_entry(blob, layout, index, "child", index)
+    data = _ole(analyse(write("self.doc", blob)))
+
+    assert any("reachable twice" in note for note in data["parse_errors"])
+
+
+def test_a_pointer_outside_the_directory_is_said(write):
+    blob, layout = _cfb({"A": b"a" * 600})
+    blob = _set_entry(blob, layout, layout["entries"]["A"][0], "left", 9999)
+    data = _ole(analyse(write("away.doc", blob)))
+
+    assert any("leaves the directory" in note for note in data["parse_errors"])
+
+
+def test_storages_nested_without_end_stop_at_a_depth(write):
+    tree = {"leaf": b"x" * 600}
+    for _ in range(80):
+        tree = {"s": tree}
+    data = _ole(analyse(write("deep.doc", _cfb(tree)[0])))
+
+    assert any("nested deeper" in note for note in data["parse_errors"])
+
+
+def test_a_header_claiming_a_billion_fat_sectors_costs_nothing(write):
+    blob = bytearray(_cfb({"WordDocument": b"w" * 5000})[0])
+    struct.pack_into("<I", blob, 44, 1_000_000_000)
+    tracemalloc.start()
+    data = _ole(analyse(write("claim.doc", bytes(blob))))
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert any("1000000000 FAT sectors" in note for note in data["parse_errors"])
+    assert peak < 16 * 1048576
+
+
+def test_streams_sharing_one_chain_cannot_multiply_the_work(write):
+    """A valid file walks each sector once. A file whose entries all point at
+    one long chain would make a per-stream walk cost entries times sectors,
+    so the walk spends from one budget sized from the file."""
+    blob, layout = _cfb({f"s{n}": (b"x" * 51200 if n == 0 else b"y" * 4096)
+                         for n in range(300)})
+    start = layout["entries"]["s0"][1]
+    for n in range(1, 300):
+        index = layout["entries"][f"s{n}"][0]
+        blob = _set_entry(blob, layout, index, "start", start)
+        blob = _set_entry(blob, layout, index, "size", 51200)
+    data = _ole(analyse(write("shared.doc", blob)))
+
+    assert any("budget" in note for note in data["parse_errors"])
+
+
+def test_a_stream_claiming_more_than_its_chain_is_said(write):
+    blob, layout = _cfb({"WordDocument": b"w" * 5000})
+    blob = _set_entry(blob, layout, layout["entries"]["WordDocument"][0], "size", 50000)
+    data = _ole(analyse(write("short.doc", blob)))
+
+    assert any("claims 50000 bytes and its chain holds 5120" in note
+               for note in data["parse_errors"])
+
+
+def test_a_version_3_size_ignores_the_undefined_high_half(write):
+    """Real version 3 files carry garbage there. Reading it invents sizes."""
+    blob, layout = _cfb({"WordDocument": b"w" * 5000})
+    index = layout["entries"]["WordDocument"][0]
+    blob = _set_entry(blob, layout, index, "size", (0xDEAD << 32) | 5000)
+    data = _ole(analyse(write("v3.doc", blob)))
+
+    assert data["streams"][0]["size"] == 5000
+    assert data["parse_errors"] == []
+
+
+def test_the_directory_is_read_up_to_a_limit(write):
+    blob, _ = _cfb({f"s{n}": b"x" * 64 for n in range(40)})
+    data = _ole(analyse(write("many.doc", blob),
+                        config={**DEFAULT_CONFIG, "ole_max_directory_entries": 10}))
+    assert any("more than 10 entries" in note for note in data["parse_errors"])
+
+
+def test_the_stream_list_is_capped_and_says_so(write):
+    blob, _ = _cfb({f"s{n}": b"x" * 64 for n in range(40)})
+    data = _ole(analyse(write("many.doc", blob),
+                        config={**DEFAULT_CONFIG, "ole_max_listed_streams": 5}))
+
+    assert len(data["streams"]) == 5
+    assert data["stream_count"] == 40
+    assert data["truncated"] is True
+    assert any("list is partial" in note for note in data["parse_errors"])
+
+
+def test_an_entry_the_tree_cannot_reach_is_counted(write):
+    blob, layout = _cfb({"A": b"a" * 600, "B": b"b" * 600})
+    blob = _set_entry(blob, layout, layout["entries"]["A"][0], "right", 0xFFFFFFFF)
+    assert _ole(analyse(write("orphan.doc", blob)))["unreachable"] == 1
+
+
+def test_a_stream_name_cannot_put_a_terminal_escape_in_a_report(write):
+    blob, _ = _cfb({"WordDocument": b"w" * 600, "x\x1b[2Jy": b"z" * 600})
+    report = analyse(write("escape.doc", blob))
+    assert "\x1b" not in json.dumps(_ole(report))
+
+
+def test_a_truncated_compound_file_is_read_as_far_as_it_goes(write):
+    blob, _ = _cfb(_MACRO_DOC)
+    data = _ole(analyse(write("cut.doc", blob[:3000])))
+
+    assert data["stream_count"] == 6
+    assert any("claims 5000 bytes and its chain holds 0" in note
+               for note in data["parse_errors"])
+
+
+def test_a_file_of_broken_streams_does_not_flood_the_report(write):
+    blob, layout = _cfb({f"s{n}": b"x" * 600 for n in range(200)})
+    for n in range(200):
+        blob = _set_entry(blob, layout, layout["entries"][f"s{n}"][0], "size", 99999)
+    data = _ole(analyse(write("flood.doc", blob)))
+
+    assert len(data["parse_errors"]) == 51
+    assert data["parse_errors"][-1].startswith("and ")
+
+
+def test_a_file_that_is_not_a_compound_file_is_an_error_not_a_crash(write):
+    blob = bytearray(_cfb({"A": b"a" * 600})[0])
+    struct.pack_into("<H", blob, 28, 0x1234)
+    report = analyse(write("bad.doc", bytes(blob)))
+
+    assert "byte order" in report.errors["ole"]
+
+
+def test_a_vba_project_inside_a_docm_is_read_as_one(write):
+    """The `vbaProject.bin` in every macro-enabled OOXML document is a
+    compound file, so the member is now read as one. The container reports
+    the macros; the member says what the project holds."""
+    project, _ = _cfb({"PROJECT": b"p" * 100,
+                       "VBA": {"dir": b"d" * 50, "_VBA_PROJECT": b"v" * 7}})
+    parts = [p for p in _OOXML_PARTS] + [("word/vbaProject.bin", project)]
+    report = analyse(write("report.docm", _zip_bytes(parts)))
+    member = next(child for child in report.children
+                  if child.data.get("ole"))
+
+    assert member.data["ole"]["kind"] == "vba_project"
+    assert "ooxml_macros" in {f["key"] for f in report.findings}
+    assert "ole_macros" not in {f["key"] for f in member.findings}
+
+
+def test_the_reader_agrees_with_olefile(write):
+    """`olefile` is the reference and not a dependency. Where it is installed
+    the two must list the same streams with the same sizes."""
+    olefile = pytest.importorskip("olefile")
+    blob, _ = _cfb({**_MACRO_DOC, "ObjectPool": {"_1": {"\x01Ole10Native": b"n" * 6000}}})
+    path = write("letter.doc", blob)
+    ours = {s["path"]: s["size"] for s in _ole(analyse(path))["streams"]}
+    handle = olefile.OleFileIO(str(path))
+    theirs = {"/".join(p).translate({c: None for c in range(32)}): handle.get_size("/".join(p))
+              for p in handle.listdir(streams=True, storages=False)}
+    handle.close()
+    assert ours == theirs
+
+
+def test_a_compound_file_too_large_for_the_header_table_is_read_whole():
+    """Past 109 FAT sectors, about 7 MB, the rest of the table is listed in a
+    chain of DIFAT sectors, 127 at a time. Every real document that size uses
+    the first; this one is large enough to need the chain to continue."""
+    blob, layout = _cfb({"WordDocument": b"w" * 16_000_000, "1Table": b"t" * 5000})
+    assert len(layout["difat"]) == 2
+    data = ole_module.describe(blob)
+
+    assert {s["path"]: s["size"] for s in data["streams"]} == {
+        "WordDocument": 16_000_000, "1Table": 5000}
+    assert data["parse_errors"] == []
+
+
+def test_a_claimed_fat_is_read_only_as_far_as_the_file_could_use():
+    blob, _ = _cfb({"WordDocument": b"w" * 7_500_000})
+    blob = bytearray(blob)
+    struct.pack_into("<I", blob, 44, 1_000_000_000)
+    compound = ole_module.CompoundFile(bytes(blob), 8192)
+
+    needed = -(-compound.sector_count // 128) + 1
+    assert len(compound._fat) <= needed
+
+
+def test_a_corpus_says_which_kind_of_compound_file_it_held(tmp_path):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "a.doc").write_bytes(_cfb({"WordDocument": b"w" * 600})[0])
+    (benign / "b.xls").write_bytes(_cfb({"Workbook": b"b" * 600})[0])
+    (benign / "c.bin").write_bytes(_cfb({"Data": b"d" * 600})[0])
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.families["benign"] == {"ole-word": 1, "ole-excel": 1, "ole": 1}

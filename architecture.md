@@ -199,6 +199,7 @@ plus the names everything imports:
 | `elf.py` | 703 | ELF structure |
 | `rules.py` | 407 | YARA compilation and matching |
 | `archives.py` | 466 | container recursion, and the caps that make it safe |
+| `ole.py` | 465 | OLE2 compound file structure: the chain walker and directory tree that VBA extraction will read through |
 
 ### archives.py, and who owns the walk
 

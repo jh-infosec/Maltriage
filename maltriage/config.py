@@ -288,6 +288,13 @@ DEFAULT_CONFIG = {
     # archive's own end record first, so an oversized one is refused unopened.
     "archive_max_directory_bytes": 4194304,
     "archive_max_total_bytes": 268435456,
+
+    # OLE2 compound files. Directory entries read, and streams listed in the
+    # report. Both are counts the file supplies through its own chains, so
+    # both are capped here; the sector walk itself is bounded by the file's
+    # size, not by configuration.
+    "ole_max_directory_entries": 8192,
+    "ole_max_listed_streams": 256,
     "archive_max_member_bytes": 67108864,
 
     # Wall-clock seconds for the recursion. The known gap `architecture.md`
@@ -566,6 +573,8 @@ def validate_config(config):
     check_int("archive_ratio_floor_bytes")
     check_int("archive_max_ratio")
     check_str("archive_staging_dir")
+    check_int("ole_max_directory_entries")
+    check_int("ole_max_listed_streams")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

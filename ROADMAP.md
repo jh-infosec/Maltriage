@@ -356,7 +356,7 @@ where the safety work lives. Both formats wrap structure no forward pass
 reaches, so both are random-access extractors gating on the header phase,
 which is the third kind doing what it was added for.
 
-- [ ] OLE2 structured storage parsing
+- [~] OLE2 structured storage: structure, kinds, VBA, packages and encryption detected *(v0.5.19)*; stream content not yet read
 - [x] OOXML identification and part listing *(v0.5.10)*
 - [~] VBA: presence is detected, extraction and stream listing are not
 - [ ] Auto-execute trigger detection

@@ -1,5 +1,85 @@
 # Changelog
 
+## Version 0.5.19 - a file system in a file
+
+The first half of OLE2, the container behind `.doc`, `.xls`, `.ppt`, `.msg`,
+`.msi`, and the `vbaProject.bin` inside every macro-enabled OOXML document.
+Until now all of them were `ole` from the magic number and nothing more. The
+DDE detection in v0.5.18 could not reach a `.doc`, and VBA was detected only
+where a ZIP member name gave it away.
+
+### What a compound file is, and why the reader is the release
+
+A compound file is a small FAT file system. A header names the sectors that
+hold the allocation table, the table chains sectors into streams, and one of
+the streams is a directory of entries arranged as a red-black tree per
+storage. Small streams live in a second, smaller file system inside a stream
+of the first. Every number a reader needs is one the file supplies, and the
+format has a long history of parsers that looped, allocated or read out of
+bounds on request. So this release is mostly about reading it safely:
+
+- **The allocation table is never built.** A header can claim a billion FAT
+  sectors, and a table held as Python integers costs about thirty times the
+  file. Each entry is read from the mapping when a chain needs it, and the
+  sectors of the table are capped at what the file's size could use.
+- **One budget for every chain, sized from the file.** A valid file walks
+  each sector once. A file whose three hundred entries all point at one long
+  chain would make per stream walks cost entries times sectors; they spend
+  from the one budget instead, and say when it ran out.
+- **Every chain and the directory tree have visited sets and limits.** A
+  chain that loops, leaves the file, or outruns the table stops and says
+  which. A sibling pointer back into the tree, a storage containing itself,
+  and nesting past 64 levels are reported, not followed.
+- **Problems are capped at fifty lines.** One line per broken stream is right
+  for a damaged file and wrong for one built to have eight thousand.
+
+No dependency, for the ELF extractor's reason. `olefile` was the reference:
+the reader and the test fixtures were checked against it on files LibreOffice
+wrote (a 13.6 MB `.doc` parses in 27 ms), and a test compares the two
+wherever `olefile` happens to be installed.
+
+### What it reports
+
+| Key | When | Severity |
+|---|---|---|
+| `ole_macros` | a Word, Excel or PowerPoint file carries a VBA project | `low` |
+| `ole_embedded_package` | `Ole10Native` streams: Packager objects, a file of any kind shown as an icon and run by opening it | `low` |
+| `ole_encrypted` | an encrypted OOXML document, which nothing can see inside | `low` |
+
+All `low`, for the macro keys' reason. The encrypted case also marks the
+report incomplete, so a clean result is not read as a clean document: a
+password in the body of an email is a delivery technique precisely because
+scanners cannot open what it protects.
+
+A bare `vbaProject.bin` is identified as `vba_project` and not reported as a
+document with macros. Its OOXML container already said so, and saying it
+twice would count one macro twice in every corpus rate.
+
+The kind is read from the root names (`WordDocument`, `Workbook`, `PowerPoint
+Document`, the Outlook property stream, `EncryptedPackage`) and, for an
+installer whose stream names are encoded, from the root class id. A corpus
+now reports `ole-word`, `ole-excel` and the rest as families, the v0.5.10
+lesson applied one format over.
+
+### Not yet
+
+Stream content is not read. Extracting VBA source (decompressing the `dir`
+stream and each module) is the next release, through the chain walker built
+here. So are DDE fields in a `.doc`, which live in the `WordDocument` stream
+rather than in XML.
+
+### Tests
+
+Thirty six new, on fixtures built by a writer in the suite that was checked
+against `olefile`, then broken the ways a hostile file breaks: chains that
+loop or leave the file, a mini chain that loops, sibling and child cycles,
+pointers outside the directory, a billion claimed FAT sectors (under 16 MB
+peak), shared chains, a truncated file, eighty nested storages, and a
+16 MB file whose DIFAT chain runs to a second sector. Twenty eight mutants, all
+caught; two survived a first pass because no fixture was large enough to
+need the DIFAT chain or its second sector, and that is why the 16 MB one
+exists.
+
 ## Version 0.5.18 - a field that starts a program
 
 The last piece of the external relationships item. In 2017 documents with no

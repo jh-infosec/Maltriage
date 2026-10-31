@@ -596,6 +596,12 @@ def _family(report: Report) -> str:
     kind = (report.data.get("archive") or {}).get("container_kind")
     if kind:
         return kind
+    # The same lesson one format over: `.doc`, `.xls`, `.msi` and the
+    # `vbaProject.bin` in every macro document are all `ole` to the magic
+    # number, and a corpus of them reported as one family says nothing.
+    ole = (report.data.get("ole") or {}).get("kind")
+    if ole:
+        return f"ole-{ole}"
     return (report.data.get("filetype") or {}).get("family") or "unknown"
 
 
