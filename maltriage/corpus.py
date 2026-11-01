@@ -122,6 +122,14 @@ class CorpusResult:
     #: was absent measures the tool without that parser, which is a different
     #: tool.
     incomplete: dict[str, int] = field(default_factory=dict)
+    #: Extractors that ran and came back short, and on how many files: every
+    #: `parse_errors` and `warnings` entry, which `Report.thin()` collects
+    #: and the envelope has reported since v0.5.15. Kept apart from
+    #: `incomplete` because "the parser was missing" and "the parser stopped
+    #: early on this file" are different claims about a rate. Until v0.6.1
+    #: only the first was counted, so a corpus could not say whether a new
+    #: reader had read its files cleanly.
+    partial: dict[str, int] = field(default_factory=dict)
     elapsed: float = 0.0
     per_file: list[dict[str, Any]] = field(default_factory=list)
     #: Labelled files found, per label, before any sampling. Equal to `files`
@@ -248,6 +256,7 @@ class CorpusResult:
                 for key, outcome in sorted(self.keys.items())
             },
             "incomplete": dict(sorted(self.incomplete.items())),
+            "partial": dict(sorted(self.partial.items())),
             # Always present, including as empty dictionaries, so a reader
             # comparing two results can tell "no containers" from "a result
             # written before anything counted them".
@@ -518,6 +527,10 @@ def _record(result: CorpusResult, label: str, report: Report,
     for node in _tree(report):
         for source in node.errors:
             result.incomplete[source] = result.incomplete.get(source, 0) + 1
+        # Once per extractor per file, however many notes it left: a PDF
+        # with five parse problems is one PDF the reader came back short on.
+        for source in sorted({label.split(".", 1)[0] for label in node.thin()}):
+            result.partial[source] = result.partial.get(source, 0) + 1
         for finding in node.findings:
             key = finding["key"]
             worst_by_key[key] = _worst(worst_by_key.get(key, "info"),
@@ -757,6 +770,10 @@ def render(result: CorpusResult) -> str:
         lines.append("  incomplete: " + ", ".join(
             f"{source} on {count} file(s)"
             for source, count in sorted(result.incomplete.items())))
+    if result.partial:
+        lines.append("  came back short: " + ", ".join(
+            f"{source} on {count} file(s)"
+            for source, count in sorted(result.partial.items())))
 
     lines.append("")
     lines.append("  findings, by share of each label")

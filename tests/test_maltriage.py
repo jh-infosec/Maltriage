@@ -8800,3 +8800,72 @@ def test_a_user_form_resizing_is_not_a_control(write):
     report = _macro_report(write, _document_module(
         "Private Sub UserForm_Resize()\r\nEnd Sub\r\n"))
     assert _vba(report)["auto_exec"] == []
+
+
+
+# What ran and came back short, counted by the corpus as the envelope does
+
+def _short_report(notes, source="ole"):
+    report = _corpus_report({})
+    report.data[source] = {"parse_errors": list(notes)}
+    return report
+
+
+def test_the_corpus_counts_analysis_that_came_back_short():
+    """The envelope has said `incomplete` for a parser that stopped early
+    since v0.5.15. The corpus counted only parsers that never ran, so a run
+    over real `.doc` files could not say whether the new reader read them."""
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", _short_report(["directory: the chain loops"]), False)
+    corpus_module._record(result, "benign", _corpus_report({}), False)
+
+    assert result.partial == {"ole": 1}
+    assert result.incomplete == {}
+    assert result.to_dict()["partial"] == {"ole": 1}
+    assert "came back short: ole on 1 file(s)" in corpus_module.render(result)
+
+
+def test_a_file_is_short_once_however_many_notes_it_left():
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", _short_report(
+        ["stream 'a': claims 9 bytes", "stream 'b': claims 9 bytes", "budget: spent"]), False)
+    assert result.partial == {"ole": 1}
+
+
+def test_warnings_count_as_coming_back_short():
+    report = _corpus_report({})
+    report.data["pe"] = {"warnings": ["section table runs past the file"]}
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", report, False)
+    assert result.partial == {"pe": 1}
+
+
+def test_a_member_that_came_back_short_is_counted():
+    parent = _corpus_report({})
+    parent.children.append(_short_report(["dir: record runs past the end"]))
+    result = corpus_module.CorpusResult()
+    corpus_module._record(result, "benign", parent, False)
+    assert result.partial == {"ole": 1}
+
+
+def test_a_clean_corpus_says_nothing_came_back_short(tmp_path):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "a.doc").write_bytes(_cfb({"WordDocument": b"w" * 600})[0])
+    result = corpus_module.scan_corpus(tmp_path)
+
+    assert result.to_dict()["partial"] == {}
+    assert "came back short" not in corpus_module.render(result)
+
+
+def test_a_damaged_compound_file_in_a_corpus_is_counted(tmp_path):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    blob, layout = _cfb({"WordDocument": b"w" * 5000})
+    blob = _set_fat(blob, layout, layout["entries"]["WordDocument"][1], 0x00FFFFFF)
+    (benign / "a.doc").write_bytes(blob)
+    result = corpus_module.scan_corpus(tmp_path)
+
+    # The filler is one 5000 byte run, which the strings extractor also
+    # reports cutting short: that is its own true statement.
+    assert result.partial["ole"] == 1

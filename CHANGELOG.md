@@ -1,5 +1,80 @@
 # Changelog
 
+## Version 0.6.1 - what ran and came back short
+
+### The measurement v0.6.0 was tagged without
+
+The document corpus, rerun on the v0.6.0 code:
+
+```
+corpus: 237 benign
+  benign distinct contents: 206 of 237 (31 are copies)
+  benign manifest: 237 of 228, 1 MISSING, 10 not in the manifest
+  gate (medium+): flags 6.3% of benign files
+  benign families: pdf 144, ooxml 70, unknown 23
+```
+
+**Both predictions held.** `ooxml_dde_command` and `vba_autorun_execution`
+fired on none of it, and no `ooxml_`, `ole_` or `vba_` key fired at all.
+Compared file by file against the v0.5.16 run by SHA-256, not one of the 227
+files both runs saw changed its keys or its severity, so v0.5.17 to v0.6.0
+cost nothing on ordinary documents. The ten files new since the manifest are
+three PDFs, four small `.docx` files and three cloud placeholder stubs; the
+one missing is the stub that appeared between two runs a week earlier. The
+manifest named both, which is what it is for.
+
+The first attempt ran without YARA (the system Python, not the 3.13 virtual
+environment), and the report said so on every file: `incomplete: yara on
+3612 file(s)`. The rerun inside the environment brought `yara_match` back on
+the one PDF it fired on before.
+
+The older formats, for the first time:
+
+```
+corpus: 5 benign
+  restricted to .doc, .xls, .ppt, .docm, .xlsm, .msg
+  benign families: ole-word 4, unknown 1
+  gate (medium+): flags 0.0% of benign files
+```
+
+Four real `.doc` files read as `ole-word`, with no `incomplete` line. That
+looked like the OLE2 reader reading them cleanly. It was not evidence of it.
+
+### The sixth time one question had two answers
+
+The corpus counted `report.errors`: analysis that never ran. It did not
+count what `Report.thin()` collects, every extractor's `parse_errors` and
+`warnings`: analysis that ran and stopped short. The envelope has counted
+both since v0.5.15. So the corpus could say "the OLE reader was missing" and
+could not say "the OLE reader gave up on this file", and the second is the
+only thing a first run of a new parser on real files needs to know.
+
+The corpus now counts both, apart, because they are different claims about a
+rate. The second line looks like this (the counts here are made up):
+
+```
+  incomplete: yara on 3612 file(s)
+  came back short: ole on 1 file(s), strings on 40 file(s)
+```
+
+Once per extractor per file, members included, however many notes it left.
+The JSON gains `partial`, always present.
+
+**Expect the new line on every real corpus.** The strings extractor already
+says when a run was longer than `strings_max_length` and only its start was
+read, which is how a URL past the cap would be missed, and ordinary
+documents have long runs. That was always true and always in the envelope;
+the corpus report now says it too.
+
+This is the same defect class as the corpus gate (v0.5.5), the exit code
+(v0.5.11), the envelope's severity (v0.5.14) and its "fully examined?"
+(v0.5.15), and the manifest's sets (v0.5.17). Each was found by asking what
+a number means before believing it.
+
+### Tests
+
+Six new, 739 in all. Five mutants, all caught.
+
 ## Version 0.6.0 - documents
 
 The tag for the document release. Most of it shipped already, piece by piece
