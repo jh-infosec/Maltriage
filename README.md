@@ -196,8 +196,8 @@ keep two lists in step, here is the shape, and the file has the detail.
   findings envelope, ATT&CK mapping, the shared secret engine and the corpus
   harness (shipped); reputation enrichment and offline mode
 - **v0.5** archive recursion, with the bomb, traversal and time bounds that
-  make it safe, plus known-good filtering
-- **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers
+  make it safe, plus known-good filtering (shipped)
+- **v0.6** OLE2 and OOXML, VBA macros and auto-execute triggers (shipped)
 - **v0.7** the measurement release: precision and recall against a labelled
   corpus, run diffing, and what known-good filtering costs in false negatives.
   The harness itself shipped in v0.4.2, because six decisions were waiting on

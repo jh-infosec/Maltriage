@@ -8744,3 +8744,59 @@ def test_the_source_agrees_with_olevba(write):
               for _, stream, _, code in parser.extract_macros()}
     parser.close()
     assert ours == theirs
+
+
+# ActiveX triggers: a control's handler runs when the control is drawn
+
+def _document_module(body):
+    return {"ThisDocument": ('Attribute VB_Name = "ThisDocument"\r\n' + body, "document")}
+
+
+@pytest.mark.parametrize("handler, event", [
+    ("InkPicture1_Painted", "ActiveX Painted"),
+    ("Frame1_Layout", "ActiveX Layout"),
+    ("MultiPage1_Layout", "ActiveX Layout"),
+    ("TextBox1_GotFocus", "ActiveX GotFocus"),
+    ("WebBrowser1_NavigateComplete2", "ActiveX NavigateComplete2"),
+])
+def test_a_control_handler_that_runs_on_open_is_a_trigger(write, handler, event):
+    report = _macro_report(write, _document_module(
+        f"Private Sub {handler}()\r\n  Shell \"x\"\r\nEnd Sub\r\n"))
+    assert _vba(report)["auto_exec"] == [event]
+    assert "vba_autorun_execution" in _vba_findings(report)
+
+
+def test_a_control_trigger_is_reported_without_the_controls_name(write):
+    """The control's name is the sample's choice, so it stays in the sample,
+    like the source around it."""
+    report = _macro_report(write, _document_module(
+        "Private Sub Payload_Marker_8812_Painted()\r\nEnd Sub\r\n"))
+    text = json.dumps({"data": report.data, "findings": report.findings}, default=str)
+
+    assert _vba(report)["auto_exec"] == ["ActiveX Painted"]
+    assert "Marker_8812" not in text
+
+
+def test_events_a_person_causes_are_not_triggers(write):
+    """A form with a button is a form. `Click` and `Change` need somebody."""
+    report = _macro_report(write, _document_module(
+        "Private Sub CommandButton1_Click()\r\nEnd Sub\r\n"
+        "Private Sub TextBox1_Change()\r\nEnd Sub\r\n"
+        "Private Sub ListBox1_MouseMove()\r\nEnd Sub\r\n"))
+    assert _vba(report)["auto_exec"] == []
+
+
+def test_a_control_handler_counts_only_in_a_document_module(write):
+    """Controls on a document raise events in that document's module. In an
+    ordinary module the same name is a procedure with an underscore."""
+    source = 'Attribute VB_Name = "Module1"\r\nSub Frame1_Layout()\r\nEnd Sub\r\n'
+    report = _macro_report(write, {"Module1": (source, "procedural")})
+    assert _vba(report)["auto_exec"] == []
+
+
+def test_a_user_form_resizing_is_not_a_control(write):
+    """`UserForm_Resize` runs when a form is shown, and showing a form takes
+    a macro that is already running."""
+    report = _macro_report(write, _document_module(
+        "Private Sub UserForm_Resize()\r\nEnd Sub\r\n"))
+    assert _vba(report)["auto_exec"] == []

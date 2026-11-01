@@ -1,5 +1,59 @@
 # Changelog
 
+## Version 0.6.0 - documents
+
+The tag for the document release. Most of it shipped already, piece by piece
+as each was ready: OOXML identification (v0.5.10), external relationships
+(v0.5.16), DDE fields and links (v0.5.18), the OLE2 reader (v0.5.19), and
+VBA source with its triggers (v0.5.20). This release adds the last trigger
+kind and puts the rest under the number the roadmap gave it.
+
+### A control that runs a macro by being drawn
+
+Once scanners learned `AutoOpen`, droppers moved to ActiveX controls. A
+control on a document raises events in that document's module, and some
+fire with nobody touching anything: an `InkPicture` raises `Painted` when it
+is drawn, a `Frame` raises `Layout`, a `WebBrowser` raises
+`NavigateComplete2` when it loads. A handler for one of those runs when the
+document opens, exactly as `Document_Open` does.
+
+So a procedure named `<control>_<event>` is now a trigger when the event is
+one a control raises on its own (`Painted`, `Painting`, `Layout`, `Resize`,
+`GotFocus`, and the `WebBrowser` load events) and the procedure is in a
+document module, where control events are raised. It joins `vba_auto_exec`,
+and with a process-starting call it reaches `vba_autorun_execution`.
+
+Three things it is not:
+
+- **Not an event a person causes.** `CommandButton1_Click`,
+  `TextBox1_Change` and `ListBox1_MouseMove` need somebody, and a form with
+  a button is a form.
+- **Not a procedure in an ordinary module.** `Frame1_Layout` there is a name
+  with an underscore in it.
+- **Not `UserForm_Resize`.** A form is shown by a macro that is already
+  running, so its events are not how a document starts one.
+
+The control's name is the sample's choice, so it is reported as
+`ActiveX Painted`, never as `InkPicture1_Painted`. A test plants a marker in
+a control name and checks it appears nowhere in the report.
+
+### What v0.6 does not do
+
+- **VBA stomping**, where the compiled p-code runs and the source is a decoy.
+  Detecting it means reading p-code, which is a parser of its own; carried
+  to v0.7.
+- **DDE in a `.doc`**, which lives in the `WordDocument` stream behind the
+  file's piece table rather than in XML.
+- **Pricing.** Two document keys reach the gate, `ooxml_dde_command` and
+  `vba_autorun_execution`. Both are predicted quiet on the document corpus,
+  and that rerun had not happened when this was tagged. Quiet on ordinary
+  documents is half of what a key needs; the other half is a labelled
+  malicious corpus, which is v0.7.
+
+### Tests
+
+Nine new, 733 in all. Six mutants, all caught.
+
 ## Version 0.5.20 - what the macro does when the document opens
 
 The second half of OLE2. v0.5.19 could say a document carried a VBA

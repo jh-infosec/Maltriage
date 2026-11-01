@@ -78,6 +78,25 @@ CAPABILITY = (
     ("CallByName", re.compile(r"\bCallByName\b", re.I)),
 )
 
+#: Events an ActiveX control raises by being drawn or loaded, with nobody
+#: touching it. A handler for one runs when the document opens, which is why
+#: `InkPicture1_Painted` and `Frame1_Layout` replaced `AutoOpen` once
+#: scanners learned that name. Events a person causes (`Click`, `Change`,
+#: `MouseMove`) are left out: a form with a button is not a trigger.
+ACTIVEX_EVENTS = (
+    "Painted", "Painting", "Layout", "Resize", "GotFocus",
+    "DocumentComplete", "NavigateComplete2", "BeforeNavigate2",
+    "DownloadBegin", "DownloadComplete", "ProgressChange",
+    "StatusTextChange", "TitleChange", "NavigateError",
+)
+_ACTIVEX = {name.lower(): name for name in ACTIVEX_EVENTS}
+
+#: Objects whose events are not a control's. `UserForm_Resize` runs when a
+#: form is shown, which needs a macro to show it; `Document_` and
+#: `Workbook_` are in `AUTO_EXEC` already.
+_NOT_CONTROLS = {"userform", "document", "workbook", "worksheet", "chart", "app",
+                 "application", "presentation"}
+
 _DECLARATION = re.compile(
     r"^[ \t]*(?:(?:Public|Private|Friend)[ \t]+)?(?:Static[ \t]+)?(?:Sub|Function)[ \t]+"
     r"([A-Za-z_][A-Za-z0-9_]*)", re.I | re.M)
@@ -219,14 +238,27 @@ def _text(raw: bytes | None, unicode: bytes | None, codec: str) -> str | None:
     return None
 
 
-def scan_source(source: str) -> dict[str, list[str]]:
+def scan_source(source: str, kind: str = "procedural") -> dict[str, list[str]]:
     """Which entries of this module's lists the source declares or calls.
 
-    Returns names from the lists only. The source itself goes nowhere.
+    Returns names from the lists only. The source itself goes nowhere: a
+    control handler is reported as `ActiveX Painted`, never by the control's
+    name, which the sample chose.
+
+    Control handlers count only in a document module. A control on a
+    document raises its events in that document's module (`ThisDocument`, a
+    sheet), and a procedure called `Frame1_Layout` in an ordinary module is
+    a procedure with an underscore in its name.
     """
     declared = {match.group(1).lower() for match in _DECLARATION.finditer(source)}
+    auto = {_AUTO[name] for name in declared if name in _AUTO}
+    if kind == "document":
+        for name in declared:
+            control, _, event = name.rpartition("_")
+            if control and control not in _NOT_CONTROLS and event in _ACTIVEX:
+                auto.add(f"ActiveX {_ACTIVEX[event]}")
     return {
-        "auto_exec": sorted(_AUTO[name] for name in declared if name in _AUTO),
+        "auto_exec": sorted(auto),
         "execution": [name for name, pattern in EXECUTION if pattern.search(source)],
         "capability": [name for name, pattern in CAPABILITY if pattern.search(source)],
     }
@@ -297,7 +329,7 @@ def extract(read: Callable[[str], bytes | None], config_caps: dict[str, int]) ->
         spent += len(source)
         record["source_bytes"] = len(source)
         record["sha256"] = hashlib.sha256(source).hexdigest()
-        hits = scan_source(source.decode(codec, "replace"))
+        hits = scan_source(source.decode(codec, "replace"), module["kind"])
         record.update(hits)
         for key, names in hits.items():
             found[key].update(names)

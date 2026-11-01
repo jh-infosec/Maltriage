@@ -359,7 +359,9 @@ which is the third kind doing what it was added for.
 - [x] OLE2 structured storage: structure, kinds, VBA, packages and encryption *(v0.5.19)*, stream content *(v0.5.20)*
 - [x] OOXML identification and part listing *(v0.5.10)*
 - [x] VBA: presence *(v0.5.10)*, module listing and source extraction *(v0.5.20)*
-- [~] Auto-execute triggers: declared document and workbook events *(v0.5.20)*; ActiveX control events and p-code without source (VBA stomping) not yet
+- [x] Auto-execute triggers: declared document and workbook events *(v0.5.20)*, ActiveX control events *(v0.6.0)*
+- [ ] VBA stomping: compiled p-code that runs while the source is a decoy. Carried to v0.7, because detecting it means reading p-code, which is its own parser
+- [ ] DDE fields in a `.doc`, which live in the `WordDocument` stream rather than in XML
 - [x] External relationships *(v0.5.16)* and DDE fields and links *(v0.5.18)*
 
 **Part of this arrived early, and the reason is worth keeping.** v0.5.10
@@ -373,6 +375,19 @@ there and does not read it. Reading it is the rest of this release, and it is
 also where the attack surface starts, because a VBA stream is
 attacker-controlled structure parsed by code this project would have to
 write.
+
+**v0.6.0 closes this release.** It shipped as v0.5.10 and v0.5.16 to
+v0.5.20 first, because each piece was ready before the whole and a version
+number was not a reason to hold one back. The tag puts them under the name
+this section gave them.
+
+**What the gate holds, and what priced it.** Two document keys reach
+`medium`, `ooxml_dde_command` and `vba_autorun_execution`, and nothing else.
+Both are predicted to fire on none of the document corpus, and the run that
+checks it had not happened when this was tagged. Even a zero would say only
+that the keys are quiet on ordinary documents: the corpus held no macro
+document when it was last measured, so it says nothing about whether they
+find bad ones. That is v0.7's job.
 
 **Both macro keys are at `low` and both measured 0.0% on 59 real
 documents.** That number is weaker than it looks: the corpus contained no
