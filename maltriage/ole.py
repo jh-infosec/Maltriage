@@ -539,6 +539,22 @@ class OleExtractor(RandomAccessExtractor):
                 evidence=[{"name": "count", "value": packages}]))
 
         project = data.get("vba") or {}
+        stomp = project.get("stomped") or []
+        if stomp:
+            # On its own at the gate. Office never writes this: the compiled
+            # code and the source disagree only when a tool has replaced
+            # the source after compiling, and the point of doing that is
+            # that every check reading the source, including the ones
+            # below, reads a decoy. Measured consistent on every real
+            # Office module available, so this fired on none of them.
+            reasons = sorted(set(stomp))
+            out.append(mk_finding(
+                self.name, "vba_stomped",
+                f"{len(stomp)} module(s) whose compiled code is not the source shown "
+                f"({', '.join(reasons)}); the code that runs in a matching Office "
+                "version is not the code any reader of the source sees", "medium",
+                evidence=[{"name": "modules", "value": len(stomp)},
+                          {"name": "reasons", "value": reasons}]))
         auto, execution = project.get("auto_exec") or [], project.get("execution") or []
         if auto and execution:
             # The one VBA key at the gate. A macro that runs by itself is

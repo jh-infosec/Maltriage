@@ -1,5 +1,90 @@
 # Changelog
 
+## Version 0.6.3 - the code that runs is not the code shown
+
+Office stores every VBA module twice: as compiled p-code and as source.
+When the document opens in the Office version that compiled it, the p-code
+is what runs. A stomped document has its source replaced after compiling,
+with something harmless or with nothing, so every check that reads the
+source reads a decoy. That includes `vba_auto_exec`, `vba_execution` and
+`vba_autorun_execution` from v0.5.20, which is why this was the gap v0.6.0
+named.
+
+### What was measured before anything was built
+
+The p-code format is undocumented. `pcodedmp` is the reference, and it
+locates a line table in each module (a dword at 0x19, a table opening with
+0xCAFE, a line count four bytes in). Two questions were put to the seven
+real Office modules in the oletools test set, from Office versions 0x97 and
+0xAF:
+
+- **Does the line table match the source?** Exactly, all seven: the count
+  equals the source's lines with the header attributes left out.
+- **Are the printable strings in the p-code all in the source?** No. Every
+  "absent" run was binary noise from the p-code's own structures (`Offi@`,
+  `}`^V2`). A rule built on raw strings would have fired on every real file.
+  Literals are in there, but finding them means decoding opcodes, and the
+  opcode numbers change between versions.
+
+So the check is the line table, and the strings idea is recorded as the
+reason it is not.
+
+### The check
+
+`vba_stomped`, **medium, at the gate on its own**, when a module's compiled
+code has lines and either:
+
+- the source holds no code at all (`source missing`), or
+- the source cannot account for the number of compiled lines
+  (`line count differs`)
+
+On its own because the decoy is harmless by design, so nothing that reads
+the source can find anything, and because Office never writes this: the two
+disagree only when a tool rewrote one of them.
+
+It is deliberately slow to fire:
+
+- **A range, not a number.** Whether a `_` continuation is one compiled line
+  or several, and whether trailing blank lines and attributes inside a
+  procedure count, is not documented. Any count those choices allow is
+  accepted. Header attributes are never lines, so a decoy cannot pad its
+  way to a match with them.
+- **Compiled to no lines is ordinary.** Office leaves a module uncompiled
+  until it is needed, so source with an empty line table is not flagged.
+  Code with nothing shown is the technique; the reverse is not.
+- **Version 0xFFFF is not judged.** MS-OVBA has a writer store it to mean
+  "recompile from source", so that p-code never runs. VBA5 (Office 97)
+  projects are not judged either; their header is laid out differently.
+- **A source cut at the cap is not judged.** It has fewer lines than it
+  compiled to, for an honest reason.
+- Mac projects store p-code big-endian, and are read that way.
+
+### Proved on real compiled code
+
+The `NewMacros` p-code from the Office-written `oleform-PR314.docm`,
+paired with its own source, a two line decoy, and an emptied source:
+
+```
+honest : not stomped
+decoy  : line count differs
+empty  : source missing
+```
+
+and nothing fired on any of the seven real modules as they are.
+
+### What it does not catch
+
+A decoy with exactly as many lines as the code it replaced. Comparing what
+the lines *say* needs a p-code disassembler, which is what `pcodedmp` is,
+and that is v0.7. The changelog says so because a check that is easy to
+pass should not be read as one that is hard to pass.
+
+### Tests
+
+Fourteen new, 772 in all. Thirteen mutants; two survived a first pass and
+became tests: p-code long enough to have a table but without its magic, and
+header attributes counted as lines.
+
 ## Version 0.6.2 - the fields in a .doc
 
 ### First, the whole v0.6 reader against real Office files

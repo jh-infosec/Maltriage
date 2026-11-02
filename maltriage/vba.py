@@ -264,6 +264,87 @@ def scan_source(source: str, kind: str = "procedural") -> dict[str, list[str]]:
     }
 
 
+#: `_VBA_PROJECT` versions below this are VBA5 (Office 97), whose module
+#: header is laid out differently; their p-code is not judged.
+_VBA6 = 0x6B
+#: The version a writer stores to say "recompile from source": Office then
+#: ignores the p-code, so it cannot be what runs and cannot be stomped.
+_RECOMPILE = 0xFFFF
+
+
+def project_version(raw: bytes | None) -> int | None:
+    """The VBA version `_VBA_PROJECT` was compiled by, or `None`."""
+    if raw is None or len(raw) < 4 or struct.unpack_from("<H", raw, 0)[0] != 0x61CC:
+        return None
+    return struct.unpack_from("<H", raw, 2)[0]
+
+
+def pcode_lines(pcode: bytes, version: int | None) -> int | None:
+    """How many lines the compiled code of a module holds, or `None` when
+    there is no compiled code this can read.
+
+    The layout is the one `pcodedmp` documents for VBA6 and VBA7, 32 and 64
+    bit alike: a dword at 0x19 locates a line table that opens with the
+    magic 0xCAFE, and the word four bytes after it counts the lines. Byte
+    order is the module's own (a Mac project is big-endian), told by the
+    word at offset 2.
+    """
+    if version is None or version == _RECOMPILE or version < _VBA6 or len(pcode) < 0x1D:
+        return None
+    endian = "<" if struct.unpack_from("<H", pcode, 2)[0] <= 0xFF else ">"
+    table = struct.unpack_from(f"{endian}I", pcode, 0x19)[0] + 0x3C
+    if table + 6 > len(pcode) or struct.unpack_from(f"{endian}H", pcode, table)[0] != 0xCAFE:
+        return None
+    return struct.unpack_from(f"{endian}H", pcode, table + 4)[0]
+
+
+def source_lines(source: str) -> tuple[int, int, bool]:
+    """The range of line counts the compiled code could honestly have for
+    this source, and whether the source holds any code at all.
+
+    A range, because two things are not known from documentation alone:
+    whether a continued line (`_` at the end) is one line or several in the
+    p-code, and whether attributes inside a procedure and trailing blank
+    lines are counted. On every real module measured the count was the
+    plain one, with the header attributes left out; the range is the
+    margin for the cases nobody has measured, and it is the safe direction
+    to be wrong in.
+    """
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and lines[0].startswith("Attribute "):
+        lines.pop(0)
+    high = len(lines)
+    plain = [line for line in lines if not line.lstrip().startswith("Attribute ")]
+    while plain and not plain[-1].strip():
+        plain.pop()
+    logical = 0
+    continued = False
+    for line in plain:
+        if not continued:
+            logical += 1
+        continued = line.rstrip().endswith(" _")
+    has_code = any(line.strip() for line in plain)
+    return logical, max(high, len(plain)), has_code
+
+
+def stomped(compiled: int | None, source: str) -> str | None:
+    """Why the compiled code is not the source shown, or `None`.
+
+    Only when there is compiled code with lines in it. A module whose
+    p-code holds no lines is one Office has not compiled since it was last
+    edited, which is ordinary; it is the other direction, code that runs
+    with nothing or something else shown, that is the technique.
+    """
+    if not compiled:
+        return None
+    low, high, has_code = source_lines(source)
+    if not has_code:
+        return "source missing"
+    if not low <= compiled <= high:
+        return "line count differs"
+    return None
+
+
 def extract(read: Callable[[str], bytes | None], config_caps: dict[str, int]) -> dict[str, Any]:
     """Read a VBA project through `read`, which maps a stream name in the
     project's `VBA` storage to its bytes, or `None` when there is none.
@@ -291,6 +372,9 @@ def extract(read: Callable[[str], bytes | None], config_caps: dict[str, int]) ->
     out["problems"].extend(project["problems"])
     codec = _codec(project["code_page"])
     out["code_page"] = project["code_page"]
+    version = project_version(read("_VBA_PROJECT"))
+    out["version"] = version
+    out["stomped"] = []
 
     spent = 0
     found = {"auto_exec": set(), "execution": set(), "capability": set()}
@@ -329,8 +413,17 @@ def extract(read: Callable[[str], bytes | None], config_caps: dict[str, int]) ->
         spent += len(source)
         record["source_bytes"] = len(source)
         record["sha256"] = hashlib.sha256(source).hexdigest()
-        hits = scan_source(source.decode(codec, "replace"), module["kind"])
+        text = source.decode(codec, "replace")
+        hits = scan_source(text, module["kind"])
         record.update(hits)
+        compiled = pcode_lines(body[:offset], version)
+        record["pcode_lines"] = compiled
+        # A source cut at the cap has fewer lines than it should, which is
+        # not the same thing as a source that was replaced.
+        reason = None if cut else stomped(compiled, text)
+        record["stomped"] = reason
+        if reason:
+            out["stomped"].append(reason)
         for key, names in hits.items():
             found[key].update(names)
     for key, names in found.items():

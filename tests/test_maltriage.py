@@ -8450,7 +8450,8 @@ def _record(ident, body=b""):
     return struct.pack("<HI", ident, len(body)) + body
 
 
-def _vba_storage(modules, code_page=1252, pcode=b"\x01\x16\x03\x00" + b"\x00" * 60):
+def _vba_storage(modules, code_page=1252, pcode=b"\x01\x16\x03\x00" + b"\x00" * 60,
+                 version=0xFFFF):
     """A `VBA` storage: a `dir` stream naming `modules` and one stream each.
 
     `modules` maps a module name to (source text, kind), kind being
@@ -8480,7 +8481,8 @@ def _vba_storage(modules, code_page=1252, pcode=b"\x01\x16\x03\x00" + b"\x00" * 
         storage[name] = pcode + _ovba_compress(text)
     records += _record(0x0010)
     storage["dir"] = _ovba_compress(records)
-    storage["_VBA_PROJECT"] = b"\xcc\x61\xff\xff\x00\x00\x00"
+    # 0xFFFF is what MS-OVBA says a writer stores: "recompile from source".
+    storage["_VBA_PROJECT"] = struct.pack("<HHBH", 0x61CC, version, 0, 0)
     return storage
 
 
@@ -9094,3 +9096,136 @@ def test_the_doc_reader_agrees_with_msodde(write):
     split = write("split.doc", _word_doc([("intro " + _DOC_DDE[:9], True), (_DOC_DDE[9:], False)]))
     assert msodde.process_file(str(split)) == ""
     assert [f["field"] for f in _doc(analyse(split))["dde"]] == ["DDEAUTO"]
+
+
+
+# VBA stomping: compiled code that is not the source shown
+#
+# Office stores each module twice, as p-code and as source, and runs the
+# p-code when the version matches. A stomped document replaces the source
+# after compiling. The p-code's line table says how many lines were compiled;
+# on every real Office module measured it matched the source exactly.
+
+def _pcode(lines, big_endian=False):
+    """Module p-code with just enough structure: the line table pcodedmp
+    documents, at 0x3C past the dword at 0x19, opening with 0xCAFE."""
+    endian = ">" if big_endian else "<"
+    buf = bytearray(0x3C + 6 + 12 * lines + 32)
+    buf[3] = 1 if big_endian else 0
+    struct.pack_into(f"{endian}I", buf, 0x19, 0)
+    struct.pack_into(f"{endian}H", buf, 0x3C, 0xCAFE)
+    struct.pack_into(f"{endian}H", buf, 0x40, lines)
+    return bytes(buf)
+
+
+_HONEST = ('Attribute VB_Name = "Module1"\r\nSub Report()\r\n'
+           '    MsgBox "done"\r\nEnd Sub\r\n')
+
+
+def _stomp_report(write, source, lines, version=0xAF, **kwargs):
+    return _macro_report(write, {"Module1": (source, "procedural")},
+                         pcode=_pcode(lines, **kwargs), version=version)
+
+
+def test_compiled_code_matching_its_source_is_not_stomped(write):
+    report = _stomp_report(write, _HONEST, 3)
+    module = _vba(report)["modules"][0]
+
+    assert module["pcode_lines"] == 3
+    assert module["stomped"] is None
+    assert "vba_stomped" not in _vba_findings(report)
+
+
+def test_a_decoy_source_is_stomping_and_reaches_the_gate_alone(write):
+    """The decoy is harmless by design, so nothing that reads the source
+    finds anything. That is the point of the technique, and why this key is
+    at the gate on its own."""
+    report = _stomp_report(write, _HONEST, 40)
+    finding = _vba_findings(report)["vba_stomped"]
+
+    assert finding["severity"] == "medium"
+    assert "line count differs" in finding["detail"]
+    assert "Module1" not in finding["detail"]
+    assert set(_vba_findings(report)) == {"vba_stomped"}
+    assert at_gate(report, "medium")
+
+
+def test_compiled_code_with_its_source_removed_is_stomping(write):
+    report = _stomp_report(write, 'Attribute VB_Name = "Module1"\r\n', 12)
+    assert _vba(report)["modules"][0]["stomped"] == "source missing"
+
+
+def test_a_project_marked_for_recompiling_is_not_judged(write):
+    """Version 0xFFFF tells Office to compile from source, so the p-code
+    never runs and cannot be what was hidden."""
+    report = _stomp_report(write, _HONEST, 40, version=0xFFFF)
+    assert _vba(report)["modules"][0]["pcode_lines"] is None
+    assert "vba_stomped" not in _vba_findings(report)
+
+
+def test_a_vba5_project_is_not_judged(write):
+    report = _stomp_report(write, _HONEST, 40, version=0x5E)
+    assert _vba(report)["modules"][0]["pcode_lines"] is None
+
+
+def test_p_code_without_a_line_table_is_not_judged(write):
+    report = _macro_report(write, {"Module1": (_HONEST, "procedural")}, version=0xAF)
+    assert _vba(report)["modules"][0]["pcode_lines"] is None
+
+
+def test_a_module_compiled_to_no_lines_is_not_stomping(write):
+    """Office leaves a module uncompiled until it is needed, so source with
+    an empty line table is ordinary. Code with nothing shown is the
+    technique, not the reverse."""
+    assert _vba(_stomp_report(write, _HONEST, 0))["modules"][0]["stomped"] is None
+
+
+def test_continued_lines_are_counted_either_way(write):
+    """Whether `_` continuations are one p-code line or several is not
+    documented, so both counts are honest."""
+    source = ('Attribute VB_Name = "Module1"\r\nSub Report()\r\n'
+              '    x = 1 + _\r\n        2\r\nEnd Sub\r\n')
+    for lines in (3, 4):
+        assert _vba(_stomp_report(write, source, lines))["modules"][0]["stomped"] is None
+    assert _vba(_stomp_report(write, source, 9))["modules"][0]["stomped"] == "line count differs"
+
+
+def test_trailing_blank_lines_are_counted_either_way(write):
+    source = _HONEST + "\r\n\r\n"
+    for lines in (3, 5):
+        assert _vba(_stomp_report(write, source, lines))["modules"][0]["stomped"] is None
+
+
+def test_big_endian_p_code_is_read(write):
+    """A project saved on a Mac stores its p-code big-endian."""
+    report = _stomp_report(write, _HONEST, 40, big_endian=True)
+    assert _vba(report)["modules"][0]["pcode_lines"] == 40
+
+
+def test_a_source_cut_at_the_cap_is_not_called_stomped(write):
+    """A cut source has fewer lines than it compiled to, for an honest reason."""
+    source = 'Attribute VB_Name = "Module1"\r\n' + "x = 1\r\n" * 20000
+    report = _macro_report(write, {"Module1": (source, "procedural")},
+                           pcode=_pcode(20000), version=0xAF,
+                           config={**DEFAULT_CONFIG, "vba_max_module_bytes": 4096})
+    assert _vba(report)["modules"][0]["stomped"] is None
+
+
+def test_the_project_version_is_read_only_from_a_real_header():
+    assert vba_module.project_version(struct.pack("<HHBH", 0x61CC, 0xAF, 0, 0)) == 0xAF
+    assert vba_module.project_version(b"\x00\x00\xaf\x00") is None
+    assert vba_module.project_version(None) is None
+
+
+def test_p_code_whose_table_lacks_the_magic_is_not_judged(write):
+    report = _macro_report(write, {"Module1": (_HONEST, "procedural")},
+                           pcode=b"\x00" * 200, version=0xAF)
+    assert _vba(report)["modules"][0]["pcode_lines"] is None
+
+
+def test_the_header_attributes_are_not_lines_of_code(write):
+    """`Attribute VB_Name` and its neighbours are hidden in the editor and not
+    compiled. Counting them would let a decoy pad its way to a match."""
+    source = ('Attribute VB_Name = "Module1"\r\nAttribute VB_Base = "x"\r\n'
+              'Attribute VB_Creatable = False\r\n' + _HONEST.split("\r\n", 1)[1])
+    assert _vba(_stomp_report(write, source, 6))["modules"][0]["stomped"] == "line count differs"
