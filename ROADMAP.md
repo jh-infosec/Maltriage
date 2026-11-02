@@ -361,7 +361,8 @@ which is the third kind doing what it was added for.
 - [x] VBA: presence *(v0.5.10)*, module listing and source extraction *(v0.5.20)*
 - [x] Auto-execute triggers: declared document and workbook events *(v0.5.20)*, ActiveX control events *(v0.6.0)*
 - [ ] VBA stomping: compiled p-code that runs while the source is a decoy. Carried to v0.7, because detecting it means reading p-code, which is its own parser
-- [ ] DDE fields in a `.doc`, which live in the `WordDocument` stream rather than in XML
+- [x] DDE fields in a `.doc`, read through the piece table *(v0.6.2)*
+- [ ] Found by the oletools test set and not yet read: DDE in `.xlsb` (binary external link parts), Excel 4 macros (XLM), VBA and embedded objects inside a `.ppt` (both live compressed inside the `PowerPoint Document` stream), and `.xls` encryption (a `FILEPASS` record in the workbook stream)
 - [x] External relationships *(v0.5.16)* and DDE fields and links *(v0.5.18)*
 
 **Part of this arrived early, and the reason is worth keeping.** v0.5.10

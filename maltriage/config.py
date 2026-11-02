@@ -302,6 +302,10 @@ DEFAULT_CONFIG = {
     "vba_max_module_bytes": 4194304,
     "vba_max_source_bytes": 16777216,
     "vba_max_modules": 256,
+    # Word 97-2003 text, read through the piece table to find fields in it.
+    "doc_max_stream_bytes": 67108864,
+    "doc_max_text_chars": 16777216,
+    "doc_max_pieces": 65536,
     "archive_max_member_bytes": 67108864,
 
     # Wall-clock seconds for the recursion. The known gap `architecture.md`
@@ -586,6 +590,9 @@ def validate_config(config):
     check_int("vba_max_module_bytes")
     check_int("vba_max_source_bytes")
     check_int("vba_max_modules")
+    check_int("doc_max_stream_bytes")
+    check_int("doc_max_text_chars")
+    check_int("doc_max_pieces")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

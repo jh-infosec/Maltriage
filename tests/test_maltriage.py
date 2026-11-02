@@ -48,6 +48,7 @@ from maltriage import extractors as extractors_module
 from maltriage import archives as archives_module
 from maltriage import ole as ole_module
 from maltriage import vba as vba_module
+from maltriage import msdoc as msdoc_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -8022,6 +8023,12 @@ def _ole(report):
     return report.data["ole"]
 
 
+def _structural(notes):
+    """Problems with the container, leaving out what the Word text reader
+    says about a `WordDocument` stream that is only filler here."""
+    return [n for n in notes if not n.startswith("doc:")]
+
+
 def _ole_findings(report):
     return {f["key"]: f for f in report.findings if f["key"].startswith("ole_")}
 
@@ -8065,7 +8072,7 @@ def test_a_compound_file_is_listed_by_path_and_size(write):
     assert streams["CompObj"] == 80
     assert data["stream_count"] == 6 and data["storage_count"] == 2
     # The VBA streams here are filler, so only the project read complains.
-    assert [n for n in data["parse_errors"] if not n.startswith("vba:")] == []
+    assert [n for n in data["parse_errors"] if not n.startswith(("vba:", "doc:"))] == []
 
 
 def test_a_word_document_with_a_vba_project_is_reported(write):
@@ -8262,7 +8269,7 @@ def test_a_version_3_size_ignores_the_undefined_high_half(write):
     data = _ole(analyse(write("v3.doc", blob)))
 
     assert data["streams"][0]["size"] == 5000
-    assert data["parse_errors"] == []
+    assert _structural(data["parse_errors"]) == []
 
 
 def test_the_directory_is_read_up_to_a_limit(write):
@@ -8363,7 +8370,7 @@ def test_a_compound_file_too_large_for_the_header_table_is_read_whole():
 
     assert {s["path"]: s["size"] for s in data["streams"]} == {
         "WordDocument": 16_000_000, "1Table": 5000}
-    assert data["parse_errors"] == []
+    assert _structural(data["parse_errors"]) == []
 
 
 def test_a_claimed_fat_is_read_only_as_far_as_the_file_could_use():
@@ -8518,7 +8525,7 @@ def test_vba_source_is_read_out_of_every_module(write):
     assert modules["ThisDocument"]["source_bytes"] == len(_DROPPER)
     assert modules["ThisDocument"]["sha256"] == hashlib.sha256(_DROPPER.encode()).hexdigest()
     assert _vba(report)["code_page"] == 1252
-    assert report.data["ole"]["parse_errors"] == []
+    assert _structural(report.data["ole"]["parse_errors"]) == []
 
 
 def test_a_macro_that_shells_out_on_open_reaches_the_gate(write):
@@ -8851,7 +8858,7 @@ def test_a_member_that_came_back_short_is_counted():
 def test_a_clean_corpus_says_nothing_came_back_short(tmp_path):
     benign = tmp_path / "benign"
     benign.mkdir()
-    (benign / "a.doc").write_bytes(_cfb({"WordDocument": b"w" * 600})[0])
+    (benign / "a.doc").write_bytes(_word_doc([("an ordinary letter", True)]))
     result = corpus_module.scan_corpus(tmp_path)
 
     assert result.to_dict()["partial"] == {}
@@ -8869,3 +8876,221 @@ def test_a_damaged_compound_file_in_a_corpus_is_counted(tmp_path):
     # The filler is one 5000 byte run, which the strings extractor also
     # reports cutting short: that is its own true statement.
     assert result.partial["ole"] == 1
+
+
+# Word 97-2003 text and the DDE fields in it
+#
+# Every real .doc in the oletools test set holds its text in one piece, so
+# the fixtures here split it: pieces in both encodings, stored out of order,
+# a field spread across two of them. Checked against msodde on the real
+# Office 2003, 2013 and 2016 files during development.
+
+def _word_doc(pieces, table="1Table", decoy=None, flags=0, prc=b"", extra=None):
+    """A compound file whose WordDocument text is `pieces` in reading order.
+
+    Each piece is (text, compressed). They are written to the stream in
+    reverse, so a reader that walks the stream front to back reads the
+    document backwards.
+    """
+    header_size = 1024
+    body = bytearray()
+    placed = []
+    for text, compressed in reversed(pieces):
+        start = header_size + len(body)
+        encoded = text.encode("cp1252") if compressed else text.encode("utf-16-le")
+        body += encoded
+        placed.append((start, compressed))
+    placed.reverse()
+    cps, cp = [0], 0
+    for text, _ in pieces:
+        cp += len(text)
+        cps.append(cp)
+    pcds = b"".join(struct.pack("<HIH", 0, (start * 2) | 0x40000000 if compressed else start, 0)
+                    for start, compressed in placed)
+    plc = struct.pack(f"<{len(cps)}I", *cps) + pcds
+    clx = prc + b"\x02" + struct.pack("<I", len(plc)) + plc
+    fib = bytearray(header_size)
+    struct.pack_into("<HH", fib, 0, 0xA5EC, 0x00C1)
+    struct.pack_into("<H", fib, 0x0A, flags | (0x0200 if table == "1Table" else 0))
+    struct.pack_into("<H", fib, 32, 14)
+    struct.pack_into("<H", fib, 34 + 28, 22)
+    blob = 34 + 28 + 2 + 88
+    struct.pack_into("<H", fib, blob, 93)
+    struct.pack_into("<II", fib, blob + 2 + 33 * 8, 0, len(clx))
+    tree = {"WordDocument": bytes(fib) + bytes(body), table: clx}
+    if decoy is not None:
+        tree["0Table" if table == "1Table" else "1Table"] = decoy
+    tree.update(extra or {})
+    return _cfb(tree)[0]
+
+
+def _doc(report):
+    return report.data["ole"]["doc"]
+
+
+_DOC_DDE = '\x13 DDEAUTO c:\\\\windows\\\\system32\\\\cmd.exe "/k marker_5521" \x14x\x15'
+
+
+def test_a_dde_field_in_a_doc_is_found(write):
+    report = analyse(write("letter.doc", _word_doc([("Dear reader. " + _DOC_DDE, True)])))
+    finding = _ole_findings(report)["ole_dde_command"]
+
+    assert finding["severity"] == "medium"
+    assert finding["discriminator"] == "DDEAUTO"
+    assert "cmd" in finding["detail"]
+    assert at_gate(report, "medium")
+
+
+def test_the_text_of_a_doc_never_reaches_the_report(write):
+    report = analyse(write("letter.doc", _word_doc([("private_words_8820 " + _DOC_DDE, True)])))
+    text = json.dumps({"data": report.data, "findings": report.findings}, default=str)
+
+    assert "private_words_8820" not in text
+    assert "marker_5521" not in text
+    assert _doc(report)["text_chars"] > 0
+
+
+def test_pieces_are_read_in_reading_order_and_either_encoding(write):
+    """A field split across a one-byte piece and a UTF-16 piece, stored in
+    the stream in the opposite order, is one field."""
+    first, second = _DOC_DDE[:9], _DOC_DDE[9:]
+    report = analyse(write("split.doc", _word_doc([("intro " + first, True), (second, False)])))
+
+    assert _doc(report)["pieces"] == 2
+    assert _doc(report)["text_chars"] == len("intro " + _DOC_DDE)
+    assert "ole_dde_command" in _ole_findings(report)
+
+
+def test_the_live_table_stream_is_the_one_the_header_names(write):
+    """The other table stream is what the last save left behind."""
+    blob = _word_doc([("plain text with no fields", True)], table="0Table",
+                     decoy=b"\x02" + struct.pack("<I", 0))
+    report = analyse(write("table.doc", blob))
+    assert report.data["ole"]["parse_errors"] == []
+    assert _doc(report)["text_chars"] == len("plain text with no fields")
+
+
+def test_property_runs_before_the_piece_table_are_skipped(write):
+    prc = b"\x01" + struct.pack("<h", 6) + b"\x00" * 6
+    report = analyse(write("prc.doc", _word_doc([(_DOC_DDE, True)], prc=prc)))
+    assert "ole_dde_command" in _ole_findings(report)
+
+
+def test_a_dde_field_in_a_doc_named_by_a_quote_field_is_found(write):
+    codes = " ".join(str(ord(c)) for c in "DDEAUTO")
+    # No cached result on the inner field, so only evaluating it finds this.
+    text = f'\x13\x13 QUOTE {codes} \x14\x15 cmd "/c x"\x14r\x15'
+    assert "ole_dde_command" in _ole_findings(analyse(write("q.doc", _word_doc([(text, True)]))))
+
+
+def test_a_doc_field_result_is_not_an_instruction(write):
+    text = '\x13 PAGE \x14DDEAUTO cmd /c x\x15 and DDEAUTO cmd typed in a paragraph'
+    report = analyse(write("result.doc", _word_doc([(text, True)])))
+    assert not {"ole_dde", "ole_dde_command"} & set(_ole_findings(report))
+
+
+def test_a_doc_dde_field_linking_a_workbook_is_low(write):
+    text = '\x13 DDE Excel "C:\\\\q\\\\sales.xlsx" R1C1 \x144\x15'
+    finding = _ole_findings(analyse(write("link.doc", _word_doc([(text, True)]))))["ole_dde"]
+    assert finding["severity"] == "low"
+
+
+@pytest.mark.parametrize("flag", [0x0100, 0x8000])
+def test_an_encrypted_or_obfuscated_doc_says_so(write, flag):
+    report = analyse(write("locked.doc", _word_doc([(_DOC_DDE, True)], flags=flag)))
+
+    assert "ole_encrypted" in _ole_findings(report)
+    assert "ole_dde_command" not in _ole_findings(report)
+    assert any("encrypted" in note for note in report.thin().values())
+
+
+def test_a_piece_pointing_past_the_stream_is_said(write):
+    blob = bytearray(_word_doc([("some text", True)]))
+    data = ole_module.describe(bytes(blob))
+    assert data["parse_errors"] == []
+    # Point the one piece far past the end of WordDocument.
+    plc_at = bytes(blob).index(b"\x02" + struct.pack("<I", 16)) + 5
+    struct.pack_into("<I", blob, plc_at + 8 + 2, 0x3FFFFFF0 | 0x40000000)
+    data = ole_module.describe(bytes(blob))
+    assert any("points past the WordDocument stream" in n for n in data["parse_errors"])
+
+
+def test_a_missing_table_stream_is_said(write):
+    blob = _word_doc([("text", True)], table="1Table")
+    tree_blob = blob.replace("1Table".encode("utf-16-le"), "9Table".encode("utf-16-le"))
+    data = ole_module.describe(tree_blob)
+    assert any("1Table stream the header names is missing" in n for n in data["parse_errors"])
+
+
+def test_a_word_stream_without_a_word_header_is_said(write):
+    data = ole_module.describe(_cfb({"WordDocument": b"\x00" * 600})[0])
+    assert any("no Word header" in n for n in data["parse_errors"])
+
+
+def test_the_doc_piece_count_is_capped(write):
+    blob = _word_doc([(f"p{n} ", True) for n in range(20)])
+    data = ole_module.describe(blob, {**DEFAULT_CONFIG, "doc_max_pieces": 5})
+
+    assert data["doc"]["pieces"] == 5
+    assert data["doc"]["truncated"] is True
+
+
+def test_the_doc_text_is_capped(write):
+    blob = _word_doc([("x" * 5000, True), (_DOC_DDE, True)])
+    data = ole_module.describe(blob, {**DEFAULT_CONFIG, "doc_max_text_chars": 1000})
+
+    assert data["doc"]["text_chars"] == 1000
+    assert any("past 1000 characters" in n for n in data["parse_errors"])
+
+
+def test_a_flood_of_open_fields_is_bounded():
+    """Sixteen million characters inside unclosed fields is a file anybody
+    can make. Appending a character at a time would be quadratic, and every
+    open field holds a stack entry."""
+    started = time.perf_counter()
+    tracemalloc.start()
+    found, notes = msdoc_module.fields("\x13" * 500_000 + "x" * 4_000_000)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert found == []
+    assert any("nested deeper than 64" in n for n in notes)
+    assert peak < 64 * 1048576
+    assert time.perf_counter() - started < 20
+
+
+def test_a_harmless_doc_says_nothing_about_fields(write):
+    report = analyse(write("plain.doc", _word_doc([("\x13 PAGE \x143\x15 an ordinary letter", True)])))
+
+    assert _doc(report)["dde"] == []
+    assert not {"ole_dde", "ole_dde_command"} & set(_ole_findings(report))
+
+
+def test_a_little_extra_fat_is_not_a_problem(write):
+    """Office and the encryption tools allocate a FAT sector more than a file
+    uses. The first version of the note fired on every encrypted document in
+    the oletools test set."""
+    blob = bytearray(_cfb({"WordDocument": b"w" * 5000})[0])
+    # As many FAT sectors as the file has sectors: wasteful, and possible.
+    struct.pack_into("<I", blob, 44, ole_module.CompoundFile(bytes(blob), 8192).sector_count)
+    data = ole_module.describe(bytes(blob))
+    assert not any("FAT sectors" in n for n in data["parse_errors"])
+
+
+def test_the_doc_reader_agrees_with_msodde(write):
+    """`oletools` is the reference and not a dependency.
+
+    Only where both should see the field. msodde reads the `WordDocument`
+    bytes as they lie, so a field split across a one-byte piece and a UTF-16
+    piece is invisible to it; following the piece table is what finds that
+    one, and `test_pieces_are_read_in_reading_order_and_either_encoding`
+    holds it.
+    """
+    msodde = pytest.importorskip("oletools.msodde")
+    path = write("letter.doc", _word_doc([("intro " + _DOC_DDE, True)]))
+    assert "DDEAUTO" in msodde.process_file(str(path))
+    assert [f["field"] for f in _doc(analyse(path))["dde"]] == ["DDEAUTO"]
+
+    split = write("split.doc", _word_doc([("intro " + _DOC_DDE[:9], True), (_DOC_DDE[9:], False)]))
+    assert msodde.process_file(str(split)) == ""
+    assert [f["field"] for f in _doc(analyse(split))["dde"]] == ["DDEAUTO"]

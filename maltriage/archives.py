@@ -611,37 +611,8 @@ class ArchiveExtractor(RandomAccessExtractor):
                           {"name": "part", "value": first["part"]}],
                 discriminator=kind))
 
-        by_field: dict[str, list[dict[str, Any]]] = {}
-        for field_ in (data.get("dde") or {}).get("fields") or []:
-            by_field.setdefault(field_["field"], []).append(field_)
-        for kind, fields in sorted(by_field.items()):
-            commands = sorted({f["command"] for f in fields if f["command"]})
-            more = f", {len(fields)} in all" if len(fields) > 1 else ""
-            where = "a DDE link" if kind == "ddeLink" else f"a {kind} field"
-            if commands:
-                # The one ooxml key above `low`. A DDE field that names a
-                # workbook is a document linking to data; one that names a
-                # command interpreter starts it, and there is no ordinary
-                # document that does that. Predicted to fire on none of the
-                # v0.5.16 document corpus, and the counterfactual will say.
-                out.append(mk_finding(
-                    self.name, "ooxml_dde_command",
-                    f"the document carries {where} that starts "
-                    f"{', '.join(commands)}{more}; Office asks before it runs, "
-                    "and that prompt is the only thing between opening and execution",
-                    "medium",
-                    evidence=[{"name": "count", "value": len(fields)},
-                              {"name": "part", "value": fields[0]["part"]}],
-                    discriminator=kind))
-            else:
-                out.append(mk_finding(
-                    self.name, "ooxml_dde",
-                    f"the document carries {where} naming {fields[0]['server'] or 'no server'}"
-                    f"{more}; DDE starts the application it names and talks to it",
-                    "low",
-                    evidence=[{"name": "count", "value": len(fields)},
-                              {"name": "part", "value": fields[0]["part"]}],
-                    discriminator=kind))
+        out.extend(dde_findings(self.name, "ooxml",
+                                (data.get("dde") or {}).get("fields") or []))
 
         if data.get("macro_project"):
             # Both at `low`, and that is a decision rather than an oversight.
@@ -927,6 +898,46 @@ def _command_server(server: str) -> str | None:
     if base.endswith(".exe"):
         base = base[:-4]
     return base if base in DDE_COMMAND_SERVERS else None
+
+
+def dde_findings(extractor: str, prefix: str,
+                 fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Findings for DDE fields and links, one per kind with a count.
+
+    Shared by the OOXML reader and the `.doc` reader, which find fields in
+    different places and must say the same thing about them: one question,
+    one computation. `prefix` names the format, as `ooxml_macros` and
+    `ole_macros` do, so a corpus can tell where each one came from.
+    """
+    out = []
+    by_field: dict[str, list[dict[str, Any]]] = {}
+    for field_ in fields:
+        by_field.setdefault(field_["field"], []).append(field_)
+    for kind, group in sorted(by_field.items()):
+        commands = sorted({f["command"] for f in group if f["command"]})
+        more = f", {len(group)} in all" if len(group) > 1 else ""
+        where = "a DDE link" if kind == "ddeLink" else f"a {kind} field"
+        evidence = [{"name": "count", "value": len(group)},
+                    {"name": "part", "value": group[0]["part"]}]
+        if commands:
+            # The one document key above `low` besides the VBA one. A DDE
+            # field that names a workbook is a document linking to data; one
+            # that names a command interpreter starts it, and there is no
+            # ordinary document that does that. Measured quiet on 237
+            # ordinary documents in v0.6.0.
+            out.append(mk_finding(
+                extractor, f"{prefix}_dde_command",
+                f"the document carries {where} that starts "
+                f"{', '.join(commands)}{more}; Office asks before it runs, "
+                "and that prompt is the only thing between opening and execution",
+                "medium", evidence=evidence, discriminator=kind))
+        else:
+            out.append(mk_finding(
+                extractor, f"{prefix}_dde",
+                f"the document carries {where} naming {group[0]['server'] or 'no server'}"
+                f"{more}; DDE starts the application it names and talks to it",
+                "low", evidence=evidence, discriminator=kind))
+    return out
 
 
 def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:

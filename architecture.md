@@ -200,6 +200,7 @@ plus the names everything imports:
 | `rules.py` | 407 | YARA compilation and matching |
 | `archives.py` | 466 | container recursion, and the caps that make it safe |
 | `ole.py` | 553 | OLE2 compound file structure: the chain walker, the directory tree, and stream reads |
+| `msdoc.py` | 209 | Word 97-2003 text through the piece table, and the fields in it |
 | `vba.py` | 306 | MS-OVBA decompression, the `dir` stream, and what module source declares and calls |
 
 ### archives.py, and who owns the walk

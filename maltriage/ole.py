@@ -40,7 +40,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from . import vba
+from . import msdoc, vba
+from .archives import dde_findings
 from .base import RandomAccessExtractor, safe_text
 from .config import config_int
 from .models import mk_finding
@@ -171,7 +172,12 @@ class CompoundFile:
             sid = self._u32(base + (self.per_sector - 1) * 4)
             if sid is None:
                 break
-        if self.fat_sectors > needed:
+        if self.fat_sectors > self.sector_count:
+            # Not `needed`: Office and the encryption tools allocate a FAT
+            # sector or two more than a file uses, which is harmless, and the
+            # first version of this note fired on every encrypted document in
+            # the oletools test set. More FAT sectors than the file has
+            # sectors of any kind is a claim no writer makes by accident.
             self.problems.append(
                 f"header: claims {self.fat_sectors} FAT sectors and the file could "
                 f"use {needed}")
@@ -391,20 +397,41 @@ def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
                     break
             break
 
+    by_path = {path.lower(): index for path, index in reachable}
+
+    def read_path(path: str, cap: int, setting: str, label: str) -> bytes | None:
+        index = by_path.get(path.lower())
+        if index is None or entries[index]["type"] != TYPE_STREAM:
+            return None
+        entry = entries[index]
+        if entry["size"] > cap:
+            problems.append(f"{label}: stream {safe_text(path, 64)!r} is "
+                            f"{entry['size']} bytes, above {setting}")
+            return None
+        return _read(compound, entry, mini_stream, mini_count, mini_next)
+
+    if out["kind"] == "word":
+        cap = config_int(config, "doc_max_stream_bytes", 67108864)
+        word = read_path("WordDocument", cap, "doc_max_stream_bytes", "doc")
+        if word is not None:
+            body = msdoc.text(word, lambda name: read_path(name, cap, "doc_max_stream_bytes", "doc"),
+                              config_int(config, "doc_max_text_chars", 16777216),
+                              config_int(config, "doc_max_pieces", 65536))
+            problems.extend(body["problems"])
+            if body["encrypted"]:
+                out["encrypted"] = True
+            found, notes = msdoc.fields(body["text"])
+            problems.extend(notes)
+            # Counts, never the text: the document's words are its owner's.
+            out["doc"] = {"text_chars": len(body["text"]), "pieces": body["pieces"],
+                          "truncated": body["truncated"], "dde": found}
+
     if vba_storage is not None:
-        by_path = {path.lower(): index for path, index in reachable}
         stream_cap = config_int(config, "vba_max_stream_bytes", 16777216)
 
         def read(name: str) -> bytes | None:
-            index = by_path.get(f"{vba_storage}/{name.lower()}")
-            if index is None or entries[index]["type"] != TYPE_STREAM:
-                return None
-            entry = entries[index]
-            if entry["size"] > stream_cap:
-                problems.append(f"vba: stream {safe_text(name, 64)!r} is "
-                                f"{entry['size']} bytes, above vba_max_stream_bytes")
-                return None
-            return _read(compound, entry, mini_stream, mini_count, mini_next)
+            return read_path(f"{vba_storage}/{name}", stream_cap,
+                             "vba_max_stream_bytes", "vba")
 
         out["vba"] = vba.extract(read, {
             "module": config_int(config, "vba_max_module_bytes", 4194304),
@@ -542,6 +569,8 @@ class OleExtractor(RandomAccessExtractor):
                 self.name, "vba_capability",
                 f"the macros can fetch, write or call native code: {', '.join(capability)}",
                 "info", evidence=[{"name": "capability", "value": capability}]))
+
+        out.extend(dde_findings(self.name, "ole", (data.get("doc") or {}).get("dde") or []))
 
         if data.get("encrypted"):
             # Not suspicious by itself, and not nothing: an encrypted document

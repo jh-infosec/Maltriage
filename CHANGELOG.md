@@ -1,5 +1,89 @@
 # Changelog
 
+## Version 0.6.2 - the fields in a .doc
+
+### First, the whole v0.6 reader against real Office files
+
+The positive controls in v0.6.1 were built by this project's own writers, so
+they proved the path and not the formats. `oletools` keeps a set of harmless
+test documents written by Office itself (99 files once its zipped ones are
+unpacked: DDE tests, encrypted documents, embedded objects, VBA forms,
+external links), and v0.6.1 was run over all of them before anything here
+was written. Nothing was committed; the repository holds no sample files.
+
+What it read correctly, first time:
+
+- DDE in `.docx`, `.docm`, `.xlsx` and `.xlsm`: `ooxml_dde_command` on all four
+- Every encrypted OOXML document: `ole_encrypted`
+- Embedded package objects in Word and Excel, both formats
+- External links in every OOXML format
+- **Real Office VBA.** The four modules of `oleform-PR314.docm` came out
+  byte for byte the source `olevba` extracts, by SHA-256. Until now the VBA
+  reader had only met projects this suite wrote.
+
+What it got wrong, fixed here:
+
+- **A note that fired on every encrypted document.** Each claimed one more
+  FAT sector than the file could use, and v0.5.19 called that a problem, so
+  every one of them came back short. Office and the encryption tools
+  allocate a sector or two more than they need, which is harmless. The note
+  now fires only when a header claims more FAT sectors than the file has
+  sectors of any kind.
+- **DDE in a `.doc` was not read at all**, which v0.5.18 said. It is now.
+
+What it does not read, recorded in the roadmap: DDE in `.xlsb`, Excel 4
+macros, VBA and embedded objects inside a `.ppt`, and `.xls` encryption.
+
+### Reading the text of a .doc
+
+A `.doc` keeps its text in the `WordDocument` stream, but not in order and
+not in one encoding. The header says which of two table streams is live and
+where the piece table is in it; the piece table maps runs of characters to
+offsets in the stream, each run either UTF-16 or one byte per character.
+Fields are in the text: 0x13 opens one, 0x14 divides instruction from
+result, 0x15 closes it, and they nest.
+
+So a field is read the way the OOXML reader reads one, with the same helpers:
+the instruction is what sits between the opening and dividing marks, a
+nested numeric `QUOTE` contributes its value and any other nested field its
+cached result. The findings come from one shared function, so a `.docx` and
+a `.doc` say the same thing about the same field. The keys are
+`ole_dde_command` (medium) and `ole_dde` (low), named for the format as
+`ooxml_macros` and `ole_macros` are.
+
+On the real files it agrees with `msodde`: `DDEAUTO` and `DDE` naming
+`cmd.exe` in the Office 2003 and 2016 tests, `DDEAUTO` in the Office 2013
+UTF-16 Korean one, nothing in `harmless-clean.doc`.
+
+**It also finds one `msodde` does not.** `msodde` reads the `WordDocument`
+bytes as they lie. A field split across a one-byte piece and a UTF-16 piece,
+stored in the opposite order, is two fragments in two encodings there and one
+field through the piece table. A test holds both halves of that.
+
+An encrypted or obfuscated `.doc` (the header flags stay readable) is now
+`ole_encrypted`, as an encrypted OOXML document already was.
+
+### Bounded, and one bug the tests caught first
+
+The piece count, the text length and the streams read are capped. A field
+flood (half a million unclosed fields around four million characters) stays
+under 64 MB, because instructions are kept as lists of runs rather than
+strings grown a character at a time, and nesting stops at 64.
+
+The first version shared one flag between the piece cap and the text cap,
+so a document with too many pieces was read for exactly one of them. The
+piece cap test failed on its first run.
+
+The text never reaches a report. What is recorded is its length, the piece
+count, and the fields as names from this project's lists; a test plants a
+marker in the body and in a field's command line and finds neither.
+
+### Tests
+
+Nineteen new, 758 in all. Seventeen mutants; four survived a first pass and
+each became a sharper test: a piece's length taken from the wrong start, the
+nesting cap, a `QUOTE` with no cached result, and the FAT note's threshold.
+
 ## Version 0.6.1 - what ran and came back short
 
 ### The measurement v0.6.0 was tagged without
