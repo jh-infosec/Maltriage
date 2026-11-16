@@ -226,32 +226,57 @@ def _biff12(body: bytes, problems: list[str]) -> tuple[dict[str, str], list[str]
     """
     sheets: dict[str, str] = {}
     names: list[str] = []
-    position, records = 0, 0
+    for kind, record in records(body, problems, "workbook.bin"):
+        if kind == _BRT_BUNDLE_SH and len(record) >= 8:
+            state = struct.unpack_from("<I", record, 0)[0]
+            relation_id, _ = _wide(record, 8)
+            if relation_id is not None:
+                sheets[relation_id] = STATES.get(state & 0x03, "visible")
+        elif kind == _BRT_NAME and len(record) >= 9:
+            name, _ = _wide(record, 9)
+            if name:
+                names.append(name)
+    return sheets, names
+
+
+_BRT_BEGIN_SUPBOOK = 0x0168
+_SUPBOOK_DDE = 0x0001
+
+
+def records(body: bytes, problems: list[str], label: str):
+    """(type, record) for each BIFF12 record in `body`, bounded."""
+    position, count = 0, 0
     while position < len(body):
         kind = _varint(body, position, 2)
         size = _varint(body, kind[1], 4) if kind else None
         if size is None:
-            break
-        records += 1
-        if records > _MAX_RECORDS:
-            problems.append(f"xlm: more than {_MAX_RECORDS} records in workbook.bin")
-            break
+            return
+        count += 1
+        if count > _MAX_RECORDS:
+            problems.append(f"xlm: more than {_MAX_RECORDS} records in {label}")
+            return
         start, end = size[1], size[1] + size[0]
         if end > len(body):
-            problems.append("xlm: a workbook.bin record runs past the end")
-            break
-        record = body[start:end]
-        if kind[0] == _BRT_BUNDLE_SH and len(record) >= 8:
-            state = struct.unpack_from("<I", record, 0)[0]
-            relation_id, after = _wide(record, 8)
-            if relation_id is not None:
-                sheets[relation_id] = STATES.get(state & 0x03, "visible")
-        elif kind[0] == _BRT_NAME and len(record) >= 9:
-            name, _ = _wide(record, 9)
-            if name:
-                names.append(name)
+            problems.append(f"xlm: a {label} record runs past the end")
+            return
+        yield kind[0], body[start:end]
         position = end
-    return sheets, names
+
+
+def dde_servers(body: bytes, problems: list[str]) -> list[str]:
+    """The DDE server of every DDE link in a `.xlsb` external link part.
+
+    BrtBeginSupBook opens each linked book; a type of 1 makes it a DDE link,
+    and its first string is the application Excel starts. The second, the
+    topic, is the command line, and stays in the sample.
+    """
+    servers = []
+    for kind, record in records(body, problems, "external link"):
+        if kind == _BRT_BEGIN_SUPBOOK and len(record) >= 2:
+            if struct.unpack_from("<H", record, 0)[0] == _SUPBOOK_DDE:
+                server, _ = _wide(record, 2)
+                servers.append(server or "")
+    return servers
 
 
 # findings, one computation for every container

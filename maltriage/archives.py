@@ -853,6 +853,7 @@ _FIELD_TOKEN = re.compile(
     rb"|<" + _PREFIX + rb"ddeLink\b(?P<dde>[^>]*)>",
     re.DOTALL)
 _FIELD_READ_LIMIT = 8 * 1048576
+_MAX_FIELD_NESTING = 64
 _FIELDS_KEPT = 256
 
 
@@ -982,29 +983,44 @@ def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:
             continue
 
         found: list[tuple[str, str, str]] = []
-        #: Open complex fields, innermost last: [instruction, result, state].
-        stack: list[list[str]] = []
+        #: Open complex fields, innermost last: [instruction pieces, result
+        #: pieces, state]. Lists, joined when the field closes: growing a
+        #: string a piece at a time is quadratic, and an 8 MiB part of tiny
+        #: `instrText` elements took 10.5 s at 5 MiB before v0.6.5.
+        stack: list[list[Any]] = []
+        #: Fields opened past the nesting cap and not yet closed. Their
+        #: content belongs to them, not to the field around them, so it is
+        #: skipped until they close, as the `.doc` reader does.
+        skipped = 0
         for token in _FIELD_TOKEN.finditer(text):
             if token.group("char") is not None:
                 kind = _local_attributes(token.group("char")).get("fldCharType")
                 if kind == "begin":
-                    stack.append(["", "", "instr"])
+                    if skipped or len(stack) >= _MAX_FIELD_NESTING:
+                        skipped += 1
+                    else:
+                        stack.append([[], [], "instr"])
+                elif skipped:
+                    if kind == "end":
+                        skipped -= 1
                 elif kind == "separate" and stack:
                     stack[-1][2] = "result"
                 elif kind == "end" and stack:
-                    instruction, result, _ = stack.pop()
-                    words = _field_words(instruction)
+                    pieces, result, _ = stack.pop()
+                    words = _field_words("".join(pieces))
                     if words:
                         found.append(("field", words[0], " ".join(words[1:2])))
                     value = _quote_result(words)
                     if stack and stack[-1][2] == "instr":
-                        stack[-1][0] += value if value is not None else result
+                        stack[-1][0].append(value if value is not None else "".join(result))
+            elif skipped:
+                continue
             elif token.group("instr") is not None:
                 if stack and stack[-1][2] == "instr":
-                    stack[-1][0] += html.unescape(token.group("instr").decode("utf-8", "replace"))
+                    stack[-1][0].append(html.unescape(token.group("instr").decode("utf-8", "replace")))
             elif token.group("text") is not None:
                 if stack and stack[-1][2] == "result":
-                    stack[-1][1] += html.unescape(token.group("text").decode("utf-8", "replace"))
+                    stack[-1][1].append(html.unescape(token.group("text").decode("utf-8", "replace")))
             elif token.group("simple") is not None:
                 words = _field_words(_local_attributes(token.group("simple")).get("instr", ""))
                 if words:
@@ -1025,7 +1041,58 @@ def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:
                 "command": _command_server(server),
                 "part": _inside(inside),
             })
+    # A `.xlsb` keeps external links as BIFF12, not XML, so the pattern
+    # above cannot see a DDE link there. The parts are found through their
+    # relationships, as the workbook is, because the names are the author's.
+    read = _staged_reader(staged)
+    names = {str(m.get("inside", "")).lower(): str(m.get("inside", "")) for m in staged}
+    for rels in [n for n in names.values() if n.lower().endswith(".rels")]:
+        raw = read(rels)
+        if raw is None:
+            continue
+        for found in _RELATIONSHIP.finditer(_as_utf8(raw)):
+            attributes = {}
+            for name, double, single in _ATTRIBUTE.findall(found.group(1).decode("utf-8", "replace")):
+                attributes[name] = html.unescape(double if double or not single else single)
+            if not attributes.get("Type", "").rstrip("/").lower().endswith("/externallink"):
+                continue
+            target = _resolve_part(rels, attributes.get("Target", ""))
+            if not target.lower().endswith(".bin") or target.lower() not in names:
+                continue
+            body = read(names[target.lower()])
+            if body is None:
+                continue
+            problems: list[str] = []
+            for server in xlm.dde_servers(body, problems):
+                if len(out["fields"]) >= _FIELDS_KEPT:
+                    out["truncated"] = True
+                    break
+                out["fields"].append({"field": "ddeLink", "server": _display(server),
+                                      "command": _command_server(server),
+                                      "part": _inside(names[target.lower()])})
+
     return out
+
+
+def _resolve_part(rels: str, target: str) -> str:
+    """A relationship's target as a member name.
+
+    `xl/_rels/workbook.bin.rels` describes `xl/workbook.bin`, so a relative
+    target resolves against `xl/`; a target starting `/` is from the root.
+    """
+    target = target.replace("\\", "/")
+    if target.startswith("/"):
+        parts = []
+        target = target.lstrip("/")
+    else:
+        parts = rels.replace("\\", "/").split("/")[:-2]
+    for piece in target.split("/"):
+        if piece == "..":
+            if parts:
+                parts.pop()
+        elif piece and piece != ".":
+            parts.append(piece)
+    return "/".join(parts)
 
 
 def _staged_reader(staged: list[dict[str, Any]]):

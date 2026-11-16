@@ -364,7 +364,9 @@ which is the third kind doing what it was added for.
 - [x] DDE fields in a `.doc`, read through the piece table *(v0.6.2)*
 - [x] Excel 4.0 macro sheets and `Auto_Open`, in `.xls`, `.xlsm` and `.xlsb` *(v0.6.4)*
 - [x] `.xls` encryption, from its `FILEPASS` record *(v0.6.4)*
-- [ ] Found by the oletools test set and not yet read: DDE in `.xlsb` (binary external link parts), and VBA and embedded objects inside a `.ppt` (both live compressed inside the `PowerPoint Document` stream)
+- [x] DDE links in `.xlsb`, through their external link parts *(v0.6.5)*
+- [ ] VBA and embedded objects inside a `.ppt` (both live compressed inside the `PowerPoint Document` stream)
+- [ ] DDE links in a plain `.xls` (`SUPBOOK` and `EXTERNNAME` records); the test set's only DDE `.xls` is encrypted
 - [x] External relationships *(v0.5.16)* and DDE fields and links *(v0.5.18)*
 
 **Part of this arrived early, and the reason is worth keeping.** v0.5.10

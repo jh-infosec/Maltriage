@@ -1,5 +1,66 @@
 # Changelog
 
+## Version 0.6.5 - a link in a binary workbook, and two readers made honest
+
+### DDE links in .xlsb
+
+A `.xlsb` keeps its external links as BIFF12 records rather than XML, so the
+v0.5.18 pattern never saw one: the oletools `dde-test.xlsb` reported nothing.
+Each linked source opens with a `BrtBeginSupBook` record whose type says
+what it is, and type 1 is a DDE link whose first string is the application
+Excel starts. The second string, the topic, is the command line, and stays
+in the sample.
+
+The external link parts are found through the workbook's relationships, not
+by name, and a DDE-shaped record in a part some other relationship points at
+is not read as one. Relationship targets resolve as OPC resolves them:
+relative to the part, or from the root when they start with `/`.
+
+`dde-test.xlsb` now reports `ooxml_dde_command`, which makes every DDE file
+in the test set found, in all eight formats that have one.
+
+### The OOXML field reader was quadratic
+
+Found while reading the code this release extends, not by a report. The
+v0.5.18 reader built each field's instruction by adding every `instrText`
+piece to a string, which copies the string each time:
+
+```
+before   1.3 MiB of pieces   0.32 s     after   0.03 s
+         5.1 MiB             10.53 s            0.11 s
+                                       12.1 MiB   0.26 s
+```
+
+A part is read up to 8 MiB and a document may hold many parts, so one
+crafted `.docx` could hold a scan for minutes. The `.doc` reader in v0.6.2
+was written with lists from the start, after the same thought; this one
+predated it. Both now keep the pieces of an instruction as a list and join
+them once, when the field closes. A test holds a 6 MiB part under five
+seconds.
+
+### Both field readers read too-deep fields anyway
+
+Writing the test for the OOXML reader's new nesting cap found that the cap
+in the `.doc` reader did not do what it said. A field opened past the cap
+was skipped, but its text and its dividing mark were not: they went to the
+field around it. So a `DDEAUTO` too deep to read was read anyway, as part of
+its parent, and the "nested deeper" note never fired once the fields closed.
+Both readers now skip everything inside a field past the cap until it
+closes, and carry on reading after it.
+
+### Tests
+
+Ten new, 803 in all. Twelve mutants across the three changes. Five survived
+a first pass: two became tests (a skipped field that never stops being
+skipped, and a record read from a part that is not an external link), one
+was a guard that could not change the outcome and was removed rather than
+kept untested, and two are equivalent (ASCII XML cannot spell a two-byte
+BIFF12 record type, and a check made redundant by the stack it guards).
+
+One test of mine was itself wrong: it patched bytes inside a finished ZIP
+and changed nothing, so it failed on correct code. The writer takes a
+parameter now.
+
 ## Version 0.6.4 - macros that are cells
 
 Before VBA, Excel's macros were formulas on a sheet of their own, and Excel

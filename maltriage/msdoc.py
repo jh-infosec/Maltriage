@@ -170,20 +170,26 @@ def fields(document_text: str) -> tuple[list[dict[str, Any]], list[str]]:
     notes: list[str] = []
     #: Open fields, innermost last: [instruction pieces, result pieces, state].
     stack: list[list[Any]] = []
+    #: Fields opened past the cap and not yet closed. Everything inside one
+    #: is skipped until it closes: in v0.6.2 its text and dividing mark went
+    #: to the field around it, so a field too deep to read was read anyway,
+    #: as part of its parent, and the note below never fired once it closed.
     ignored = 0
+    went_deep = False
     for token in _FIELD_MARKS.split(document_text):
         if token == FIELD_BEGIN:
-            if len(stack) >= _MAX_NESTING:
+            if ignored or len(stack) >= _MAX_NESTING:
                 ignored += 1
+                went_deep = True
                 continue
             stack.append([[], [], "instr"])
+        elif ignored:
+            if token == FIELD_END:
+                ignored -= 1
         elif token == FIELD_SEPARATE:
             if stack:
                 stack[-1][2] = "result"
         elif token == FIELD_END:
-            if ignored:
-                ignored -= 1
-                continue
             if not stack:
                 continue
             pieces, result, _ = stack.pop()
@@ -195,7 +201,7 @@ def fields(document_text: str) -> tuple[list[dict[str, Any]], list[str]]:
                 stack[-1][0].append(value if value is not None else "".join(result))
         elif token and stack:
             stack[-1][0 if stack[-1][2] == "instr" else 1].append(token)
-    if ignored or len(stack) >= _MAX_NESTING:
+    if went_deep:
         notes.append(f"fields: nested deeper than {_MAX_NESTING}; the deeper ones were not read")
     out = []
     for name, server in found:

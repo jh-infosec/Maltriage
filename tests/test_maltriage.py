@@ -9468,3 +9468,114 @@ def test_an_xlsb_record_longer_than_255_bytes_is_read(write):
     report = analyse(write("book.xlsb", _xlsm([("visible", True)], ["Auto_Open" + "x" * 135],
                                                binary=True)))
     assert "xlm_auto_open" in _xlm(report)
+
+
+# DDE links in .xlsb, and the OOXML field reader made linear
+
+_EXTERNAL_LINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink"
+
+
+def _xlsb_link(sbt, server, topic, target="externalLinks/externalLink1.bin",
+               member="xl/externalLinks/externalLink1.bin", rel_type=_EXTERNAL_LINK_REL):
+    wide = lambda text: struct.pack("<I", len(text)) + text.encode("utf-16-le")
+    body = _brt(0x0168, struct.pack("<H", sbt) + wide(server) + wide(topic)) + _brt(0x0169, b"")
+    parts = [("[Content_Types].xml", b"<Types/>" + b" " * 100),
+             ("xl/workbook.bin", _brt(0x0083, b"") + b"\x00" * 64),
+             ("xl/_rels/workbook.bin.rels",
+              f'<Relationships><Relationship Id="rId9" Type="{rel_type}" '
+              f'Target="{target}"/></Relationships>'.encode()),
+             (member, body)]
+    return _zip_bytes(parts)
+
+
+def test_an_xlsb_dde_link_to_a_command_interpreter_is_found(write):
+    report = analyse(write("book.xlsb", _xlsb_link(1, "cmd", "/c topic_marker_3307")))
+    finding = _ooxml_findings(report)["ooxml_dde_command"]
+
+    assert finding["discriminator"] == "ddeLink"
+    assert "topic_marker_3307" not in json.dumps(report.to_dict(), default=str)
+    assert at_gate(report, "medium")
+
+
+def test_an_xlsb_link_to_a_workbook_is_not_dde(write):
+    report = analyse(write("book.xlsb", _xlsb_link(0, "C:\\books\\q.xlsb", "Sheet1")))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+def test_an_xlsb_dde_link_is_found_through_its_relationship(write):
+    """OPC names are the author's. An absolute target, to a part with no
+    `externalLink` in its name, is still the external link."""
+    report = analyse(write("book.xlsb", _xlsb_link(1, "cmd", "x", target="/data/q.bin",
+                                                     member="data/q.bin")))
+    assert "ooxml_dde_command" in _ooxml_findings(report)
+
+
+def test_a_broken_xlsb_link_record_is_not_fatal():
+    problems = []
+    body = _brt(0x0168, struct.pack("<H", 1) + struct.pack("<I", 3) + "cmd".encode("utf-16-le"))
+    assert xlm_module.dde_servers(body[:-2], problems) == []
+    assert problems
+
+
+def test_relationship_targets_resolve_like_opc():
+    resolve = archives_module._resolve_part
+    assert resolve("xl/_rels/workbook.bin.rels", "externalLinks/e.bin") == "xl/externalLinks/e.bin"
+    assert resolve("xl/_rels/workbook.bin.rels", "/data/e.bin") == "data/e.bin"
+    assert resolve("xl/_rels/workbook.bin.rels", "../e.bin") == "e.bin"
+
+
+def test_a_part_of_many_tiny_instruction_pieces_is_read_in_linear_time(tmp_path):
+    """Before v0.6.5 each piece was appended to a string, which is
+    quadratic: 5 MiB of pieces took 10.5 s, and a part may be 8 MiB."""
+    pieces = b"".join(b"<w:instrText>" + b"x" * 40 + b"</w:instrText>" for _ in range(150000))
+    part = tmp_path / "document.xml"
+    part.write_bytes(b'<w:fldChar w:fldCharType="begin"/>' + pieces)
+    started = time.perf_counter()
+    archives_module.dde_fields([{"path": str(part), "inside": "word/document.xml"}])
+    assert time.perf_counter() - started < 5
+
+
+def test_ooxml_fields_nest_only_so_deep(tmp_path, monkeypatch):
+    """Every open field holds a stack entry, so nesting is capped. A field
+    past the cap is not read; one inside it is."""
+    monkeypatch.setattr(archives_module, "_MAX_FIELD_NESTING", 2)
+    begin = '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    dde = '<w:r><w:instrText>DDEAUTO cmd "/c x"</w:instrText></w:r>'
+    shallow, deep = tmp_path / "a.xml", tmp_path / "b.xml"
+    shallow.write_text(begin + begin + dde + end + end, encoding="utf-8")
+    deep.write_text(begin + begin + begin + dde + end + end + end, encoding="utf-8")
+    read = lambda path: archives_module.dde_fields([{"path": str(path), "inside": "x.xml"}])
+    assert [f["field"] for f in read(shallow)["fields"]] == ["DDEAUTO"]
+    assert read(deep)["fields"] == []
+
+
+def test_a_doc_field_past_the_nesting_cap_is_not_read_as_its_parent(monkeypatch):
+    """In v0.6.2 a field too deep to read had its text credited to the field
+    around it, so it was read anyway, and the note never fired."""
+    monkeypatch.setattr(msdoc_module, "_MAX_NESTING", 2)
+    deep, notes = msdoc_module.fields('\x13\x13\x13 DDEAUTO cmd /c x\x15\x15\x15')
+    shallow, quiet = msdoc_module.fields('\x13\x13 DDEAUTO cmd /c x\x15\x15')
+
+    assert deep == [] and any("nested deeper than 2" in n for n in notes)
+    assert [f["field"] for f in shallow] == ["DDEAUTO"] and quiet == []
+
+
+def test_a_field_after_one_past_the_cap_is_read(tmp_path, monkeypatch):
+    """Skipping a field too deep to read must end when it closes, or every
+    field after it in the part goes unread."""
+    monkeypatch.setattr(archives_module, "_MAX_FIELD_NESTING", 1)
+    begin = '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    dde = '<w:r><w:instrText>DDEAUTO cmd "/c x"</w:instrText></w:r>'
+    part = tmp_path / "a.xml"
+    part.write_text(begin + begin + end + end + begin + dde + end, encoding="utf-8")
+    found = archives_module.dde_fields([{"path": str(part), "inside": "x.xml"}])["fields"]
+    assert [f["field"] for f in found] == ["DDEAUTO"]
+
+
+def test_only_external_link_parts_are_read_for_dde_links(write):
+    """A DDE-shaped record in a part some other relationship points at is
+    not an external link, and Excel would not treat it as one."""
+    report = analyse(write("book.xlsb", _xlsb_link(1, "cmd", "x", rel_type=_SHEET_REL)))
+    assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
