@@ -52,6 +52,7 @@ from maltriage import ole as ole_module
 from maltriage import vba as vba_module
 from maltriage import msdoc as msdoc_module
 from maltriage import xlm as xlm_module
+from maltriage import diff as diff_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -9901,3 +9902,131 @@ def test_presentation_objects_are_never_held_together(write):
 
     assert peak < 64 * 1048576
     assert any("past 67108864 bytes in all" in n for n in data["parse_errors"])
+
+
+# v0.7.0: two corpus runs compared by content
+
+def _run(records, rate=None, keys=None, selection=None):
+    """A corpus result with the given (sha, severity, keys, family) records."""
+    out = {"files": {"benign": len(records)}, "gate": {"false_positive_rate": rate},
+           "keys": keys or {}, "per_file": [
+               {"label": "benign", "sha256": sha * 8, "severity": severity, "keys": list(found),
+                "members": 0, "family": family} for sha, severity, found, family in records]}
+    if selection:
+        out["selected_extensions"] = selection
+    return out
+
+
+def test_a_diff_finds_what_changed_what_arrived_and_what_left():
+    old = _run([("a" * 8, "info", [], "pdf"), ("b" * 8, "low", ["yara_match"], "pdf"),
+                ("c" * 8, "info", [], "ooxml")])
+    new = _run([("a" * 8, "info", [], "pdf"), ("b" * 8, "info", [], "pdf"),
+                ("d" * 8, "medium", ["entropy_hotspot"], "pdf")])
+    result = diff_module.compare(old, new)
+
+    assert [c["sha256"][:8] for c in result["changed"]] == ["bbbbbbbb"]
+    assert result["changed"][0]["keys_removed"] == ["yara_match"]
+    assert result["added"]["files"] == 1 and result["added"]["gated"] == 1
+    assert result["removed"]["files"] == 1 and result["removed"]["families"] == {"ooxml": 1}
+
+
+def test_a_diff_counts_copies_as_files():
+    """Two copies of one content are two files, as in every corpus rate,
+    and losing one of them is a file removed."""
+    old = _run([("a" * 8, "info", [], "pdf")] * 2)
+    new = _run([("a" * 8, "info", [], "pdf")])
+    result = diff_module.compare(old, new)
+    assert result["files"] == [2, 1] and result["removed"]["files"] == 1
+
+
+def test_newly_held_files_come_first():
+    old = _run([("a" * 8, "medium", ["x"], "pdf"), ("b" * 8, "info", [], "pdf"),
+                ("c" * 8, "info", [], "pdf")])
+    new = _run([("a" * 8, "info", [], "pdf"), ("b" * 8, "low", ["y"], "pdf"),
+                ("c" * 8, "medium", ["z"], "pdf")])
+    result = diff_module.compare(old, new)
+    lines = diff_module.render(result).splitlines()
+
+    assert result["newly_gated"] == 1 and result["no_longer_gated"] == 1
+    assert [line.strip()[:4] for line in lines if line.startswith("    ")][:3] == ["cccc", "aaaa", "bbbb"]
+
+
+def test_the_diff_says_when_two_runs_looked_at_different_files():
+    old = _run([("a" * 8, "info", [], "pdf")], selection=[".pdf"])
+    new = _run([("a" * 8, "info", [], "pdf")], selection=[".pdf", ".docx"])
+    assert "selections differ: .pdf -> .pdf, .docx" in diff_module.render(diff_module.compare(old, new))
+
+
+def test_a_long_list_of_changes_is_cut_and_says_so():
+    old = _run([(f"{n:08x}", "info", [], "pdf") for n in range(30)])
+    new = _run([(f"{n:08x}", "low", ["k"], "pdf") for n in range(30)])
+    text = diff_module.render(diff_module.compare(old, new), show=5)
+    assert "and 25 more; the JSON has every one" in text
+
+
+@pytest.mark.parametrize("change, code", [
+    ("newly held", cli.EXIT_FINDINGS), ("added held", cli.EXIT_FINDINGS),
+    ("released", cli.EXIT_CLEAN), ("quiet", cli.EXIT_CLEAN)])
+def test_the_diff_fails_ci_only_on_new_flags(tmp_path, capsys, change, code):
+    base = [("a" * 8, "info", [], "pdf"), ("b" * 8, "medium", ["x"], "pdf")]
+    later = {
+        "newly held": [("a" * 8, "medium", ["x"], "pdf"), ("b" * 8, "medium", ["x"], "pdf")],
+        "added held": base + [("c" * 8, "medium", ["x"], "pdf")],
+        "released": [("a" * 8, "info", [], "pdf"), ("b" * 8, "info", [], "pdf")],
+        "quiet": base}[change]
+    old, new = tmp_path / "old.json", tmp_path / "new.json"
+    old.write_text(json.dumps(_run(base)), encoding="utf-8")
+    new.write_text(json.dumps(_run(later)), encoding="utf-8")
+    assert cli.main(["diff", str(old), str(new), "--fail-on-new-flags"]) == code
+    assert cli.main(["diff", str(old), str(new)]) == cli.EXIT_CLEAN
+
+
+@pytest.mark.parametrize("content, message", [
+    ('{"files": {}, "gate": {}}', "without --per-file"),
+    ('{"labels": {"benign": []}, "version": 1}', "not a corpus result"),
+    ("not json", "not JSON"),
+])
+def test_an_input_that_cannot_be_compared_is_a_usage_error(tmp_path, capsys, content, message):
+    bad, good = tmp_path / "bad.json", tmp_path / "good.json"
+    bad.write_text(content, encoding="utf-8")
+    good.write_text(json.dumps(_run([])), encoding="utf-8")
+    assert cli.main(["diff", str(bad), str(good)]) == cli.EXIT_USAGE
+    assert message in capsys.readouterr().err
+
+
+def test_a_diff_of_two_real_runs_carries_hashes_and_no_names(tmp_path):
+    """End to end through the corpus command: a file renamed between runs is
+    the same file, a file added is added, and nothing names either."""
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "first.bin").write_bytes(b"ordinary content one" * 40)
+    first = tmp_path / "one.json"
+    assert cli.main(["corpus", str(tmp_path), "--per-file", "--json", str(first), "-q"]) == cli.EXIT_CLEAN
+    (benign / "first.bin").rename(benign / "renamed.bin")
+    (benign / "second.bin").write_bytes(b"ordinary content two" * 40)
+    second = tmp_path / "two.json"
+    assert cli.main(["corpus", str(tmp_path), "--per-file", "--json", str(second), "-q"]) == cli.EXIT_CLEAN
+
+    out = tmp_path / "diff.json"
+    assert cli.main(["diff", str(first), str(second), "--json", str(out)]) == cli.EXIT_CLEAN
+    result = json.loads(out.read_text(encoding="utf-8"))
+    assert result["changed"] == [] and result["added"]["files"] == 1
+    text = out.read_text(encoding="utf-8")
+    assert "renamed" not in text and "first" not in text and str(tmp_path) not in text
+
+
+def test_a_diff_counts_a_copy_arriving_as_a_file_added():
+    old = _run([("a" * 8, "info", [], "pdf")])
+    new = _run([("a" * 8, "info", [], "pdf")] * 3)
+    assert diff_module.compare(old, new)["added"]["files"] == 2
+
+
+def test_a_severity_change_with_the_same_keys_is_a_change():
+    """What a release that raises a key's severity looks like: the same
+    findings on the same file, and the file newly held at the gate."""
+    old = _run([("a" * 8, "low", ["vba_auto_exec"], "ooxml")])
+    new = _run([("a" * 8, "medium", ["vba_auto_exec"], "ooxml")])
+    result = diff_module.compare(old, new)
+
+    assert result["changed"][0]["severity"] == ["low", "medium"]
+    assert result["newly_gated"] == 1

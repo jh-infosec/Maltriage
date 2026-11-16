@@ -344,6 +344,25 @@ The result carries counts and rates and no filenames. `--per-file` adds a
 record per file keyed by SHA-256, and is off unless asked for: a corpus
 directory is, by construction, a description of somebody's sample collection.
 
+```bash
+maltriage diff last-month.json today.json --fail-on-new-flags
+```
+
+Compares two corpus runs written with `--per-file`, by content: which files
+changed their findings or severity, which arrived, which left. A file renamed
+between runs is the same file, and two copies are two files, as in every rate
+above. With `--fail-on-new-flags` it exits 1 when a file is held at the gate
+that was not before, which is the check to put after a rule or severity
+change.
+
+```
+diff: 227 -> 237 file(s)
+  gate (medium+) on benign files: 6.2% -> 6.3%
+  in both runs: 227 file(s), 1 content(s) changed
+    41f0ffa7a5cd  benign  low -> info  -yara_match
+  added: 10 file(s) (ooxml 4, pdf 3, unknown 3); 1 held at the gate
+```
+
 Every `maltriage` above works as `python -m maltriage` if you would rather not
 install, or if the console script is not on your `PATH`.
 

@@ -414,7 +414,7 @@ precision and recall, so it comes before the classifier rather than after.
 - [x] A corpus of ordinary Windows binaries *(System32, in v0.4.3)*
 - [ ] Precision and recall, which need a labelled malicious corpus
 - [ ] False negatives introduced by known-good filtering (needs a corpus)
-- [ ] Report diff between two runs
+- [x] Report diff between two runs *(v0.7.0)*
 - [ ] A Program Files corpus, for the findings System32 cannot exercise
 - [x] YARA measured on Windows, in a 3.13 virtual environment *(v0.5.12)*
 - [x] A corpus of ordinary documents *(v0.5.7, v0.5.8)*

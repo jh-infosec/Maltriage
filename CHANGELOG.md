@@ -1,5 +1,51 @@
 # Changelog
 
+## Version 0.7.0 - what changed between two runs
+
+The first v0.7 item. Since v0.5.17 every release was checked the same way:
+run the document corpus again with `--per-file`, then compare the two JSON
+files by SHA-256 for files that changed their keys or severity, files added,
+and files gone. That was done by hand each time, and a check done by hand is
+the one that gets skipped when it matters.
+
+```
+maltriage diff OLD.json NEW.json [--json PATH] [--show N] [--fail-on-new-flags]
+```
+
+On the real document runs from 1 November, it reports exactly what the hand
+comparison found: one shared file whose `yara_match` disappeared (the run
+without YARA), and ten files added (three PDFs, four `.docx`, three cloud
+placeholder stubs), one of them held at the gate.
+
+### What it compares
+
+- **Content, not names.** The unit is the SHA-256 the per-file records are
+  keyed by, so a file renamed or moved between runs is the same file, and a
+  file edited is one gone and one added. Neither input carries a name or a
+  path, and neither does the output.
+- **Copies count.** Two copies of a content are two files, as in every rate
+  the corpus states, and one copy arriving or leaving is one file.
+- **Severity as well as keys.** A release that raises a key's severity
+  changes no keys on any file, and moves files across the gate. That is the
+  change a diff most needs to show, and a test holds it.
+- **Selections.** Two runs over different extension selections are two
+  different populations, and the diff says so above every number.
+
+Files newly held at the gate are listed first, then those released, then
+the rest, twenty by default; `--json` writes every one.
+
+### For CI
+
+`--fail-on-new-flags` exits 1 when a file the gate did not hold is now held,
+whether it changed or arrived. Released files and quiet runs exit 0. An
+input written without `--per-file`, or one that is not a corpus result at
+all (a manifest, say), is a usage error that says which and what to do.
+
+### Tests
+
+Fifteen new, 850 in all. Twelve mutants; two survived a first pass and
+became tests: a copy arriving, and a severity change with the same keys.
+
 ## Version 0.6.8 - a sweep for costs an author can multiply
 
 The readers doubled between v0.5.16 and v0.6.7, and v0.6.5 found a

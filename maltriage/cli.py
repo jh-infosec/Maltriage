@@ -444,6 +444,26 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     return EXIT_CLEAN
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    """Two corpus runs compared by content, for a person or for CI."""
+    from . import diff as diff_module
+    try:
+        old = diff_module.load(args.old)
+        new = diff_module.load(args.new)
+    except diff_module.DiffInputError as exc:
+        print(f"{APP_NAME}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    result = diff_module.compare(old, new)
+    if args.json:
+        args.json.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(diff_module.render(result, show=args.show))
+    if args.fail_on_new_flags and (result["newly_gated"] or result["added"]["gated"]):
+        # A file the gate now holds that it did not, counted by content:
+        # one that changed and is newly held, or one that is new and held.
+        return EXIT_FINDINGS
+    return EXIT_CLEAN
+
+
 def cmd_samples(args: argparse.Namespace) -> int:
     written = write_samples(args.directory)
     print(f"wrote {len(written)} synthetic sample(s) to {args.directory}")
@@ -536,6 +556,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="suppress human output")
     corpus.add_argument("-v", "--verbose", action="store_true")
     corpus.set_defaults(func=cmd_corpus)
+
+    diff = sub.add_parser(
+        "diff", help="compare two corpus runs written with --per-file",
+        description="Compare two corpus results file by file, by SHA-256: what "
+                    "changed its keys or severity, what was added, what went missing.")
+    diff.add_argument("old", type=Path, help="the earlier corpus --json file")
+    diff.add_argument("new", type=Path, help="the later corpus --json file")
+    diff.add_argument("--json", type=Path, metavar="PATH",
+                      help="also write the full comparison here, every hash included")
+    diff.add_argument("--show", type=int, default=20, metavar="N",
+                      help="changed files to list (default 20)")
+    diff.add_argument("--fail-on-new-flags", action="store_true",
+                      help="exit 1 when a file is held at the gate that was not before")
+    diff.set_defaults(func=cmd_diff)
 
     samples = sub.add_parser("samples", help="write synthetic test files")
     samples.add_argument("directory", type=Path)
