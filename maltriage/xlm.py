@@ -153,6 +153,11 @@ def from_parts(read: Callable[[str], bytes | None], names: list[str]) -> dict[st
     """
     out = _empty()
     lowered = {name.lower(): name for name in names}
+    #: Workbook parts already read. Member names compare without case, so
+    #: `workbook.xml.rels`, `Workbook.xml.rels` and `WORKBOOK.xml.rels` all
+    #: describe one workbook; before v0.6.8 each was read in full again, and
+    #: forty of them took 11 s and reported one macro sheet forty times.
+    done: set[str] = set()
     for rels in [n for n in names if n.lower().endswith(".rels")]:
         raw = read(rels)
         if raw is None:
@@ -168,6 +173,9 @@ def from_parts(read: Callable[[str], bytes | None], names: list[str]) -> dict[st
         # `xl/_rels/workbook.xml.rels` describes `xl/workbook.xml`.
         folder, _, leaf = rels.rpartition("/")
         source = f"{folder.rpartition('/')[0]}/{leaf[:-len('.rels')]}".lstrip("/")
+        if source.lower() in done:
+            continue
+        done.add(source.lower())
         part = lowered.get(source.lower())
         body = read(part) if part else None
         if body is None:

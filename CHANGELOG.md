@@ -1,5 +1,70 @@
 # Changelog
 
+## Version 0.6.8 - a sweep for costs an author can multiply
+
+The readers doubled between v0.5.16 and v0.6.7, and v0.6.5 found a
+quadratic field reader only because the code around it was being read for
+another reason. So this release is a deliberate pass over every reader,
+in two halves.
+
+### Fuzzing found nothing
+
+Every reader was fed damaged copies of valid input: the suite's fixtures,
+and the oletools test files written by Office, with bytes flipped, length
+fields set to 0, 0xFFFF, 0x7FFFFFFF and 0xFFFFFFFF, runs deleted and runs
+repeated. Ten targets, from the OLE2 reader as a whole down to the BIFF12
+record walker on its own:
+
+```
+cases          about 94,000 (five seeds)
+crashes        0 outside the errors each reader raises on purpose
+slower than 2s 0         worst single call 35 ms
+peak memory    at the configured read limits, nowhere else
+```
+
+That is the result a parser built on bounded walks should give, and it is
+also the limit of fuzzing: a random byte rarely builds the input that makes
+honest code do a lot of work. Every problem below was found by reading.
+
+### Reading found four
+
+| Where | What an author could do | Before | After |
+|---|---|---|---|
+| VBA stomping check (v0.6.7) | 4,096 compiled strings, each searched across a 4 MiB source | 8.9 s per module | 0.27 s |
+| VBA line count (v0.6.3) | a module of nothing but `Attribute` lines, popped from the front of a list | quadratic: 0.8 s at 2 MiB | 0.03 s at 4 MiB |
+| Excel 4 reader (v0.6.4) | forty relationship files differing only in case, each re-reading one workbook | 11.3 s, and one macro sheet reported forty times | 0.29 s, one sheet |
+| `.ppt` objects (v0.6.6) | thirty two objects of 8 MiB of zeros, returned as one list | 264 MiB from a 266 KiB file | 24 MiB |
+
+**The stomping check** now tokenizes the source once into its string
+literals and comments, as the p-code stores them (a doubled quote is one
+quote; a comment runs from its apostrophe to the end of the line), so a
+compiled string is a set lookup. One the tokenizer misses, a `Rem` comment
+for instance, falls back to a search of the source, and those are capped at
+64 per module. Past the cap the check says it came back short rather than
+calling the module either stomped or clean.
+
+**The Excel 4 reader** read every relationship file that named a macro
+sheet, and member names compare without case. Each workbook part is now
+read once, and the `.xlsb` DDE reader does the same for external links:
+two relationships to one link are one link.
+
+**The `.ppt` reader** returns its objects one at a time, and all of them
+together may inflate to `ppt_max_total_bytes` (64 MiB), past which it stops
+and says so.
+
+### The pattern
+
+Three of the four are the same mistake: a bound on each item and none on
+how many items, which is the lesson the PE extractor learned about its
+section table. A cap on
+a module, a part or an object is not a cap on the work when the number of
+them is also the author's to choose.
+
+### Tests
+
+Seven new, 835 in all, each holding one of the costs above. All seven fail
+against v0.6.7.
+
 ## Version 0.6.7 - what the compiled lines say
 
 v0.6.3 caught a stomped VBA module when its source could not account for

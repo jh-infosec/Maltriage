@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import struct
 import zlib
-from typing import Any
+from typing import Any, Iterator
 
 EX_OLE_OBJ_STG = 0x1011
 CONTAINER = 0x0F
@@ -36,14 +36,18 @@ _MAX_DEPTH = 32
 
 
 def objects(stream: bytes, max_objects: int, max_bytes: int,
-            problems: list[str]) -> list[bytes]:
+            problems: list[str], max_total: int | None = None) -> Iterator[bytes]:
     """Every compound file stored in an `ExOleObjStg` record, inflated.
 
     Walked iteratively, with a depth limit and a record budget: container
     lengths are fields in the file, and a container that claims to hold
     itself is a recursion on request.
     """
-    found: list[bytes] = []
+    # One at a time, never held together: until v0.6.8 this returned a
+    # list, and 32 objects of 8 MiB of zeros, 266 KiB on disk, held 264 MiB.
+    # `max_total` bounds what all of them may inflate to between them.
+    yielded = 0
+    spent = 0
     pending = [(0, len(stream), 0)]
     records = 0
     while pending:
@@ -53,7 +57,7 @@ def objects(stream: bytes, max_objects: int, max_bytes: int,
             records += 1
             if records > _MAX_RECORDS:
                 problems.append(f"ppt: more than {_MAX_RECORDS} records; the walk stopped")
-                return found
+                return
             packed, kind, length = struct.unpack_from("<HHI", stream, position)
             body_start = position + 8
             body_end = min(body_start + length, end)
@@ -63,17 +67,22 @@ def objects(stream: bytes, max_objects: int, max_bytes: int,
                 else:
                     pending.append((body_start, body_end, depth + 1))
             elif kind == EX_OLE_OBJ_STG:
-                if len(found) >= max_objects:
+                if yielded >= max_objects:
                     problems.append(f"ppt: more than {max_objects} embedded objects; "
                                     "the rest were not read")
-                    return found
-                data = _inflate(stream[body_start:body_end], packed >> 4,
-                                max_bytes, problems)
+                    return
+                room = max_bytes if max_total is None else min(max_bytes, max_total - spent)
+                if room <= 0:
+                    problems.append(f"ppt: embedded objects past {max_total} bytes in all "
+                                    "were not read")
+                    return
+                data = _inflate(stream[body_start:body_end], packed >> 4, room, problems)
                 if data is not None and data[:8] == OLE_MAGIC:
-                    found.append(data)
+                    spent += len(data)
+                    yielded += 1
+                    yield data
             # Always at least the header, so a zero length cannot stall.
             position = body_start + length
-    return found
 
 
 def _inflate(body: bytes, instance: int, max_bytes: int,

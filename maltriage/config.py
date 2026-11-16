@@ -310,6 +310,7 @@ DEFAULT_CONFIG = {
     # compound files inside one stream.
     "ppt_max_objects": 64,
     "ppt_max_object_bytes": 16777216,
+    "ppt_max_total_bytes": 67108864,
     "archive_max_member_bytes": 67108864,
 
     # Wall-clock seconds for the recursion. The known gap `architecture.md`
@@ -599,6 +600,7 @@ def validate_config(config):
     check_int("doc_max_pieces")
     check_int("ppt_max_objects")
     check_int("ppt_max_object_bytes")
+    check_int("ppt_max_total_bytes")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

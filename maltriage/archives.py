@@ -1046,6 +1046,7 @@ def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:
     # relationships, as the workbook is, because the names are the author's.
     read = _staged_reader(staged)
     names = {str(m.get("inside", "")).lower(): str(m.get("inside", "")) for m in staged}
+    linked: set[str] = set()
     for rels in [n for n in names.values() if n.lower().endswith(".rels")]:
         raw = read(rels)
         if raw is None:
@@ -1059,6 +1060,12 @@ def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:
             target = _resolve_part(rels, attributes.get("Target", ""))
             if not target.lower().endswith(".bin") or target.lower() not in names:
                 continue
+            # Once per part, however many relationships name it: two
+            # relationships to one link are one link, and reading it again
+            # for each was work an author could multiply.
+            if target.lower() in linked:
+                continue
+            linked.add(target.lower())
             body = read(names[target.lower()])
             if body is None:
                 continue

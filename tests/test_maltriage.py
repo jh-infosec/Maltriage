@@ -22,6 +22,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 import shlex
 import statistics
@@ -9817,3 +9818,86 @@ def test_literals_are_read_on_word_boundaries_only():
     A length and text that only line up at an odd offset are not a literal."""
     pcode = _pcode(1, bodies=[b"\x00" + struct.pack("<H", 4) + b"abcd" + b"\x00"])
     assert vba_module.pcode_literals(pcode, 0xAF) == []
+
+
+# v0.6.8: the hardening sweep. Each test holds one cost an author could
+# multiply, found by reading the readers after fuzzing found no crashes.
+
+def test_a_module_of_attribute_lines_is_counted_in_linear_time():
+    """Popping header lines from the front of a list shifts it every time:
+    a 2 MiB module of attributes took 0.8 s, and the cap is 4 MiB."""
+    started = time.perf_counter()
+    vba_module.source_lines("Attribute VB_x = 1\r\n" * 200000)
+    assert time.perf_counter() - started < 1
+
+
+def test_checking_compiled_strings_is_bounded():
+    """4,096 strings each searched across a 4 MiB source took 8.9 s."""
+    rng = random.Random(1)
+    body = "".join(rng.choice("abcdefghij ") for _ in range(4_000_000))
+    literals = [f"zz{n:05d}" for n in range(4096)]
+    source = 'Attribute VB_Name = "M"\r\n' + body + "\r\n" + "\r\n".join(
+        f'x = "{literal}"' for literal in literals)
+    low, _, _ = vba_module.source_lines(source)
+    started = time.perf_counter()
+    assert vba_module.stomped(low, source, literals) is None
+    assert time.perf_counter() - started < 3
+
+
+def test_strings_the_tokenizer_misses_are_searched_a_bounded_number_of_times():
+    """A `Rem` comment is not tokenized, so it falls back to a search, and
+    those are capped. Past the cap the check says it came back short."""
+    source = 'Attribute VB_Name = "M"\r\n' + "".join(f"Rem note {n:04d}\r\n" for n in range(100))
+    low, _, _ = vba_module.source_lines(source)
+    found = [f" note {n:04d}" for n in range(10)]
+    assert vba_module.stomped(low, source, found) is None
+    problems = []
+    many = [f" note {n:04d}" for n in range(100)]
+    assert vba_module.stomped(low, source, many, problems) is None
+    assert any("could be checked" in p for p in problems)
+
+
+def test_the_source_is_tokenized_as_vba_writes_it():
+    strings = vba_module.source_strings('MsgBox "say ""hi"" now" \' tail\r\nx = "a" & "b"')
+    assert strings == {"say \"hi\" now", " tail", "a", "b"}
+
+
+def test_one_workbook_named_by_many_relationship_files_is_read_once(write):
+    """Member names compare without case, so `workbook.xml.rels` and its
+    case variants all describe one workbook. Each was read in full again:
+    forty took 11 s and reported one macro sheet forty times."""
+    rel = (f'<Relationships><Relationship Id="rId1" Type="{_MACROSHEET_REL}" '
+           'Target="macrosheets/sheet1.xml"/></Relationships>').encode()
+    parts = {"xl/workbook.xml": b'<workbook><sheets><sheet name="M" sheetId="1" r:id="rId1"/>'
+                                b'</sheets></workbook>'}
+    for variant in ("workbook", "Workbook", "WORKBOOK", "WorkBook", "wORKBOOK"):
+        parts[f"xl/_rels/{variant}.xml.rels"] = rel
+    found = xlm_module.from_parts(parts.get, list(parts))
+    assert len(found["macro_sheets"]) == 1
+
+
+def test_one_external_link_named_twice_is_one_link(write):
+    blob = _xlsb_link(1, "cmd", "x")
+    with zipfile.ZipFile(io.BytesIO(blob)) as source:
+        parts = [(name, source.read(name)) for name in source.namelist()]
+    rels = (f'<Relationships><Relationship Id="rId8" Type="{_EXTERNAL_LINK_REL}" '
+            'Target="externalLinks/externalLink1.bin"/><Relationship Id="rId9" '
+            f'Type="{_EXTERNAL_LINK_REL}" Target="/xl/externalLinks/externalLink1.bin"/>'
+            '</Relationships>').encode()
+    parts = [(n, rels if n.endswith("workbook.bin.rels") else d) for n, d in parts]
+    report = analyse(write("book.xlsb", _zip_bytes(parts)))
+    assert _ooxml_findings(report)["ooxml_dde_command"]["evidence"][0]["value"] == 1
+
+
+def test_presentation_objects_are_never_held_together(write):
+    """Thirty two objects of 8 MiB of zeros, 266 KiB on disk, held 264 MiB
+    when they were returned as a list."""
+    inner = _cfb({"\x01Ole10Native": b"n" * 600})[0] + b"\x00" * (8 * 1048576)
+    blob = _ppt(*[_ppt_object(inner)] * 32)
+    tracemalloc.start()
+    data = ole_module.describe(blob)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert peak < 64 * 1048576
+    assert any("past 67108864 bytes in all" in n for n in data["parse_errors"])

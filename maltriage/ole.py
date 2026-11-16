@@ -450,9 +450,11 @@ def describe(data, config: dict[str, Any] | None = None, _depth: int = 0) -> dic
         stream = read_path("PowerPoint Document", cap, "doc_max_stream_bytes", "ppt")
         if stream is not None:
             found = ppt.objects(stream, config_int(config, "ppt_max_objects", 64),
-                                config_int(config, "ppt_max_object_bytes", 16777216), problems)
-            out["ppt"] = {"objects": len(found)}
+                                config_int(config, "ppt_max_object_bytes", 16777216), problems,
+                                config_int(config, "ppt_max_total_bytes", 67108864))
+            out["ppt"] = {"objects": 0}
             for number, inner in enumerate(found, start=1):
+                out["ppt"]["objects"] = number
                 try:
                     sub = describe(inner, config, _depth + 1)
                 except OleFormatError as exc:

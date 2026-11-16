@@ -358,8 +358,13 @@ def source_lines(source: str) -> tuple[int, int, bool]:
     to be wrong in.
     """
     lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    while lines and lines[0].startswith("Attribute "):
-        lines.pop(0)
+    # Sliced, not popped one at a time from the front: each pop shifts the
+    # whole list, and a module of nothing but attribute lines made that
+    # quadratic (a 2 MiB module took 0.8 s before v0.6.8).
+    first = 0
+    while first < len(lines) and lines[first].startswith("Attribute "):
+        first += 1
+    lines = lines[first:]
     high = len(lines)
     plain = [line for line in lines if not line.lstrip().startswith("Attribute ")]
     while plain and not plain[-1].strip():
@@ -374,8 +379,51 @@ def source_lines(source: str) -> tuple[int, int, bool]:
     return logical, max(high, len(plain)), has_code
 
 
+#: Substring searches allowed per module for strings the tokenizer did not
+#: find. Each one reads the whole source, so this is what bounds the check.
+_FALLBACK_SEARCHES = 64
+
+
+def source_strings(source: str) -> set[str]:
+    """Every string literal and comment in the source, as the p-code holds
+    them: a literal unescaped (`""` is one quote), a comment from after its
+    apostrophe to the end of the line. One pass, so checking a compiled
+    string against them is a set lookup rather than a search of the source.
+    """
+    found: set[str] = set()
+    index, size = 0, len(source)
+    while index < size:
+        char = source[index]
+        if char == '"':
+            end = index + 1
+            pieces = []
+            while end < size:
+                if source[end] == '"':
+                    if end + 1 < size and source[end + 1] == '"':
+                        pieces.append('"')
+                        end += 2
+                        continue
+                    break
+                if source[end] in "\r\n":
+                    break
+                pieces.append(source[end])
+                end += 1
+            found.add("".join(pieces))
+            index = end + 1
+        elif char == "'":
+            end = index + 1
+            while end < size and source[end] not in "\r\n":
+                end += 1
+            found.add(source[index + 1:end])
+            index = end
+        else:
+            index += 1
+    return found
+
+
 def stomped(compiled: int | None, source: str,
-            literals: list[str] | None = None) -> str | None:
+            literals: list[str] | None = None,
+            problems: list[str] | None = None) -> str | None:
     """Why the compiled code is not the source shown, or `None`.
 
     Only when there is compiled code with lines in it. A module whose
@@ -394,9 +442,27 @@ def stomped(compiled: int | None, source: str,
     # What it cannot keep without keeping the payload is the payload's
     # strings: the URL, the command line, the encoded blob. A literal is
     # checked as written in the source too, with its quotes doubled.
-    for literal in literals or ():
-        if literal not in source and literal.replace('"', '""') not in source:
-            return "literals differ"
+    #
+    # The source is tokenized once and most strings are found in that set.
+    # A string the tokenizer missed (a `Rem` comment, say) falls back to a
+    # search of the source, and those are capped: in v0.6.7 every string
+    # searched the whole source, and 4,096 strings against a 4 MiB module
+    # took 8.9 s. Past the cap the check says it came back short rather
+    # than guessing either way.
+    if literals:
+        known = source_strings(source)
+        searches = 0
+        for literal in dict.fromkeys(literals):
+            if literal in known:
+                continue
+            searches += 1
+            if searches > _FALLBACK_SEARCHES:
+                if problems is not None:
+                    problems.append(f"vba: more compiled strings than {_FALLBACK_SEARCHES} "
+                                    "could be checked against the source")
+                return None
+            if literal not in source and literal.replace('"', '""') not in source:
+                return "literals differ"
     return None
 
 
@@ -478,7 +544,7 @@ def extract(read: Callable[[str], bytes | None], config_caps: dict[str, int]) ->
         record["pcode_literals"] = None if literals is None else len(literals)
         # A source cut at the cap has fewer lines than it should, which is
         # not the same thing as a source that was replaced.
-        reason = None if cut else stomped(compiled, text, literals)
+        reason = None if cut else stomped(compiled, text, literals, out["problems"])
         record["stomped"] = reason
         if reason:
             out["stomped"].append(reason)
