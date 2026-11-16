@@ -1,5 +1,80 @@
 # Changelog
 
+## Version 0.6.4 - macros that are cells
+
+Before VBA, Excel's macros were formulas on a sheet of their own, and Excel
+still runs them. From 2020 to 2022 they were how a large share of malicious
+workbooks ran (Qakbot and Emotet among them), because a scanner looking for
+a VBA project finds none: the code is cells. Until this release maltriage
+reported nothing on any of them. The oletools test set has one harmless
+Excel 4 sample saved six ways, and v0.6.3 said nothing about any of the six.
+
+### Three facts, no formula evaluation
+
+- **A macro sheet exists.** In a `.xls` the sheet table marks its type, and
+  so does the sheet's own BOF record. They are separate fields, and either
+  is enough here, since a reader trusting one would miss a file that set
+  only the other. In a `.xlsm` or `.xlsb` the workbook's relationships point
+  at a `macrosheets/` part.
+- **It is hidden, or very hidden.** Very hidden is a state Excel's own
+  menus cannot undo, which is what a sheet nobody is meant to see is set to.
+  The finding says how many of each.
+- **A name starting `Auto_Open` points into the workbook.** Excel runs it on
+  open. It matches the prefix, so `auto_open2` and `AUTO_OPENxyz` run too,
+  and droppers use exactly that; `MyAuto_Open` and `Auto_Close` do not.
+
+| Key | When | Severity |
+|---|---|---|
+| `xlm_macro_sheet` | any Excel 4.0 macro sheet | `low` |
+| `xlm_auto_open` | a macro sheet, and a name Excel runs on open | `medium` |
+
+The split is the VBA one. A macro sheet in an old finance workbook is
+ordinary; one Excel runs because the file was opened is what the campaigns
+shipped. An `Auto_Open` name with no macro sheet is nothing.
+
+The formulas never reach the report. A test plants a marker in a macro
+sheet and checks the whole report for it.
+
+### Three containers, one answer
+
+A `.xls` is BIFF records in the `Workbook` stream (`Book` for Excel 5, whose
+names start a byte earlier). A `.xlsm` is XML, read by local name so the
+relationship prefix is the author's choice, with the workbook found through
+its relationships rather than by name. A `.xlsb` is BIFF12, binary records
+whose type and size are variable-length integers. Each reader returns the
+same shape and one function writes the findings, and a test saves one
+workbook all three ways and checks the three reports say the same thing.
+
+### Measured on the real samples
+
+```
+excel4_sample_macro.xls                 xlm_auto_open  xlm_macro_sheet
+excel4_sample_macro.xlt                 xlm_auto_open  xlm_macro_sheet
+excel4_sample_macro_excel5_format.xls   xlm_auto_open  xlm_macro_sheet
+excel4_sample_macro.xlsm                xlm_auto_open  xlm_macro_sheet
+excel4_sample_macro.xltm                xlm_auto_open  xlm_macro_sheet
+excel4_sample_macro.xlsb                xlm_auto_open  xlm_macro_sheet
+```
+
+All six at the gate. **olevba reports the first three and not the last
+three**: it does not look for macro sheets in OOXML. Nothing fired on the 15
+other workbooks in the set.
+
+### `.xls` encryption
+
+A `FILEPASS` record in the workbook globals means everything after it is
+encrypted, the sheet table included. It is now `ole_encrypted`, and the
+reader stops there rather than reading ciphertext as sheet types. All three
+encrypted `.xls` files in the test set report it; none did before.
+
+### Tests
+
+Twenty one new, 793 in all. Fifteen mutants; one survived a first pass and
+taught something. A BIFF12 decoder that forgets to clear the continuation
+bit reads a two-byte size correctly whenever the second byte is odd, and a
+first test record of 431 bytes happened to have an odd one. The test now
+uses 301 bytes, which separates them, and says why.
+
 ## Version 0.6.3 - the code that runs is not the code shown
 
 Office stores every VBA module twice: as compiled p-code and as source.

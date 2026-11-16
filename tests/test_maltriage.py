@@ -49,6 +49,7 @@ from maltriage import archives as archives_module
 from maltriage import ole as ole_module
 from maltriage import vba as vba_module
 from maltriage import msdoc as msdoc_module
+from maltriage import xlm as xlm_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -9229,3 +9230,241 @@ def test_the_header_attributes_are_not_lines_of_code(write):
     source = ('Attribute VB_Name = "Module1"\r\nAttribute VB_Base = "x"\r\n'
               'Attribute VB_Creatable = False\r\n' + _HONEST.split("\r\n", 1)[1])
     assert _vba(_stomp_report(write, source, 6))["modules"][0]["stomped"] == "line count differs"
+
+
+# Excel 4.0 macros: macro sheets, and Auto_Open
+#
+# The same workbook can be saved three ways, BIFF records in a .xls, XML in
+# a .xlsm, BIFF12 in a .xlsb, and must say the same thing in each. Checked
+# during development against the oletools Excel 4 samples in six formats,
+# three of which olevba does not report.
+
+def _biff_record(kind, body=b""):
+    return struct.pack("<HH", kind, len(body)) + body
+
+
+def _biff_name(name=None, builtin=None, biff8=True):
+    if builtin is not None:
+        flags, text = 0x0020, bytes([builtin])
+    else:
+        flags, text = 0, name.encode("latin-1")
+    head = struct.pack("<HBBHHHBBBB", flags, 0, len(text), 0, 0, 0, 0, 0, 0, 0)
+    return _biff_record(0x0018, head + (b"\x00" if biff8 else b"") + text)
+
+
+def _workbook_stream(sheets, names=(), biff8=True, filepass=False):
+    """`sheets` is a list of (state, sheet_type, bof_type)."""
+    version = 0x0600 if biff8 else 0x0500
+    bof = lambda kind: _biff_record(0x0809, struct.pack("<HH", version, kind) + b"\x00" * 12)
+    head = bof(0x0005) + (_biff_record(0x002F, b"\x00" * 6) if filepass else b"")
+    tables = [lambda offset, s=s: _biff_record(0x0085, struct.pack("<IBB", offset, s[0], s[1])
+                                                + b"\x05\x00Sheet") for s in sheets]
+    table_size = sum(len(t(0)) for t in tables)
+    name_bytes = b"".join(names)
+    globals_size = len(head) + table_size + len(name_bytes) + 4
+    bodies, offsets, cursor = [], [], globals_size
+    for _, _, bof_type in sheets:
+        body = bof(bof_type) + _biff_record(0x000A)
+        offsets.append(cursor)
+        bodies.append(body)
+        cursor += len(body)
+    return (head + b"".join(t(o) for t, o in zip(tables, offsets)) + name_bytes
+            + _biff_record(0x000A) + b"".join(bodies))
+
+
+def _xls(write, sheets, names=(), name="book.xls", **kwargs):
+    stream = "Workbook" if kwargs.get("biff8", True) else "Book"
+    return analyse(write(name, _cfb({stream: _workbook_stream(sheets, names, **kwargs)})[0]))
+
+
+_MACRO, _WORKSHEET = (0, 0x01, 0x0040), (0, 0x00, 0x0010)
+
+
+def _xlm(report):
+    def walk(node):
+        yield node
+        for child in node.children:
+            yield from walk(child)
+    return {f["key"]: f for node in walk(report) for f in node.findings
+            if f["key"].startswith("xlm_")}
+
+
+def test_a_macro_sheet_that_runs_on_open_reaches_the_gate(write):
+    report = _xls(write, [_MACRO, _WORKSHEET], [_biff_name(builtin=0x01)])
+    findings = _xlm(report)
+
+    assert findings["xlm_auto_open"]["severity"] == "medium"
+    assert findings["xlm_macro_sheet"]["severity"] == "low"
+    assert at_gate(report, "medium")
+
+
+def test_a_macro_sheet_alone_stays_low(write):
+    """Old finance workbooks still carry them."""
+    report = _xls(write, [_MACRO, _WORKSHEET])
+    assert set(_xlm(report)) == {"xlm_macro_sheet"}
+    assert not at_gate(report, "medium")
+
+
+def test_auto_open_without_a_macro_sheet_is_nothing(write):
+    assert _xlm(_xls(write, [_WORKSHEET], [_biff_name(builtin=0x01)])) == {}
+
+
+def test_a_very_hidden_macro_sheet_says_so(write):
+    report = _xls(write, [(2, 0x01, 0x0040), (1, 0x01, 0x0040)])
+    detail = _xlm(report)["xlm_macro_sheet"]["detail"]
+
+    assert "1 very hidden" in detail and "1 hidden" in detail
+
+
+def test_a_sheet_whose_own_header_says_macro_is_a_macro_sheet(write):
+    """The sheet table and the sheet's BOF are separate fields."""
+    assert "xlm_macro_sheet" in _xlm(_xls(write, [(0, 0x00, 0x0040)]))
+
+
+@pytest.mark.parametrize("name, runs", [
+    ("Auto_Open", True), ("auto_open2", True), ("AUTO_OPENxyz", True),
+    ("MyAuto_Open", False), ("Auto_Close", False),
+])
+def test_excel_runs_any_name_starting_auto_open(write, name, runs):
+    report = _xls(write, [_MACRO], [_biff_name(name)])
+    assert ("xlm_auto_open" in _xlm(report)) is runs
+
+
+def test_an_excel_5_workbook_is_read(write):
+    """BIFF5 has no encoding byte before a name, so it starts one earlier."""
+    report = _xls(write, [_MACRO], [_biff_name(builtin=0x01, biff8=False)], biff8=False)
+    assert "xlm_auto_open" in _xlm(report)
+
+
+def test_an_encrypted_xls_says_so_and_judges_nothing_after(write):
+    report = _xls(write, [_MACRO], [_biff_name(builtin=0x01)], filepass=True)
+
+    assert "ole_encrypted" in _ole_findings(report)
+    assert _xlm(report) == {}
+    assert any("encrypted" in note for note in report.thin().values())
+
+
+def test_the_workbook_globals_are_walked_a_bounded_number_of_records(write, monkeypatch):
+    monkeypatch.setattr(xlm_module, "_MAX_RECORDS", 5)
+    stream = _biff_record(0x0809, struct.pack("<HH", 0x0600, 5)) + _biff_record(0x0012, b"\x00\x00") * 50
+    data = xlm_module.from_biff(stream)
+    assert any("more than 5 records" in note for note in data["problems"])
+
+
+_MACROSHEET_REL = "http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet"
+_SHEET_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+
+
+def _xlsm(sheets, names=(), workbook="xl/workbook.xml", prefix="r", binary=False):
+    """`sheets` is a list of (state, macro). Saved as .xlsm, or as .xlsb."""
+    rels, entries, records = [], [], b""
+    for index, (state, macro) in enumerate(sheets, start=1):
+        target = f"{'macrosheets' if macro else 'worksheets'}/sheet{index}.{'bin' if binary else 'xml'}"
+        rels.append(f'<Relationship Id="rId{index}" Type="{_MACROSHEET_REL if macro else _SHEET_REL}" '
+                    f'Target="{target}"/>')
+        entries.append(f'<sheet name="S{index}" sheetId="{index}" {prefix}:id="rId{index}"'
+                       + (f' state="{state}"' if state != "visible" else "") + "/>")
+        rid = f"rId{index}".encode("utf-16-le")
+        sheet_name = f"S{index}".encode("utf-16-le")
+        code = {"visible": 0, "hidden": 1, "veryHidden": 2}[state]
+        records += _brt(0x009C, struct.pack("<II", code, index) + struct.pack("<I", len(rid) // 2)
+                        + rid + struct.pack("<I", len(sheet_name) // 2) + sheet_name)
+    for name in names:
+        encoded = name.encode("utf-16-le")
+        records += _brt(0x0027, struct.pack("<IBI", 0x20, 0, 0xFFFFFFFF)
+                        + struct.pack("<I", len(encoded) // 2) + encoded)
+    folder, leaf = workbook.rsplit("/", 1)
+    if binary:
+        leaf = leaf.replace(".xml", ".bin")
+        body = records
+    else:
+        defined = "".join(f'<definedName name="{n}">S1!$A$1</definedName>' for n in names)
+        body = ('<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/'
+                f'spreadsheetml/2006/main" xmlns:{prefix}="http://schemas.openxmlformats.org/'
+                f'officeDocument/2006/relationships"><sheets>{"".join(entries)}</sheets>'
+                + (f"<definedNames>{defined}</definedNames>" if names else "") + "</workbook>").encode()
+    parts = [("[Content_Types].xml", b"<Types/>" + b" " * 100),
+             (f"{folder}/{leaf}", body),
+             (f"{folder}/_rels/{leaf}.rels",
+              f'<Relationships>{"".join(rels)}</Relationships>'.encode())]
+    parts += [(f"{folder}/{'macrosheets' if m else 'worksheets'}/sheet{i}.{'bin' if binary else 'xml'}",
+               b"<xm:macrosheet>formula_marker_4410</xm:macrosheet>" + b" " * 80)
+              for i, (_, m) in enumerate(sheets, start=1)]
+    return _zip_bytes(parts)
+
+
+def _brt(kind, body):
+    def varint(value, width):
+        out = bytearray()
+        for _ in range(width):
+            byte = value & 0x7F
+            value >>= 7
+            out.append(byte | (0x80 if value else 0))
+            if not value:
+                break
+        return bytes(out)
+    return varint(kind, 2) + varint(len(body), 4) + body
+
+
+def test_an_xlsm_macro_sheet_that_runs_on_open_is_found(write):
+    report = analyse(write("book.xlsm", _xlsm([("veryHidden", True), ("visible", False)],
+                                               ["_xlnm.Auto_Open"])))
+    findings = _xlm(report)
+
+    assert findings["xlm_auto_open"]["severity"] == "medium"
+    assert "1 very hidden" in findings["xlm_macro_sheet"]["detail"]
+
+
+def test_an_xlsb_macro_sheet_that_runs_on_open_is_found(write):
+    """BIFF12: a record type of 0x9C needs two bytes of its variable-length
+    header, which is what this exercises."""
+    report = analyse(write("book.xlsb", _xlsm([("veryHidden", True)], ["Auto_Open"], binary=True)))
+    findings = _xlm(report)
+
+    assert "xlm_auto_open" in findings
+    assert "1 very hidden" in findings["xlm_macro_sheet"]["detail"]
+
+
+def test_a_workbook_part_with_another_name_is_found(write):
+    """OPC finds the workbook through its relationships."""
+    report = analyse(write("book.xlsm", _xlsm([("visible", True)], ["_xlnm.Auto_Open"],
+                                               workbook="data/main.xml")))
+    assert "xlm_auto_open" in _xlm(report)
+
+
+def test_the_relationship_prefix_is_the_authors_choice(write):
+    report = analyse(write("book.xlsm", _xlsm([("veryHidden", True)], prefix="q")))
+    assert "1 very hidden" in _xlm(report)["xlm_macro_sheet"]["detail"]
+
+
+def test_a_workbook_says_the_same_thing_however_it_was_saved(write):
+    """One question, one computation: three containers, one detail."""
+    xls = _xls(write, [(2, 0x01, 0x0040), _WORKSHEET], [_biff_name(builtin=0x01)])
+    xlsm = analyse(write("b.xlsm", _xlsm([("veryHidden", True), ("visible", False)], ["_xlnm.Auto_Open"])))
+    xlsb = analyse(write("b.xlsb", _xlsm([("veryHidden", True), ("visible", False)], ["_xlnm.Auto_Open"],
+                                          binary=True)))
+    details = {key: {_xlm(r)[key]["detail"] for r in (xls, xlsm, xlsb)}
+               for key in ("xlm_macro_sheet", "xlm_auto_open")}
+    assert all(len(d) == 1 for d in details.values())
+
+
+def test_a_broken_xlsb_record_is_said_and_not_fatal():
+    problems = []
+    sheets, names = xlm_module._biff12(_brt(0x009C, b"\x00" * 8)[:-3], problems)
+    assert any("runs past the end" in p for p in problems)
+
+
+def test_the_formulas_never_reach_the_report(write):
+    report = analyse(write("book.xlsm", _xlsm([("veryHidden", True)], ["_xlnm.Auto_Open"])))
+    text = json.dumps(report.to_dict(), default=str)
+    assert "formula_marker_4410" not in text
+
+
+def test_an_xlsb_record_longer_than_255_bytes_is_read(write):
+    """A 301 byte record: its size takes a second varint byte, of 2. A
+    decoder that kept the first byte's continuation bit would read 429 and
+    lose step; with an odd second byte the two happen to agree, which is
+    why the length here is chosen and not round."""
+    report = analyse(write("book.xlsb", _xlsm([("visible", True)], ["Auto_Open" + "x" * 135],
+                                               binary=True)))
+    assert "xlm_auto_open" in _xlm(report)

@@ -53,6 +53,7 @@ from typing import Any
 from .base import RandomAccessExtractor
 from .config import config_bool, config_int, config_list
 from .models import mk_finding
+from . import xlm
 
 #: Families this extractor will open. RAR and 7z are recognised by the
 #: signature table and deliberately not opened: both need a third-party
@@ -384,6 +385,10 @@ class ArchiveExtractor(RandomAccessExtractor):
             # Read now, while the parts are still staged: the directory is
             # deleted once the members have been analysed.
             data["relationships"] = external_relationships(data["staged"])
+            sheets = xlm.from_parts(_staged_reader(data["staged"]),
+                                    [str(m.get("inside", "")) for m in data["staged"]])
+            data["parse_errors"].extend(sheets["problems"])
+            data["xlm"] = xlm.describe(sheets)
             data["dde"] = dde_fields(data["staged"])
             if data["dde"]["partial_parts"]:
                 data["parse_errors"].append(
@@ -613,6 +618,7 @@ class ArchiveExtractor(RandomAccessExtractor):
 
         out.extend(dde_findings(self.name, "ooxml",
                                 (data.get("dde") or {}).get("fields") or []))
+        out.extend(xlm.findings(self.name, data.get("xlm") or {}))
 
         if data.get("macro_project"):
             # Both at `low`, and that is a decision rather than an oversight.
@@ -1020,6 +1026,22 @@ def dde_fields(staged: list[dict[str, Any]]) -> dict[str, Any]:
                 "part": _inside(inside),
             })
     return out
+
+
+def _staged_reader(staged: list[dict[str, Any]]):
+    """Read a staged member by the name the container gave it, bounded."""
+    by_name = {str(m.get("inside", "")): m["path"] for m in staged}
+
+    def read(name: str) -> bytes | None:
+        path = by_name.get(name)
+        if path is None:
+            return None
+        try:
+            with open(path, "rb") as handle:  # binary API
+                return handle.read(xlm._READ_LIMIT)
+        except OSError:
+            return None
+    return read
 
 
 def _as_utf8(raw: bytes) -> bytes:

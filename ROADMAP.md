@@ -362,7 +362,9 @@ which is the third kind doing what it was added for.
 - [x] Auto-execute triggers: declared document and workbook events *(v0.5.20)*, ActiveX control events *(v0.6.0)*
 - [~] VBA stomping: the p-code line table against the source *(v0.6.3)*. A decoy with exactly as many lines as the code it replaced passes; comparing what the lines say needs a p-code disassembler, carried to v0.7
 - [x] DDE fields in a `.doc`, read through the piece table *(v0.6.2)*
-- [ ] Found by the oletools test set and not yet read: DDE in `.xlsb` (binary external link parts), Excel 4 macros (XLM), VBA and embedded objects inside a `.ppt` (both live compressed inside the `PowerPoint Document` stream), and `.xls` encryption (a `FILEPASS` record in the workbook stream)
+- [x] Excel 4.0 macro sheets and `Auto_Open`, in `.xls`, `.xlsm` and `.xlsb` *(v0.6.4)*
+- [x] `.xls` encryption, from its `FILEPASS` record *(v0.6.4)*
+- [ ] Found by the oletools test set and not yet read: DDE in `.xlsb` (binary external link parts), and VBA and embedded objects inside a `.ppt` (both live compressed inside the `PowerPoint Document` stream)
 - [x] External relationships *(v0.5.16)* and DDE fields and links *(v0.5.18)*
 
 **Part of this arrived early, and the reason is worth keeping.** v0.5.10

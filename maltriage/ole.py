@@ -40,7 +40,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from . import msdoc, vba
+from . import msdoc, vba, xlm
 from .archives import dde_findings
 from .base import RandomAccessExtractor, safe_text
 from .config import config_int
@@ -426,6 +426,18 @@ def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
             out["doc"] = {"text_chars": len(body["text"]), "pieces": body["pieces"],
                           "truncated": body["truncated"], "dde": found}
 
+    if out["kind"] == "excel":
+        cap = config_int(config, "doc_max_stream_bytes", 67108864)
+        name = "Workbook" if "workbook" in top else "Book"
+        book = read_path(name, cap, "doc_max_stream_bytes", "xlm")
+        if book is not None:
+            sheets = xlm.from_biff(book)
+            problems.extend(sheets["problems"])
+            if sheets["encrypted"]:
+                # FILEPASS: the workbook globals after it are encrypted.
+                out["encrypted"] = True
+            out["xlm"] = xlm.describe(sheets)
+
     if vba_storage is not None:
         stream_cap = config_int(config, "vba_max_stream_bytes", 16777216)
 
@@ -587,6 +599,7 @@ class OleExtractor(RandomAccessExtractor):
                 "info", evidence=[{"name": "capability", "value": capability}]))
 
         out.extend(dde_findings(self.name, "ole", (data.get("doc") or {}).get("dde") or []))
+        out.extend(xlm.findings(self.name, data.get("xlm") or {}))
 
         if data.get("encrypted"):
             # Not suspicious by itself, and not nothing: an encrypted document

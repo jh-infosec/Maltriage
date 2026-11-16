@@ -201,6 +201,7 @@ plus the names everything imports:
 | `archives.py` | 466 | container recursion, and the caps that make it safe |
 | `ole.py` | 553 | OLE2 compound file structure: the chain walker, the directory tree, and stream reads |
 | `msdoc.py` | 209 | Word 97-2003 text through the piece table, and the fields in it |
+| `xlm.py` | 294 | Excel 4.0 macro sheets and `Auto_Open`, from BIFF, XML and BIFF12 workbooks alike |
 | `vba.py` | 306 | MS-OVBA decompression, the `dir` stream, and what module source declares and calls |
 
 ### archives.py, and who owns the walk
