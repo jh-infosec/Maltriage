@@ -298,6 +298,53 @@ def pcode_lines(pcode: bytes, version: int | None) -> int | None:
     return struct.unpack_from(f"{endian}H", pcode, table + 4)[0]
 
 
+_MIN_LITERAL = 4
+_LITERALS_KEPT = 4096
+
+
+def pcode_literals(pcode: bytes, version: int | None) -> list[str] | None:
+    """The string literals and comments in a module's compiled lines, or
+    `None` when there is no line table to read.
+
+    Each entry of the line table gives a line's length and its offset from
+    the end of the table, and inside a line a string is a two-byte length
+    followed by that many bytes, padded to even. Opcodes are not decoded:
+    their numbers change between VBA versions, and `pcodedmp`, which knows
+    them, is GPL. Without them, a printable run behind a length that fits
+    exactly is what is taken, and only inside a line, never from the
+    module header, whose structures were measured to hold printable noise.
+
+    Measured on eight real Office modules (versions 0x97 and 0xAF, one of
+    them out of a `.ppt`): three literals found, a comment and two strings,
+    each present in its source, and nothing else.
+    """
+    if version is None or version == _RECOMPILE or version < _VBA6 or len(pcode) < 0x1D:
+        return None
+    endian = "<" if struct.unpack_from("<H", pcode, 2)[0] <= 0xFF else ">"
+    table = struct.unpack_from(f"{endian}I", pcode, 0x19)[0] + 0x3C
+    if table + 6 > len(pcode) or struct.unpack_from(f"{endian}H", pcode, table)[0] != 0xCAFE:
+        return None
+    count = struct.unpack_from(f"{endian}H", pcode, table + 4)[0]
+    start = table + 6 + count * 12 + 10
+    found: list[str] = []
+    for index in range(count):
+        entry = table + 6 + index * 12
+        if entry + 12 > len(pcode):
+            break
+        length = struct.unpack_from(f"{endian}H", pcode, entry + 4)[0]
+        offset = struct.unpack_from(f"{endian}I", pcode, entry + 8)[0]
+        body = pcode[start + offset:start + offset + length]
+        for position in range(0, len(body) - 2, 2):
+            size = struct.unpack_from(f"{endian}H", body, position)[0]
+            if _MIN_LITERAL <= size <= len(body) - position - 2:
+                text = body[position + 2:position + 2 + size]
+                if all(0x20 <= byte < 0x7F for byte in text):
+                    found.append(text.decode("ascii"))
+                    if len(found) >= _LITERALS_KEPT:
+                        return found
+    return found
+
+
 def source_lines(source: str) -> tuple[int, int, bool]:
     """The range of line counts the compiled code could honestly have for
     this source, and whether the source holds any code at all.
@@ -327,7 +374,8 @@ def source_lines(source: str) -> tuple[int, int, bool]:
     return logical, max(high, len(plain)), has_code
 
 
-def stomped(compiled: int | None, source: str) -> str | None:
+def stomped(compiled: int | None, source: str,
+            literals: list[str] | None = None) -> str | None:
     """Why the compiled code is not the source shown, or `None`.
 
     Only when there is compiled code with lines in it. A module whose
@@ -342,6 +390,13 @@ def stomped(compiled: int | None, source: str) -> str | None:
         return "source missing"
     if not low <= compiled <= high:
         return "line count differs"
+    # A decoy with as many lines as the code it replaced passes the count.
+    # What it cannot keep without keeping the payload is the payload's
+    # strings: the URL, the command line, the encoded blob. A literal is
+    # checked as written in the source too, with its quotes doubled.
+    for literal in literals or ():
+        if literal not in source and literal.replace('"', '""') not in source:
+            return "literals differ"
     return None
 
 
@@ -417,10 +472,13 @@ def extract(read: Callable[[str], bytes | None], config_caps: dict[str, int]) ->
         hits = scan_source(text, module["kind"])
         record.update(hits)
         compiled = pcode_lines(body[:offset], version)
+        literals = pcode_literals(body[:offset], version)
         record["pcode_lines"] = compiled
+        # A count, never the strings: they are the sample's content.
+        record["pcode_literals"] = None if literals is None else len(literals)
         # A source cut at the cap has fewer lines than it should, which is
         # not the same thing as a source that was replaced.
-        reason = None if cut else stomped(compiled, text)
+        reason = None if cut else stomped(compiled, text, literals)
         record["stomped"] = reason
         if reason:
             out["stomped"].append(reason)

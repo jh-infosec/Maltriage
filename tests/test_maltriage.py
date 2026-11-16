@@ -9108,16 +9108,35 @@ def test_the_doc_reader_agrees_with_msodde(write):
 # after compiling. The p-code's line table says how many lines were compiled;
 # on every real Office module measured it matched the source exactly.
 
-def _pcode(lines, big_endian=False):
+def _pcode(lines, big_endian=False, bodies=None, header=b""):
     """Module p-code with just enough structure: the line table pcodedmp
-    documents, at 0x3C past the dword at 0x19, opening with 0xCAFE."""
+    documents, at 0x3C past the dword at 0x19, opening with 0xCAFE, then one
+    12-byte entry per line (length at +4, offset at +8) and the line bodies.
+    `header` is printable bait placed outside every line."""
     endian = ">" if big_endian else "<"
-    buf = bytearray(0x3C + 6 + 12 * lines + 32)
+    bodies = list(bodies or []) + [b""] * (lines - len(bodies or []))
+    table = 0x3C
+    start = table + 6 + 12 * lines + 10
+    buf = bytearray(start)
     buf[3] = 1 if big_endian else 0
     struct.pack_into(f"{endian}I", buf, 0x19, 0)
-    struct.pack_into(f"{endian}H", buf, 0x3C, 0xCAFE)
-    struct.pack_into(f"{endian}H", buf, 0x40, lines)
-    return bytes(buf)
+    buf[0x1D:0x1D + len(header)] = header
+    struct.pack_into(f"{endian}H", buf, table, 0xCAFE)
+    struct.pack_into(f"{endian}H", buf, table + 4, lines)
+    offset, blob = 0, b""
+    for index, body in enumerate(bodies):
+        struct.pack_into(f"{endian}HI", buf, table + 6 + index * 12 + 4, len(body), 0)
+        struct.pack_into(f"{endian}I", buf, table + 6 + index * 12 + 8, offset)
+        blob += body
+        offset += len(body)
+    return bytes(buf) + blob + b"\x00" * 32
+
+
+def _literal(text, big_endian=False):
+    """An opcode word, a length, the string, padded to even."""
+    endian = ">" if big_endian else "<"
+    raw = text.encode("ascii")
+    return struct.pack(f"{endian}HH", 0, len(raw)) + raw + (b"\x00" if len(raw) % 2 else b"")
 
 
 _HONEST = ('Attribute VB_Name = "Module1"\r\nSub Report()\r\n'
@@ -9127,6 +9146,73 @@ _HONEST = ('Attribute VB_Name = "Module1"\r\nSub Report()\r\n'
 def _stomp_report(write, source, lines, version=0xAF, **kwargs):
     return _macro_report(write, {"Module1": (source, "procedural")},
                          pcode=_pcode(lines, **kwargs), version=version)
+
+
+# v0.7.0: what the compiled lines say, not only how many there are
+
+def test_compiled_literals_matching_the_source_are_not_stomping(write):
+    report = _stomp_report(write, _HONEST, 3, bodies=[b"", _literal("done")])
+    module = _vba(report)["modules"][0]
+
+    assert module["pcode_literals"] == 1
+    assert module["stomped"] is None
+
+
+def test_a_decoy_with_the_same_line_count_and_other_strings_is_stomping(write):
+    """The case v0.6.3 named and could not see: as many lines as the code it
+    replaced, so the count matches, and a different string in it."""
+    report = _stomp_report(write, _HONEST, 3,
+                           # Not a URL: the strings extractor reports URLs
+                           # anywhere in a file by design, and this checks
+                           # that the p-code reader adds nothing of its own.
+                           bodies=[b"", _literal("payload marker 6614 text")])
+    finding = _vba_findings(report)["vba_stomped"]
+
+    assert "literals differ" in finding["detail"]
+    assert "payload marker 6614" not in json.dumps(report.to_dict(), default=str)
+
+
+def test_a_literal_with_quotes_matches_its_doubled_form(write):
+    """VBA writes a quote inside a string as two."""
+    source = ('Attribute VB_Name = "Module1"\r\nSub Report()\r\n'
+              '    MsgBox "say ""hi"" now"\r\nEnd Sub\r\n')
+    report = _stomp_report(write, source, 3, bodies=[b"", _literal('say "hi" now')])
+    assert _vba(report)["modules"][0]["stomped"] is None
+
+
+def test_short_and_unprintable_runs_are_not_literals():
+    pcode = _pcode(2, bodies=[_literal("abc"), struct.pack("<HH", 0, 5) + b"\x01\x02ab\x03\x00"])
+    assert vba_module.pcode_literals(pcode, 0xAF) == []
+
+
+def test_printable_bytes_outside_every_line_are_not_literals():
+    """The module header holds structures that look like text; measured on
+    real p-code, every run found there was noise. Only lines are read."""
+    pcode = _pcode(1, header=struct.pack("<H", 8) + b"Office__")
+    assert vba_module.pcode_literals(pcode, 0xAF) == []
+
+
+def test_big_endian_literals_are_read():
+    pcode = _pcode(1, big_endian=True, bodies=[_literal("Hello there", big_endian=True)])
+    assert vba_module.pcode_literals(pcode, 0xAF) == ["Hello there"]
+
+
+def test_a_line_entry_pointing_outside_the_p_code_is_harmless():
+    pcode = bytearray(_pcode(2, bodies=[_literal("first one"), _literal("second")]))
+    struct.pack_into("<I", pcode, 0x3C + 6 + 12 + 8, 0x7FFFFFF0)
+    assert vba_module.pcode_literals(bytes(pcode), 0xAF) == ["first one"]
+
+
+def test_literals_are_not_read_where_the_p_code_does_not_run():
+    pcode = _pcode(1, bodies=[_literal("anything")])
+    assert vba_module.pcode_literals(pcode, 0xFFFF) is None
+    assert vba_module.pcode_literals(pcode, 0x5E) is None
+
+
+def test_the_literal_list_is_capped(monkeypatch):
+    monkeypatch.setattr(vba_module, "_LITERALS_KEPT", 3)
+    pcode = _pcode(1, bodies=[b"".join(_literal(f"text{n:02d}") for n in range(10))])
+    assert len(vba_module.pcode_literals(pcode, 0xAF)) == 3
 
 
 def test_compiled_code_matching_its_source_is_not_stomped(write):
@@ -9724,3 +9810,10 @@ def test_a_container_claiming_more_than_its_parent_holds_is_clipped():
     liar = struct.pack("<HHI", 0x000F, 0x0FF0, 0x7FFFFFFF) + package
     data = ole_module.describe(_cfb({"PowerPoint Document": liar})[0])
     assert data["ppt"]["objects"] == 1
+
+
+def test_literals_are_read_on_word_boundaries_only():
+    """P-code is a run of 16-bit words and strings are padded to keep it so.
+    A length and text that only line up at an odd offset are not a literal."""
+    pcode = _pcode(1, bodies=[b"\x00" + struct.pack("<H", 4) + b"abcd" + b"\x00"])
+    assert vba_module.pcode_literals(pcode, 0xAF) == []

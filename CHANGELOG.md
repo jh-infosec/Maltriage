@@ -1,5 +1,59 @@
 # Changelog
 
+## Version 0.6.7 - what the compiled lines say
+
+v0.6.3 caught a stomped VBA module when its source could not account for
+the number of compiled lines, and said what it could not catch: a decoy with
+exactly as many lines as the code it replaced. This release reads what the
+compiled lines contain, and catches that decoy when it changed a string.
+
+Named v0.6.7 rather than v0.7.0 because it finishes a v0.6 item. v0.7 is
+the measurement release, and its first item, a labelled malicious corpus,
+is not something this repository will ever hold.
+
+### Strings, found without opcodes
+
+Each entry in a module's line table gives a line's length and its offset
+from the end of the table. Inside a line, a string literal or a comment is a
+two-byte length followed by that many bytes, padded to keep the line a run
+of 16-bit words. Decoding the opcodes around them would say exactly where
+each string is, but opcode numbers change between VBA versions, and
+`pcodedmp`, which has the tables, is GPL while this project is MIT. So
+nothing was taken from it but structural facts, and the strings are found
+by shape: a printable run of at least four bytes behind a length that fits
+exactly, on a word boundary, inside a line.
+
+**Inside a line, not anywhere in the p-code.** v0.6.3 measured the whole
+module header and found printable noise in every real module (`Offi@`,
+`}`^V2`). Inside the lines there was none. Across eight real Office modules
+(versions 0x97 and 0xAF, one of them out of a `.ppt`), the strings found
+were exactly three, a comment and two literals, and each is in its source.
+
+### The check
+
+A module whose compiled lines hold a string its source does not is
+`vba_stomped`, `literals differ`. The source is searched for the string as
+it is and with its quotes doubled, since that is how VBA writes a quote
+inside a string. On real compiled code from the oletools set, `Modul1`
+with its own source passes, and with a decoy of the same three lines and a
+different message it is caught, which v0.6.3 could not do.
+
+A decoy cannot keep a payload's URL, command line or encoded blob without
+keeping the payload in plain sight, which is why strings are the half of
+the compiled code worth reading first.
+
+The report gains a count of compiled strings per module, never the strings.
+
+### What still passes
+
+A decoy that keeps every line and every string of what it replaced and
+changes only what the code does with them. Seeing that needs the opcodes.
+
+### Tests
+
+Eleven new, 828 in all. Ten mutants; one survived a first pass (reading at
+odd offsets) and became a test of word alignment.
+
 ## Version 0.6.6 - what a presentation keeps inside itself
 
 A `.ppt` keeps nearly everything in one stream, `PowerPoint Document`, as a

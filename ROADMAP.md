@@ -360,7 +360,7 @@ which is the third kind doing what it was added for.
 - [x] OOXML identification and part listing *(v0.5.10)*
 - [x] VBA: presence *(v0.5.10)*, module listing and source extraction *(v0.5.20)*
 - [x] Auto-execute triggers: declared document and workbook events *(v0.5.20)*, ActiveX control events *(v0.6.0)*
-- [~] VBA stomping: the p-code line table against the source *(v0.6.3)*. A decoy with exactly as many lines as the code it replaced passes; comparing what the lines say needs a p-code disassembler, carried to v0.7
+- [x] VBA stomping: the p-code line table against the source *(v0.6.3)*, and the strings in the compiled lines against it *(v0.6.7)*. A decoy that keeps every line and every string of the code it replaced, changing only what the code does with them, still passes; seeing that needs opcodes, which change between VBA versions
 - [x] DDE fields in a `.doc`, read through the piece table *(v0.6.2)*
 - [x] Excel 4.0 macro sheets and `Auto_Open`, in `.xls`, `.xlsm` and `.xlsb` *(v0.6.4)*
 - [x] `.xls` encryption, from its `FILEPASS` record *(v0.6.4)*
@@ -416,7 +416,7 @@ precision and recall, so it comes before the classifier rather than after.
 - [ ] False negatives introduced by known-good filtering (needs a corpus)
 - [ ] Report diff between two runs
 - [ ] A Program Files corpus, for the findings System32 cannot exercise
-- [ ] YARA measured on Windows, which needs a Python a wheel exists for
+- [x] YARA measured on Windows, in a 3.13 virtual environment *(v0.5.12)*
 - [x] A corpus of ordinary documents *(v0.5.7, v0.5.8)*
 - [x] A corpus manifest, so a sample set cannot shrink quietly *(v0.5.9; counts copies since v0.5.17)*
 
