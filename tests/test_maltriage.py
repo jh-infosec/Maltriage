@@ -32,6 +32,7 @@ import tempfile
 import time
 import tracemalloc
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -9579,3 +9580,147 @@ def test_only_external_link_parts_are_read_for_dde_links(write):
     not an external link, and Excel would not treat it as one."""
     report = analyse(write("book.xlsb", _xlsb_link(1, "cmd", "x", rel_type=_SHEET_REL)))
     assert not {"ooxml_dde", "ooxml_dde_command"} & set(_ooxml_findings(report))
+
+
+# PowerPoint 97-2003: compound files inside the presentation stream
+#
+# Checked during development against the oletools .ppt files: the VBA in
+# sample_with_vba.ppt matches olevba by SHA-256, and every embedded object
+# file reports its package.
+
+def _ppt_record(kind, body, instance=0, container=False):
+    packed = (instance << 4) | (0x0F if container else 0)
+    return struct.pack("<HHI", packed, kind, len(body)) + body
+
+
+def _ppt_object(inner, compress=True, end_marker=False, declared=None):
+    if not compress:
+        return _ppt_record(0x1011, inner, instance=0)
+    packer = zlib.compressobj()
+    # PowerPoint leaves the stream without its end marker.
+    data = packer.compress(inner) + packer.flush(zlib.Z_FINISH if end_marker else zlib.Z_SYNC_FLUSH)
+    size = len(inner) if declared is None else declared
+    return _ppt_record(0x1011, struct.pack("<I", size) + data, instance=1)
+
+
+def _ppt(*records, extra=None):
+    document = _ppt_record(0x03E8, b"".join(records), container=True)
+    tree = {"PowerPoint Document": document, "Current User": b"\x00" * 64}
+    tree.update(extra or {})
+    return _cfb(tree)[0]
+
+
+def _project_bin(modules):
+    return _cfb({"PROJECT": b"Module=Module1\r\n", "VBA": _vba_storage(modules)})[0]
+
+
+def test_a_vba_project_inside_a_presentation_is_read(write):
+    blob = _ppt(_ppt_object(_project_bin({"Module1": (_DROPPER.replace("Document_Open", "AutoOpen"),
+                                                       "procedural")})))
+    report = analyse(write("deck.ppt", blob))
+
+    assert _ole(report)["kind"] == "powerpoint"
+    assert _ole(report)["vba_project"] == "PowerPoint Document, object 1"
+    assert _ole_findings(report)["ole_macros"]["discriminator"] == "powerpoint"
+    assert "vba_autorun_execution" in _vba_findings(report)
+
+
+def test_a_package_inside_a_presentation_is_found(write):
+    package = _cfb({"\x01Ole10Native": b"n" * 600, "\x01CompObj": b"c" * 80})[0]
+    report = analyse(write("deck.ppt", _ppt(_ppt_object(package))))
+    assert _ole_findings(report)["ole_embedded_package"]["evidence"][0]["value"] == 1
+
+
+@pytest.mark.parametrize("compress, end_marker", [(True, False), (True, True), (False, False)])
+def test_objects_are_read_however_they_were_stored(write, compress, end_marker):
+    """Compressed without an end marker, as PowerPoint writes them; with one;
+    and stored as they are."""
+    package = _cfb({"\x01Ole10Native": b"n" * 600})[0]
+    report = analyse(write("deck.ppt", _ppt(_ppt_object(package, compress, end_marker))))
+    assert "ole_embedded_package" in _ole_findings(report)
+    assert _structural(_ole(report)["parse_errors"]) == []
+
+
+def test_an_object_declaring_more_than_the_cap_is_bounded(write):
+    """The declared size is a field in the file. A small zlib stream of
+    zeros inflates to anything it likes."""
+    bomb = _ppt_object(b"\x00" * 40_000_000)
+    tracemalloc.start()
+    data = ole_module.describe(_ppt(bomb), {**DEFAULT_CONFIG, "ppt_max_object_bytes": 1048576})
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert any("declares 40000000 bytes" in n for n in data["parse_errors"])
+    assert peak < 64 * 1048576
+
+
+def test_an_object_that_inflates_short_says_so(write):
+    package = _cfb({"\x01Ole10Native": b"n" * 600})[0]
+    data = ole_module.describe(_ppt(_ppt_object(package, declared=len(package) + 5000)))
+    assert any("inflates to" in n for n in data["parse_errors"])
+
+
+def test_an_object_that_does_not_inflate_is_said(write):
+    data = ole_module.describe(_ppt(_ppt_record(0x1011, struct.pack("<I", 100) + b"not zlib", 1)))
+    assert any("does not inflate" in n for n in data["parse_errors"])
+
+
+def test_an_object_that_is_not_a_compound_file_is_ignored(write):
+    data = ole_module.describe(_ppt(_ppt_object(b"just bytes" * 50)))
+    assert data["ppt"]["objects"] == 0
+
+
+def test_presentation_containers_nest_only_so_deep(write):
+    record = _ppt_object(_cfb({"\x01Ole10Native": b"n" * 600})[0])
+    for _ in range(40):
+        record = _ppt_record(0x0FF0, record, container=True)
+    data = ole_module.describe(_ppt(record))
+    assert any("nested deeper than 32" in n for n in data["parse_errors"])
+
+
+def test_the_object_count_is_capped(write):
+    package = _ppt_object(_cfb({"\x01Ole10Native": b"n" * 600})[0])
+    data = ole_module.describe(_ppt(*[package] * 6), {**DEFAULT_CONFIG, "ppt_max_objects": 3})
+
+    assert data["ppt"]["objects"] == 3
+    assert any("more than 3 embedded objects" in n for n in data["parse_errors"])
+
+
+def test_a_presentation_inside_a_presentation_is_not_opened(write):
+    """One level down and no further: nesting is a recursion on request."""
+    package = _cfb({"\x01Ole10Native": b"n" * 600})[0]
+    inner = _ppt(_ppt_object(package))
+    data = ole_module.describe(_ppt(_ppt_object(inner)))
+    assert data["packages"] == 0
+
+
+def test_an_encrypted_presentation_says_so(write):
+    """PowerPoint marks one with an EncryptedSummary stream, and the records
+    after that are ciphertext, so they are not walked."""
+    blob = _ppt(_ppt_object(_cfb({"\x01Ole10Native": b"n" * 600})[0]),
+                extra={"EncryptedSummary": b"e" * 600})
+    report = analyse(write("deck.ppt", blob))
+
+    assert "ole_encrypted" in _ole_findings(report)
+    assert "ole_embedded_package" not in _ole_findings(report)
+
+
+def test_the_presentation_reader_agrees_with_olevba(write):
+    olevba = pytest.importorskip("oletools.olevba")
+    source = _SHELL_ONLY * 3
+    path = write("deck.ppt", _ppt(_ppt_object(_project_bin({"Module1": (source, "procedural")}))))
+    ours = {m["name"]: m["sha256"] for m in _vba(analyse(path))["modules"]}
+    parser = olevba.VBA_Parser(str(path))
+    theirs = {stream.rsplit("/", 1)[-1]: hashlib.sha256(code.encode("cp1252")).hexdigest()
+              for _, stream, _, code in parser.extract_macros()}
+    parser.close()
+    assert ours == theirs
+
+
+def test_a_container_claiming_more_than_its_parent_holds_is_clipped():
+    """A child's length is a field in the file. Walking it past the end of
+    the stream reads headers out of nothing."""
+    package = _ppt_object(_cfb({"\x01Ole10Native": b"n" * 600})[0])
+    liar = struct.pack("<HHI", 0x000F, 0x0FF0, 0x7FFFFFFF) + package
+    data = ole_module.describe(_cfb({"PowerPoint Document": liar})[0])
+    assert data["ppt"]["objects"] == 1

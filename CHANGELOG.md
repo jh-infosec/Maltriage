@@ -1,5 +1,50 @@
 # Changelog
 
+## Version 0.6.6 - what a presentation keeps inside itself
+
+A `.ppt` keeps nearly everything in one stream, `PowerPoint Document`, as a
+tree of records. Its VBA project is one of them, and so is every embedded
+object, each a compound file of its own, usually zlib-compressed. So until
+now a `.ppt` with macros reported none, and one carrying a Packager object
+reported no package, though the readers for both were already here.
+
+### Reading it
+
+The record tree is walked iteratively, with a depth limit, a record budget,
+and every child clipped to its parent: a container that claims two
+gigabytes is read for as long as the stream lasts and no further. Each
+`ExOleObjStg` record is inflated behind its declared size, which is capped
+before it is trusted, and the compound file inside is handed to the OLE2
+reader one level down and no further, so a presentation embedded in a
+presentation is not opened.
+
+**PowerPoint writes the zlib stream without its end marker.** The oletools
+`sample_with_vba.ppt` inflates to exactly its declared 10,240 bytes and then
+simply stops, so reaching the declared size is success. Falling short of it
+is said.
+
+An encrypted presentation is marked by an `EncryptedSummary` stream, and
+the records after that are ciphertext. It is now `ole_encrypted`, and its
+records are not walked.
+
+### On the real files
+
+- `sample_with_vba.ppt`: `ole_macros`, and its one module matches the
+  source `olevba` extracts, by SHA-256
+- the five `.ppt`, `.pps` and `.pot` files with embedded objects:
+  `ole_embedded_package` on every one
+- `encrypted.ppt`: `ole_encrypted`
+
+That makes every encrypted file in the test set reported, 18 of 18 across
+`.doc`, `.xls`, `.ppt` and every OOXML format, and none of its 99 files
+comes back short.
+
+### Tests
+
+Fifteen new, 818 in all. Fourteen mutants; one survived a first pass, a
+child record not clipped to its parent, and the test written for it shows
+what that costs: reading record headers past the end of the stream.
+
 ## Version 0.6.5 - a link in a binary workbook, and two readers made honest
 
 ### DDE links in .xlsb

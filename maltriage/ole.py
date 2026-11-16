@@ -40,7 +40,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from . import msdoc, vba, xlm
+from . import msdoc, ppt, vba, xlm
 from .archives import dde_findings
 from .base import RandomAccessExtractor, safe_text
 from .config import config_int
@@ -314,7 +314,7 @@ def _kind(root: dict[str, Any], top: set[str]) -> str | None:
     return None
 
 
-def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def describe(data, config: dict[str, Any] | None = None, _depth: int = 0) -> dict[str, Any]:
     """The structure of a compound file held in `data`, which may be a map."""
     config = config or {}
     max_entries = config_int(config, "ole_max_directory_entries", 8192)
@@ -336,7 +336,10 @@ def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
         "unreachable": 0,
         "vba_project": None,
         "packages": 0,
-        "encrypted": "encryptedpackage" in top and "encryptioninfo" in top,
+        # OOXML encrypted into a compound file, or a presentation encrypted
+        # in place, which PowerPoint marks with an `EncryptedSummary` stream.
+        "encrypted": ("encryptedpackage" in top and "encryptioninfo" in top)
+                     or "encryptedsummary" in top,
         "truncated": False,
         "parse_errors": problems,
     }
@@ -437,6 +440,29 @@ def describe(data, config: dict[str, Any] | None = None) -> dict[str, Any]:
                 # FILEPASS: the workbook globals after it are encrypted.
                 out["encrypted"] = True
             out["xlm"] = xlm.describe(sheets)
+
+    if out["kind"] == "powerpoint" and _depth == 0 and not out["encrypted"]:
+        # Objects inside a presentation are compound files of their own,
+        # read by this same function one level down and no further: an
+        # embedded presentation holding an embedded presentation is a
+        # recursion on request.
+        cap = config_int(config, "doc_max_stream_bytes", 67108864)
+        stream = read_path("PowerPoint Document", cap, "doc_max_stream_bytes", "ppt")
+        if stream is not None:
+            found = ppt.objects(stream, config_int(config, "ppt_max_objects", 64),
+                                config_int(config, "ppt_max_object_bytes", 16777216), problems)
+            out["ppt"] = {"objects": len(found)}
+            for number, inner in enumerate(found, start=1):
+                try:
+                    sub = describe(inner, config, _depth + 1)
+                except OleFormatError as exc:
+                    problems.append(f"ppt: object {number}: {exc}")
+                    continue
+                out["packages"] += sub["packages"]
+                problems.extend(f"ppt: object {number}: {note}" for note in sub["parse_errors"])
+                if sub.get("vba") and "vba" not in out:
+                    out["vba"] = sub["vba"]
+                    out["vba_project"] = f"PowerPoint Document, object {number}"
 
     if vba_storage is not None:
         stream_cap = config_int(config, "vba_max_stream_bytes", 16777216)
