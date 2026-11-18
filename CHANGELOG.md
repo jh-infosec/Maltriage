@@ -1,5 +1,135 @@
 # Changelog
 
+## Version 0.7.2 - script files
+
+### Why scripts, and why now
+
+Since Office began blocking macros in files from the internet in 2022, most
+first-stage attachments have been scripts or shortcuts to them: `.ps1`,
+`.vbs`, `.js`, `.hta`, `.wsf`, `.bat` and shell. None of them has a magic
+number, so until this release every one came back `unrecognised_format`
+and nothing else, however plainly it said what it was for. Of 21 delivery
+formats probed after v0.7.0, none reached the gate, and scripts were the
+largest share of that gap.
+
+### What it reads
+
+A new stream extractor, `script`, reads any file nothing else identified
+(`unknown`, or `script` by its shebang). It takes its bytes from the one
+pass every stream extractor shares, decides from the first 4 KiB whether
+the file is text at all, and keeps at most `script_max_bytes` (1 MiB). A
+binary costs one small check and no buffer. Text is decoded with its byte
+order mark if it has one, and as UTF-16 if it has none and half its bytes
+are NUL, which is how PowerShell often saves.
+
+The language is the one with the most distinct features in the first
+256 KiB, and needs two: one keyword is a mention, two are a dialect. It is
+reported, and the corpus counts families by it (`script-powershell`,
+`script-batch` and so on) rather than lumping them as `unknown`.
+
+### The rule: what a script can do is ordinary, one shape of it is not
+
+The rule is the VBA scanner's. A build script that downloads a tool, an
+installer that starts a process, a logon script that hides its window:
+each is a line in somebody's repository. So capability stays below the
+gate:
+
+| key | severity | what it says |
+|---|---|---|
+| `script_dropper` | medium | the script has the shape of a dropper, named |
+| `script_execution` | low | it can start a process (PowerShell, `cmd /c`, `WScript.Shell`, ...) |
+| `script_hidden_window` | low | it asks for no window |
+| `script_download` | info | it can fetch from a network |
+
+What reaches the gate is a dropper's shape, specific enough that an
+ordinary script does not take it by accident:
+
+- a PowerShell download cradle: `IEX` and a download verb in one statement,
+  either order;
+- an encoded PowerShell launch: `-EncodedCommand` or any prefix of it, with
+  a base64 argument;
+- base64 decoded and handed to `Invoke-Expression`, on one line;
+- a Windows binary fetching a URL: `certutil -urlcache`, `bitsadmin
+  /transfer`, `mshta http`, `regsvr32 /i:http`, `rundll32 javascript:`,
+  `msiexec /i http`;
+- a Windows Script Host write-and-run: an HTTP object, a stream written to
+  disk, and a `Run` or `ShellExecute`, in one script;
+- a download piped to a shell: `curl | sh`, `base64 -d | sh`, `sh <(curl`.
+
+The text never reaches a report. What is reported is the language and names
+from the module's own lists, as with VBA.
+
+### What it measured, and what it costs
+
+Over 923 real scripts from the PowerShell, PowerShellGet, PSReadLine and
+Chocolatey repositories:
+
+```
+gate (medium+): flags 0.3% of benign files
+benign families: script-powershell 848, unknown 54, script-shell 11,
+                 script-batch 5, script 4, script-jscript 1
+medium  script_dropper    benign 0.3%
+low     script_execution  benign 43.1%
+```
+
+**The three are real download-and-run installers**: Chocolatey's
+`setup.ps1`, and the PowerShell repository's `install-powershell.sh` and
+`download.sh`, which pipe a download to a shell. That is the key's honest cost, and it is stated rather than tuned
+away: an installer that fetches and runs code from the internet has the
+shape of a dropper because it is one, and the only thing separating it
+from a bad one is whose server it trusts. Nothing here can know that.
+
+Two earlier false positives were removed by reading more carefully, not by
+narrowing the shapes:
+
+- **Comments.** Two of the early matches were an official install
+  one-liner quoted in help text. Whole-line comments, and PowerShell `<# #>`
+  blocks that open a line, are now blanked before the shapes are looked
+  for. Only whole lines: a `#` in the middle of a line may be inside a
+  string, and stripping from it would let `$a = "#"; IEX (iwr ...)` hide
+  the rest of the line.
+- **Same line.** A Microsoft test decodes the EICAR string and, two lines
+  later, invokes an `echo` of it. Decoding and invoking now have to share a
+  line, as the one-liners that do it are written.
+
+`script_execution` at 43.1% is why it is `low`: nearly half of all
+PowerShell starts a process.
+
+### What was slower than it should have been
+
+- **One regex with a gap is quadratic.** The first version wrote each shape
+  as `IEX[^\n]{0,200}?DownloadString`, which retries the gap at every `IEX`:
+  4 MiB of `IEX ` took 33 s. Each shape is now a chain of parts with no gap
+  inside any part, each part found once in one linear pass, and the parts
+  paired by position with a binary search. The same 4 MiB is about a
+  second a MiB at worst, and the cap is 1 MiB.
+- **Ordinary text paid for every pattern.** A megabyte of plain
+  PowerShell took 1.2 s, nearly all of it in patterns that cannot match a
+  file without a particular word in it. Every shape and every capability
+  now names the literals it needs, and is skipped when the case-folded
+  text lacks them, as the v0.7.1 secret rules are. The same megabyte takes
+  0.14 s; a megabyte containing every literal at once, 0.66 s. A test
+  checks every answer is the same with and without the literals, in every
+  case form `re` treats as equal, and another walks all of Unicode for
+  characters `re` matches to an ASCII letter that case folding does not
+  take to it: there are two, `\u0130` and `\u0131`, and they are folded by
+  hand.
+- **The first version read the file twice.** It was a random-access
+  extractor that opened the file again and decoded a megabyte before
+  deciding whether it was text. The v0.1.2 test that every file is opened
+  once and read once caught the first, and the peak memory test the
+  second.
+
+### Tests
+
+944 pass. Every shape has a control that reaches the gate and ordinary
+scripts that do not; help text, a `#` mid-line, decoding and invoking on
+different lines, parts too far apart, one feature alone, and fetching and
+running without writing each have a test that fails if the rule they
+depend on is removed. Every mutant of the gap bound, the two-feature rule,
+the write part of the WSH shape, the UTF-16 heuristic, dropping a binary's
+buffer, the dropper's severity and the literal tables was killed.
+
 ## Version 0.7.1 - the rest of every long string
 
 ### What the document corpus showed

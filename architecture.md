@@ -194,7 +194,7 @@ plus the names everything imports:
 | `filetype.py` | 99 | format identification from magic bytes |
 | `hashes.py` | 85 | cryptographic hashing and optional fuzzy hashing |
 | `entropy_scan.py` | 188 | the windowed scan; the arithmetic stays in `entropy.py`, which the secret engine shares |
-| `strings.py` | 543 | ASCII and UTF-16 extraction, IOCs, the run scanner |
+| `strings.py` | 804 | ASCII and UTF-16 extraction, IOCs, the run scanner, and long runs read in blocks |
 | `pe.py` | 923 | PE structure, and `certificate_range` for phase 1 |
 | `elf.py` | 703 | ELF structure |
 | `rules.py` | 407 | YARA compilation and matching |
@@ -204,6 +204,7 @@ plus the names everything imports:
 | `diff.py` | 163 | two corpus runs compared by content, for the `diff` command |
 | `ppt.py` | 101 | the compound files a `.ppt` keeps inside its presentation stream |
 | `xlm.py` | 294 | Excel 4.0 macro sheets and `Auto_Open`, from BIFF, XML and BIFF12 workbooks alike |
+| `scripts.py` | 418 | script text: decoding, the language it reads as, and the shapes of a dropper |
 | `vba.py` | 306 | MS-OVBA decompression, the `dir` stream, and what module source declares and calls |
 
 ### archives.py, and who owns the walk

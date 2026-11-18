@@ -419,6 +419,11 @@ precision and recall, so it comes before the classifier rather than after.
 - [x] YARA measured on Windows, in a 3.13 virtual environment *(v0.5.12)*
 - [x] A corpus of ordinary documents *(v0.5.7, v0.5.8)*
 - [x] A corpus manifest, so a sample set cannot shrink quietly *(v0.5.9; counts copies since v0.5.17)*
+- [x] Every indicator in a long string, not only its first kilobyte *(v0.7.1)*
+- [x] Script files: PowerShell, VBScript, JScript, HTA, WSF, batch and shell, and the shapes of a dropper in them *(v0.7.2)*
+- [ ] Shortcut files (`.lnk`) and what they run
+- [ ] Disk images (`.iso`, `.img`, `.vhd`) as containers
+- [ ] Objects embedded in RTF
 
 **Two severity decisions are now waiting on this release rather than on an
 argument.** `entropy_hotspot` is the largest lever ever measured here:

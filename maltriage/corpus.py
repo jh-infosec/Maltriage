@@ -615,6 +615,12 @@ def _family(report: Report) -> str:
     ole = (report.data.get("ole") or {}).get("kind")
     if ole:
         return f"ole-{ole}"
+    # Scripts have no magic number, so the bytes can only say which language
+    # a text file reads as. Said as a family so a corpus of them is not one
+    # undifferentiated `unknown`.
+    script = (report.data.get("script") or {}).get("language")
+    if script:
+        return f"script-{script}"
     return (report.data.get("filetype") or {}).get("family") or "unknown"
 
 

