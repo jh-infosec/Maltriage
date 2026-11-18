@@ -149,6 +149,39 @@ _KNOWN_RULES: tuple[tuple[str, re.Pattern], ...] = (
 )
 
 
+#: What every match of each rule above must contain, in the same order. A
+#: rule none of whose substrings is in the text cannot match it, so it is not
+#: run: a plain substring test is a scan at memory speed, and each rule is a
+#: regex pass whose leading lookbehind defeats the engine's own literal
+#: shortcut. Since v0.7.1 the engine reads whole document parts rather than
+#: their first kilobyte, and seventeen passes over every block was most of
+#: the cost. Exact, not a heuristic: each entry is a literal its pattern
+#: cannot match without, and a test holds the two tuples in step.
+_KNOWN_HINTS: tuple[tuple[str, ...], ...] = (
+    ("A3T", "AKIA", "ASIA", "ABIA", "ACCA"),
+    ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+    ("github_pat_",),
+    ("glpat-",),
+    ("xox",),
+    ("https://hooks.slack.com/services/T",),
+    ("k_live_",),
+    ("AIza",),
+    ("sk-proj-",),
+    ("npm_",),
+    ("pypi-AgEIcHlwaS5vcmc",),
+    ("SG.",),
+    (":AA",),
+    ("SK",),
+    ("AccountKey=",),
+    ("eyJ",),
+    ("-----BEGIN ",),
+)
+
+#: Words the context tier needs one of, lowercased, for the same reason.
+_CONTEXT_HINTS = ("pass", "secret", "api", "access", "auth", "client", "private",
+                  "credential")
+
+
 # Context
 #
 # A name beside a value. This is the tier that fires on prose, so the value has
@@ -341,7 +374,9 @@ def scan(text: str, base: int = 0, min_length: int = 24,
     def overlaps(start: int, end: int) -> bool:
         return any(start < c_end and end > c_start for c_start, c_end in claimed)
 
-    for name, pattern in _KNOWN_RULES:
+    for (name, pattern), hints in zip(_KNOWN_RULES, _KNOWN_HINTS):
+        if not any(hint in text for hint in hints):
+            continue
         for match in pattern.finditer(text):
             if overlaps(match.start(), match.end()):
                 continue
@@ -350,7 +385,9 @@ def scan(text: str, base: int = 0, min_length: int = 24,
             found.append(Candidate(name, KNOWN, base + stride * match.start(),
                                    match.end() - match.start(), observed, ratio))
 
-    for match in _CONTEXT.finditer(text):
+    lowered = text.lower()
+    context = _CONTEXT.finditer(text) if any(h in lowered for h in _CONTEXT_HINTS) else ()
+    for match in context:
         value = match.group(1)
         start = match.start(1)
         if overlaps(start, match.end(1)) or _is_placeholder(value):

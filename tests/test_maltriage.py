@@ -42,6 +42,7 @@ from maltriage import apis
 from maltriage import known as known_module
 from maltriage import attack
 from maltriage import secrets as secrets_module
+from maltriage import strings as strings_module
 from maltriage import envelope as envelope_module
 from maltriage.envelope import to_envelope
 from maltriage import cli
@@ -3268,17 +3269,23 @@ def test_an_indicator_list_that_hit_its_ceiling_says_at_least(write):
     assert "incomplete:" in cli.render_human(report)
 
 
-def test_indicators_drawn_from_a_capped_subset_say_so(write):
-    """When the retained list is full the indicators come from a subset, and
-    a partial list that reads as a complete one is the failure this project
-    has now made in four extractors."""
+def test_indicators_are_found_past_the_retention_cap(write):
+    """Until v0.7.1 the indicators came from the retained list, so with the
+    list full the URL below was never looked at and the report said so.
+    Every string is read now; the cap shortens the listed text and nothing
+    else, and only says so when the text is listed."""
     body = b"".join(b"\x00filler%05d" % n for n in range(500)) + \
         b"\x00https://example.com/late\x00"
-    report = analyse(write("a.bin", body),
-                     config={**DEFAULT_CONFIG, "strings_max_retained": 10})
-    problems = report.data["strings"]["parse_errors"]
-    assert any("were kept" in p and "subset" in p for p in problems)
-    assert "incomplete:" in cli.render_human(report)
+    capped = {**DEFAULT_CONFIG, "strings_max_retained": 10}
+    data = _strings_data(analyse(write("a.bin", body), config=capped))
+
+    assert data["urls"] == ["https://example.com/late"]
+    assert data["retained_truncated"] is True
+    assert not data.get("parse_errors")
+
+    listed = _strings_data(analyse(write("b.bin", body),
+                                   config={**capped, "strings_include_text": True}))
+    assert any("only the first 10 of" in p and "listed" in p for p in listed["parse_errors"])
 
 
 # API name registry and capability findings
@@ -6873,44 +6880,61 @@ def test_a_list_with_a_number_in_it_is_reported(write):
     assert any("ioc_oid_prefixes" in p for p in problems)
 
 
-# A URL cut in half by strings_max_length. v0.5.4.
+# A URL cut in half by strings_max_length. v0.5.4, and v0.7.1.
+#
+# v0.5.4 stopped a value cut by the ceiling from being reported. v0.7.1
+# stopped cutting values that have a break near them: a long run is read in
+# blocks, cut at the last space, quote or angle bracket, so each token is
+# read once and whole. What is still cut is one token longer than the
+# ceiling with no break in it, and the v0.5.4 rule still applies there.
 
-def test_a_url_cut_in_half_by_the_ceiling_is_not_an_indicator(write):
-    """The defect a real DOCX exposed, and the one the boilerplate list could
-    not reach. An OOXML part header is a single run of namespace declarations
-    well past a thousand bytes, so the cut lands inside a URL, and the piece
-    left behind was `http://sche`. That matches no boilerplate prefix because
-    it is not a URL: it is half of one, and the half is ours."""
+def test_a_url_past_the_ceiling_is_read_whole(write):
+    """The defect a real DOCX exposed in v0.5.4 left `http://sche` behind;
+    v0.5.4 dropped it, and the second URL was simply lost. Both are read."""
     run = (b"http://schemas.example/one " + b"x" * 25 + b" "
            + b"http://schemas.example/two")
     report = analyse(write("header1.xml", b"\x00" + run + b"\x00"),
                      config={**DEFAULT_CONFIG, "strings_max_length": 64})
     data = _strings_data(report)
 
-    # Dropped rather than counted: `report.data` is the list that says what
-    # the file holds, and the file does not hold `http://sche`.
+    assert data["urls"] == ["http://schemas.example/one", "http://schemas.example/two"]
+    assert data["indicators_fragments"] == 0
+    assert "2 URL(s)" in next(f for f in report.findings if f["key"] == "urls_present")["detail"]
+
+
+def test_a_url_cut_in_half_by_the_ceiling_is_not_an_indicator(write):
+    """The v0.5.4 rule, where it still applies: a token longer than the
+    ceiling with no break in it is cut, and the half value against the cut
+    is ours, not the file's."""
+    # One token from the space to the end: no break in it, longer than the
+    # ceiling, and the second URL straddling where the cut lands.
+    run = (b"http://schemas.example/one " + b"x" * 40 + b"=http://schemas.example/two"
+           + b"y" * 60)
+    report = analyse(write("header1.xml", b"\x00" + run + b"\x00"),
+                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    data = _strings_data(report)
+
     assert data["urls"] == ["http://schemas.example/one"]
     assert data["indicators_fragments"] == 1
+    assert data["tokens_cut"] == 1
     finding = next(f for f in report.findings if f["key"] == "urls_present")
-    assert "http://sche " not in finding["detail"] + " "
     assert "1 URL(s)" in finding["detail"]
 
 
 def test_the_docx_case_end_to_end(write):
-    """What the real report.docx did, and why the boilerplate list alone was
-    not enough. Every whole URL in the part header is a schema, so the only
-    value left to report was the fragment, and the finding was a finding about
-    our own ceiling. The part is not interesting and now says so."""
-    # 64 bytes in, this leaves exactly `http://sche`.
+    """What the real report.docx did in v0.5.4: a part header of namespace
+    declarations past the ceiling. Every whole URL in it is a schema, and
+    now both are read whole and set aside as boilerplate, so the part is not
+    interesting and says nothing."""
     run = (b'<hdr xmlns:a="http://www.gnu.org/licenses/"'
            b' xmlns:b="http://schemas.microsoft.com/office/y"')
     report = analyse(write("header1.xml", b"\x00" + run + b"\x00"),
                      config={**DEFAULT_CONFIG, "strings_max_length": 64})
     data = _strings_data(report)
 
-    assert data["urls"] == ["http://www.gnu.org/licenses/"]
-    assert data["urls_boilerplate"] == 1
-    assert data["indicators_fragments"] == 1
+    assert data["urls"] == ["http://www.gnu.org/licenses/", "http://schemas.microsoft.com/office/y"]
+    assert data["urls_boilerplate"] == 2
+    assert data["indicators_fragments"] == 0
     assert "urls_present" not in {f["key"] for f in report.findings}
 
 
@@ -6944,16 +6968,23 @@ def test_a_value_ending_an_uncut_string_is_an_indicator(write):
     assert data["indicators_fragments"] == 0
 
 
-def test_every_indicator_kind_is_cut_by_the_same_ceiling(write):
-    """A path, a registry key and an address are cut by the same bytes a URL
-    is, so the rule is about the cut rather than about URLs. The match group
-    is what gets measured, which matters for the one pattern whose value is a
-    group rather than the whole match."""
+def test_every_indicator_kind_is_read_past_the_ceiling(write):
+    """A path is read in blocks the way a URL is, so the rule is about runs
+    rather than URLs."""
     run = b"/usr/bin/one " + b"x" * 20 + b" /usr/local/share/long/path/here"
-    report = analyse(write("a.bin", b"\x00" + run + b"\x00"),
-                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
-    data = _strings_data(report)
+    data = _strings(write("a.bin", b"\x00" + run + b"\x00"),
+                    config={**DEFAULT_CONFIG, "strings_max_length": 64})
+    assert data["unix_paths"] == ["/usr/bin/one", "/usr/local/share/long/path/here"]
+    assert data["indicators_fragments"] == 0
 
+
+def test_every_indicator_kind_is_cut_by_the_same_ceiling(write):
+    """Where a cut still happens it treats every kind alike, and the match
+    group is what gets measured, which matters for the one pattern whose
+    value is a group rather than the whole match."""
+    run = b"/usr/bin/one " + b"x" * 40 + b"=/usr/local/share/long/path/here" + b"y" * 60
+    data = _strings(write("a.bin", b"\x00" + run + b"\x00"),
+                    config={**DEFAULT_CONFIG, "strings_max_length": 64})
     assert data["unix_paths"] == ["/usr/bin/one"]
     assert data["indicators_fragments"] == 1
 
@@ -6961,12 +6992,15 @@ def test_every_indicator_kind_is_cut_by_the_same_ceiling(write):
 def test_the_cut_line_says_how_many_indicators_it_set_aside(write):
     """Beside the cause rather than on its own line: the count means nothing
     without the ceiling that produced it."""
-    run = (b"http://schemas.example/one " + b"x" * 25 + b" "
-           + b"http://schemas.example/two")
+    # One token from the space to the end: no break in it, longer than the
+    # ceiling, and the second URL straddling where the cut lands.
+    run = (b"http://schemas.example/one " + b"x" * 40 + b"=http://schemas.example/two"
+           + b"y" * 60)
     data = _strings(write("header1.xml", b"\x00" + run + b"\x00"),
                     config={**DEFAULT_CONFIG, "strings_max_length": 64})
 
     line = next(p for p in data["parse_errors"] if "strings_max_length" in p)
+    assert "1 token(s) longer than strings_max_length" in line
     assert "setting aside 1 indicator(s) left incomplete by the cut" in line
 
 
@@ -10030,3 +10064,231 @@ def test_a_severity_change_with_the_same_keys_is_a_change():
 
     assert result["changed"][0]["severity"] == ["low", "medium"]
     assert result["newly_gated"] == 1
+
+
+# v0.7.1: long runs read in full, a token at a time
+
+def _long_document(wide=False):
+    """One unbroken printable run of 30 KB, like an OOXML part: indicators
+    spread through it, a secret 20 KB in, and one token too long to keep."""
+    rng = random.Random(7)
+    words = [b"lorem", b"ipsum", b"<w:t>", b"</w:t>", b'"quoted"', b"dolor"]
+    pieces = []
+    for n in range(2600):
+        pieces.append(rng.choice(words))
+        if n == 300:
+            pieces.append(b"https://early.example/a")
+        if n == 1500:
+            pieces.append(b"10.20.30.40")
+        if n == 1800:
+            pieces.append(b"AKIA" + b"QRSTUVWXYZ234567")
+        if n == 2200:
+            pieces.append(b"=" + b"z" * 3000 + b"=https://inside-a-blob.example/x")
+        if n == 2500:
+            pieces.append(b"https://late.example/report")
+    text = b" ".join(pieces)
+    body = b"\x00" + (b"".join(bytes([c, 0]) for c in text) if wide else text) + b"\x00"
+    return body
+
+
+def _strings_summary(data):
+    return {key: data.get(key) for key in (
+        "urls", "ipv4", "indicators_fragments", "tokens_cut", "over_length",
+        "ascii_count", "wide_count", "secrets")}
+
+
+@pytest.mark.parametrize("wide", [False, True])
+def test_indicators_deep_in_a_long_run_are_found(write, wide):
+    """A run is no longer read only to its first `strings_max_length` bytes:
+    the URL 25 KB in and the address in the middle are both found."""
+    data = _strings(write("part.xml", _long_document(wide)))
+
+    assert "https://early.example/a" in data["urls"]
+    assert "https://late.example/report" in data["urls"]
+    assert "10.20.30.40" in data["ipv4"]
+    assert data["tokens_cut"] == 1
+
+
+@pytest.mark.parametrize("wide", [False, True])
+def test_long_runs_read_the_same_whatever_the_chunk_size(write, wide):
+    """The property this extractor exists to keep, now through blocks,
+    carried tokens and a dropped tail."""
+    path = write("part.xml", _long_document(wide))
+    results = [_strings_summary(_strings(path, config={**DEFAULT_CONFIG, "read_chunk_bytes": size}))
+               for size in (1, 3, 7, 1000, 1 << 20)]
+    assert all(result == results[0] for result in results[1:])
+
+
+def test_a_secret_deep_in_a_long_run_is_found_at_its_offset(write):
+    body = _long_document()
+    data = _strings(write("part.xml", body))
+    offsets = [c["offset"] for c in data["secrets"]["candidates"]]
+    assert body.index(b"AKIAQRSTUVWXYZ234567") in offsets
+
+
+def test_a_long_part_no_longer_comes_back_short(write):
+    """On a real document corpus, 1,417 of 3,975 files and parts said they
+    came back short because a run passed the ceiling. A run past the ceiling
+    is read in full now, so it says nothing unless a token was cut."""
+    text = b"\x00" + b" ".join(b"word%d" % n for n in range(4000)) + b"\x00"
+    data = _strings(write("part.xml", text))
+    assert data["over_length"] == 1
+    assert data["tokens_cut"] == 0
+    assert not data.get("parse_errors")
+
+
+def test_one_enormous_token_is_read_in_bounded_memory(write):
+    """Twenty megabytes with no break in it: read up to the ceiling, the
+    rest passed over without being held."""
+    path = write("blob.txt", b"\x00https://head.example/x=" + b"A" * 20_000_000 + b"\x00")
+    tracemalloc.start()
+    data = _strings(path)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert data["tokens_cut"] == 1
+    assert peak < 32 * 1048576
+
+
+# The pre-filters added in v0.7.1 are exact, or they are a hole. Each rule
+# and pattern is given an example match here, and the example has to contain
+# one of that rule's hints, or the rule would be skipped on exactly the text
+# it exists for.
+
+_SECRET_EXAMPLES = {
+    "aws_access_key_id": "AKIAQRSTUVWXYZ234567",
+    "github_token": "ghp_" + "a1B2" * 9,
+    "github_fine_grained_token": "github_pat_" + "a1B2_" * 13,
+    "gitlab_token": "glpat-" + "a1B2c3D4e5F6g7H8i9J0",
+    "slack_token": "xoxb-1234567890-abcdefghij",
+    "slack_webhook": "https://hooks.slack.com/services/T0001/B0002/abcdefXYZ123",
+    "stripe_live_key": "sk_live_" + "a1B2c3D4e5F6g7H8i9J0",
+    "google_api_key": "AIza" + "a1B2c3D4e5F6g7H8i9J0a1B2c3D4e5F6g7H",
+    "openai_key": "sk-proj-" + "a1B2c3D4e5F6g7H8i9J0",
+    "npm_token": "npm_" + "a1B2" * 9,
+    "pypi_token": "pypi-AgEIcHlwaS5vcmc" + "a1B2c3D4e5F6g7H8",
+    "sendgrid_key": "SG." + "a" * 22 + "." + "b" * 43,
+    "telegram_bot_token": "123456789:AA" + "a1B2" * 8,
+    "twilio_key": "SK" + "0123456789abcdef" * 2,
+    "azure_storage_key": "AccountKey=" + "a1B2+/" * 11,
+    "json_web_token": "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4",
+    "private_key_block": "-----BEGIN RSA PRIVATE KEY-----",
+}
+
+
+def test_every_secret_rule_has_hints_its_matches_must_contain():
+    assert len(secrets_module._KNOWN_HINTS) == len(secrets_module._KNOWN_RULES)
+    assert {name for name, _ in secrets_module._KNOWN_RULES} == set(_SECRET_EXAMPLES)
+    for (name, pattern), hints in zip(secrets_module._KNOWN_RULES, secrets_module._KNOWN_HINTS):
+        example = _SECRET_EXAMPLES[name]
+        assert pattern.search(example), name
+        assert any(hint in example for hint in hints), name
+
+
+@pytest.mark.parametrize("name", sorted(_SECRET_EXAMPLES))
+def test_every_secret_rule_still_fires_through_its_hint(name):
+    found = secrets_module.scan(" " + _SECRET_EXAMPLES[name] + " ")
+    assert name in {c.rule for c in found}
+
+
+@pytest.mark.parametrize("name, example", [
+    ("urls", "see https://example.org/a"),
+    ("emails", "mail a.person@example.org now"),
+    ("ipv4", "host 192.168.4.20 up"),
+    ("registry_paths", r"HKLM\Software\Microsoft\Windows\CurrentVersion\Run"),
+    ("registry_paths", r"HKEY_CURRENT_USER\Software\x"),
+    ("mutexes", r"Global\SomeMutexName"),
+    ("windows_paths", r"C:\Windows\System32\cmd.exe"),
+    ("unix_paths", " /etc/passwd"),
+])
+def test_every_indicator_pattern_has_a_hint_its_matches_contain(name, example):
+    assert strings_module.IOC_PATTERNS[name].search(example)
+    assert any(hint in example for hint in strings_module._IOC_HINTS[name])
+    assert set(strings_module._IOC_HINTS) == set(strings_module.IOC_PATTERNS)
+
+
+def test_reading_whole_parts_costs_little_more_than_reading_their_heads(write):
+    """v0.7.0 read the first kilobyte of each run; v0.7.1 reads all of it,
+    and on 19 MiB of XML-like text took 2.2 s where v0.7.0 took 1.9 s.
+    Held loosely here, so a regression of the kind the hints fixed (13 s
+    before them) fails and an ordinary slow machine does not."""
+    rng = random.Random(1)
+    words = [b"lorem", b"<w:t>", b"</w:t>", b"ipsum", b'"x"', b"dolor"]
+    path = write("part.xml", b" ".join(rng.choice(words) for _ in range(900_000)))
+    started = time.perf_counter()
+    _strings(path)
+    assert time.perf_counter() - started < 6
+
+
+@pytest.mark.parametrize("tail", [b"Q\x01rest", b"Q"])
+def test_a_long_wide_run_does_not_take_the_half_pair_after_it(write, tail):
+    """A UTF-16 run is (printable, NUL) pairs. A printable byte after the
+    last pair, mid-file or at the very end, is not part of the run, and in
+    small chunks the long run is handed over through the streaming path. The
+    file is larger than `header_bytes`, which is always one chunk."""
+    text = b" ".join(b"word%d" % n for n in range(3000)) + b" https://end.example/x"
+    body = b"\x00" + b"".join(bytes([c, 0]) for c in text) + tail
+    data = _strings(write("w.bin", body), config={**DEFAULT_CONFIG, "read_chunk_bytes": 97})
+    assert "https://end.example/x" in data["urls"]
+    assert not any(url.endswith("Q") for url in data["urls"])
+
+
+def test_a_secret_after_a_cut_token_keeps_its_offset(write):
+    """Passing over the rest of a cut token moves the reading position, and
+    an offset reported after it has to have moved with it."""
+    body = (b"\x00lead =" + b"z" * 5000 + b" then AKIAQRSTUVWXYZ234567 tail"
+            + b" pad" * 300 + b"\x00")
+    data = _strings(write("a.bin", body))
+    offsets = [c["offset"] for c in data["secrets"]["candidates"] if c["rule"] == "aws_access_key_id"]
+    assert offsets == [body.index(b"AKIAQRSTUVWXYZ234567")]
+
+
+@pytest.mark.parametrize("name", ["password", "secret", "api_key", "access_key",
+                                  "auth_token", "client_secret", "private_key", "credential"])
+def test_every_context_name_still_reaches_the_context_tier(name):
+    found = secrets_module.scan(f"{name} = Xq9vT2mWp7Lk4Rz8Nb")
+    assert "assigned_to_secret_name" in {c.rule for c in found}
+
+
+# Three chunk-size dependencies a fuzzer found in the first v0.7.1, each now
+# held at every chunk size from one byte up. Two of them came from the long
+# run path; the third was older, and hidden while that path threw text away.
+
+def _strings_direct(data, chunk, config):
+    extractor = extractors_module.StringsExtractor()
+    extractor.begin(Path("x"), {}, config)
+    for start in range(0, len(data), chunk):
+        extractor.feed(data[start:start + chunk])
+    return extractor.finish(Path("x"), {}, config)
+
+
+def _same_at_every_chunk_size(data, maximum=16, keys=("urls", "ipv4", "unix_paths", "windows_paths")):
+    config = {**DEFAULT_CONFIG, "strings_max_length": maximum}
+    whole = _strings_direct(data, len(data) + 1, config)
+    for chunk in (1, 2, 3, 7):
+        part = _strings_direct(data, chunk, config)
+        assert {k: part[k] for k in keys} == {k: whole[k] for k in keys}, chunk
+    return whole
+
+
+def test_a_final_block_of_exactly_the_ceiling_is_read_the_same_way_both_ways():
+    """Held whole in a buffer, a final block exactly the ceiling long was
+    marked last; streamed, it was not, and the two cut differently."""
+    data = (b'<"/usr/bin/z' + b"x" * 50 + b" 10.1.2.3y /usr/bin/zhttp://a.example/>"
+            + b"C:\\Windows\\a" * 2 + b"http://a.example/" + b"x" * 50 + b"\x01y")
+    _same_at_every_chunk_size(data, maximum=64)
+
+
+def test_a_half_pair_held_over_a_chunk_boundary_is_not_part_of_the_run():
+    """`/` after the last pair, with a boundary right after it: only the next
+    chunk shows no NUL follows, and the run must not keep it."""
+    data = "http://a.example".encode("utf-16-le") + b"/x"
+    assert _same_at_every_chunk_size(data)["urls"] == ["http://a.example"]
+
+
+def test_a_long_wide_run_does_not_start_after_a_printable_byte():
+    """The pattern's guard: a UTF-16 run may not begin right after printable
+    ASCII. The path for a long run reaching the buffer's end took its start
+    from a backwards walk that never asked the pattern."""
+    data = b"7" + "http://a.example".encode("utf-16-le") + b"\x00"
+    assert _same_at_every_chunk_size(data)["urls"] == []

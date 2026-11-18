@@ -50,6 +50,30 @@ IOC_PATTERNS = {
         r"/[^\s\"'<>|]{1,200})"),
 }
 
+#: What every match of each indicator pattern must contain. A pattern none
+#: of whose substrings is in a stretch of text cannot match it, so it is not
+#: run; the email pattern alone tries sixty four characters at every word
+#: before failing on `@`, and since v0.7.1 the patterns read whole document
+#: parts. Exact, and held in step with the patterns by a test.
+_IOC_HINTS = {
+    "urls": ("://",),
+    "emails": ("@",),
+    "ipv4": (".",),
+    "registry_paths": ("HKEY_", "HKLM\\", "HKCU\\", "HKCR\\", "HKU\\"),
+    "mutexes": ("Global\\", "Local\\"),
+    "windows_paths": (":\\",),
+    "unix_paths": ("/",),
+}
+
+#: Characters no indicator can contain: every pattern above excludes them
+#: from its value. A long run is cut into tokens at these before it is read,
+#: so a token is never split across two reads. Only printable ASCII reaches
+#: here, so space is the only whitespace a run can hold.
+_BREAKS = (" ", '"', "'", "<", ">")
+
+_ASCII_PREFIX = re.compile(rb"[" + PRINTABLE + rb"]*")
+_WIDE_PREFIX = re.compile(rb"(?:[" + PRINTABLE + rb"]\x00)*")
+
 # Registry locations that survive a reboot. Kept in config rather than here so
 # the list can grow without a code change.
 RUN_KEY_MARKERS = ("currentversion\\run", "currentversion\\runonce",
@@ -109,6 +133,25 @@ class StringsExtractor(StreamExtractor):
         self._found: dict[str, list[tuple[str, bool]]] = {"ascii": [], "wide": []}
         self._counts = {"ascii": 0, "wide": 0}
         self._long = 0
+        # Indicators are found as runs arrive, over every run and every block
+        # of a long one, rather than afterwards over the retained list. Until
+        # v0.7.1 they came from the first `strings_max_retained` strings, and
+        # from the first `strings_max_length` bytes of each: a URL 10 KB into
+        # `document.xml` was never looked at.
+        # Per kind, merged in a fixed order at the end. The two scanners
+        # take turns on every chunk, so a shared list would order its values
+        # (and choose which ones a full list keeps) by where the chunks fell.
+        self._iocs: dict[str, dict[str, list[str]]] = {
+            kind: {name: [] for name in IOC_PATTERNS} for kind in ("ascii", "wide")}
+        self._ioc_truncated: set[str] = set()
+        self._ioc_limit = config_int(config, "strings_max_iocs", 128)
+        self._fragments = 0
+        self._cut_tokens = 0
+        # Per kind: the unfinished token carried from one block of a long run
+        # to the next, where it starts in the file, and whether the rest of a
+        # token too long to keep is being passed over.
+        self._spill = {"ascii": ("", 0), "wide": ("", 0)}
+        self._dropping = {"ascii": False, "wide": False}
         self._tokens = config_int(config, "api_max_token_scan_bytes", 128)
         self._secret_min = config_int(config, "secrets_min_entropy_length", 24)
         self._secret_ratio = config_ratio(config, "secrets_entropy_ratio", 0.95)
@@ -117,7 +160,7 @@ class StringsExtractor(StreamExtractor):
         # hold any number of them and this list is the one accumulator here
         # that a sample controls the size of - the API set is bounded by a
         # vocabulary, this is not.
-        self._secrets: list[Any] = []
+        self._secrets: dict[str, list[Any]] = {"ascii": [], "wide": []}
         self._secrets_dropped = 0
         # Bounded by the registry, not by the sample: this can never hold more
         # than the vocabulary, whatever the file does. It is the only
@@ -127,15 +170,74 @@ class StringsExtractor(StreamExtractor):
 
     def feed(self, chunk: bytes) -> None:
         for kind, scanner in self._scanners.items():
-            for run, over_length, offset in scanner.feed(chunk):
-                self._record(kind, run, over_length, offset)
+            for piece, offset, first, last, over_length in scanner.feed(chunk):
+                self._record(kind, piece, offset, first, last, over_length)
 
-    def _record(self, kind: str, run: bytes, over_length: bool, offset: int) -> None:
-        self._counts[kind] += 1
-        if over_length:
-            self._long += 1
-        text = run.decode("ascii", "replace") if kind == "ascii" else \
-            run[::2].decode("ascii", "replace")
+    def _record(self, kind: str, piece: bytes, offset: int, first: bool,
+                last: bool, over_length: bool) -> None:
+        """One run, or one block of a long run, as it arrives.
+
+        A short run is one call with `first` and `last` both set. A long one
+        arrives in blocks of `strings_max_length`, and the blocks are cut
+        into whole tokens before anything reads them: no indicator can hold
+        a space, a quote or an angle bracket (every pattern excludes them),
+        so a block is read up to its last one and the unfinished token is
+        carried into the next. Each token is read exactly once, whole, with
+        the character before it as context. Only a token longer than the
+        ceiling with no break in it is still cut, and that is what the cut
+        line now counts.
+        """
+        stride = 1 if kind == "ascii" else 2
+        text = piece.decode("ascii", "replace") if kind == "ascii" else \
+            piece[::2].decode("ascii", "replace")
+        if first:
+            self._counts[kind] += 1
+            if over_length:
+                self._long += 1
+            # The cap is shared across both kinds, not granted to each.
+            # Per-kind it was a ceiling of twice what the config asked for,
+            # and the comment beside the default claimed the product as the
+            # worst case. What is kept is a run's first block, as before.
+            if len(self._found["ascii"]) + len(self._found["wide"]) < self._keep:
+                self._found[kind].append((text, over_length))
+            self._spill[kind] = ("", offset)
+            self._dropping[kind] = False
+
+        if self._dropping[kind]:
+            # The rest of a token already cut: pass over it to the next break.
+            breaks = [i for i in (text.find(c) for c in _BREAKS) if i >= 0]
+            if not breaks:
+                if last:
+                    self._dropping[kind] = False
+                return
+            skip = min(breaks)
+            text, offset = text[skip:], offset + skip * stride
+            self._dropping[kind] = False
+
+        spill, spill_offset = self._spill[kind]
+        segment = spill + text
+        start = spill_offset if spill else offset
+        if last:
+            self._spill[kind] = ("", 0)
+            if segment:
+                self._scan(kind, segment, start, cut=False)
+            return
+        at = max(segment.rfind(c) for c in _BREAKS)
+        if at > 0:
+            self._scan(kind, segment[:at + 1], start, cut=False)
+            # The break is kept as the next token's context, so a pattern
+            # that needs the character before a value still sees one.
+            self._spill[kind] = (segment[at:], start + at * stride)
+        elif len(segment) > self._max:
+            self._scan(kind, segment[:self._max], start, cut=True)
+            self._cut_tokens += 1
+            self._spill[kind] = ("", 0)
+            self._dropping[kind] = True
+        else:
+            self._spill[kind] = (segment, start)
+
+    def _scan(self, kind: str, text: str, offset: int, cut: bool) -> None:
+        """API names, secrets and indicators in one whole stretch of text."""
 
         # API matching runs here rather than over the retained list, and that
         # placement is the whole point of doing it in the extractor. The
@@ -159,22 +261,39 @@ class StringsExtractor(StreamExtractor):
                                             min_length=self._secret_min,
                                             entropy_ratio=self._secret_ratio,
                                             stride=stride):
-            if len(self._secrets) >= self._secret_cap:
+            if len(self._secrets[kind]) >= self._secret_cap:
                 self._secrets_dropped += 1
                 continue
-            self._secrets.append(candidate)
+            self._secrets[kind].append(candidate)
 
-        # The cap is shared across both kinds, not granted to each. Per-kind
-        # it was a ceiling of twice what the config asked for, and the comment
-        # beside the default claimed the product as the worst case.
-        if len(self._found["ascii"]) + len(self._found["wide"]) < self._keep:
-            self._found[kind].append((text, over_length))
+        for name, pattern in IOC_PATTERNS.items():
+            if not any(hint in text for hint in _IOC_HINTS[name]):
+                continue
+            bucket = self._iocs[kind][name]
+            for match in pattern.finditer(text):
+                group = match.lastindex or 0
+                value = match.group(group)
+                # A value against the end of a token that was cut is the half
+                # of it we kept, and reporting it would report our own ceiling
+                # as though the file contained it. Since v0.7.1 that happens
+                # only to a token longer than the ceiling with no break in it.
+                if cut and match.end(group) == len(text):
+                    self._fragments += 1
+                    continue
+                if name == "ipv4" and not _is_ipv4(value):
+                    continue
+                if value in bucket:
+                    continue
+                if len(bucket) >= self._ioc_limit:
+                    self._ioc_truncated.add(name)
+                    continue
+                bucket.append(value)
 
     def finish(self, path: Path, ctx: dict[str, Any],
                config: dict[str, Any]) -> dict[str, Any]:
         for kind, scanner in self._scanners.items():
-            for run, over_length, offset in scanner.flush():
-                self._record(kind, run, over_length, offset)
+            for piece, offset, first, last, over_length in scanner.flush():
+                self._record(kind, piece, offset, first, last, over_length)
 
         retained = self._found["ascii"] + self._found["wide"]
         strings = [text for text, _cut in retained]
@@ -187,8 +306,14 @@ class StringsExtractor(StreamExtractor):
             "over_length": self._long,
             "min_length": self._min,
         }
-        indicators, truncated = self._indicators(retained, config)
+        indicators, truncated = self._indicators(config)
         data.update(indicators)
+        # ASCII first, then UTF-16, as the retained list always was; the cap
+        # is applied to the merged list so it keeps the same candidates
+        # however the two scanners' turns fell.
+        merged = self._secrets["ascii"] + self._secrets["wide"]
+        secrets_kept = merged[:self._secret_cap]
+        self._secrets_dropped += len(merged) - len(secrets_kept)
 
         # Which known API names appeared, and under which capabilities. Not
         # the strings themselves, and not subject to the switch below: this
@@ -204,8 +329,8 @@ class StringsExtractor(StreamExtractor):
         # and there is no switch that would let one: `--json` writes this
         # dictionary to a file somebody keeps.
         data["secrets"] = {
-            "candidates": [c.as_dict() for c in self._secrets],
-            "counts": secret_engine.summarise(self._secrets),
+            "candidates": [c.as_dict() for c in secrets_kept],
+            "counts": secret_engine.summarise(secrets_kept),
             "candidates_truncated": bool(self._secrets_dropped),
         }
 
@@ -227,18 +352,25 @@ class StringsExtractor(StreamExtractor):
         # renders. A capped list that reads as a total is the failure this
         # project has now made four times in four extractors.
         problems = []
-        if data["retained_truncated"]:
+        if data["retained_truncated"] and config_bool(config, "strings_include_text", False):
+            # Only when the list is shown. Since v0.7.1 every string is read
+            # for indicators, secrets and API names whatever is kept, so the
+            # cap shortens the dump and nothing else, and saying "the
+            # indicators below were found in a subset" would now be untrue.
             problems.append(
                 f"strings: only the first {len(strings)} of "
-                f"{data['ascii_count'] + data['wide_count']} strings were kept, so "
-                "the indicators below were found in a subset")
+                f"{data['ascii_count'] + data['wide_count']} strings are listed")
         if truncated:
             problems.append(
                 f"indicators: {', '.join(sorted(truncated))} reached "
                 "strings_max_iocs, so those lists are partial")
-        if self._long:
-            message = (f"strings: {self._long} run(s) were longer than "
-                       "strings_max_length and contributed only their first bytes")
+        data["tokens_cut"] = self._cut_tokens
+        if self._cut_tokens:
+            # Not every long run, as before v0.7.1: a long run is now read in
+            # full. Only a token longer than the ceiling with no space, quote
+            # or angle bracket in it is still cut, and only that loses text.
+            message = (f"strings: {self._cut_tokens} token(s) longer than "
+                       "strings_max_length with no break in them were read only up to it")
             # Said beside the cause rather than as its own line, because the
             # count is meaningless without it: these are values that ended
             # where the cut did, so they were half of something.
@@ -255,51 +387,23 @@ class StringsExtractor(StreamExtractor):
             data["parse_errors"] = problems
         return data
 
-    def _indicators(self, retained: list[tuple[str, bool]],
-                    config: dict[str, Any]) -> dict[str, Any]:
-        limit = config_int(config, "strings_max_iocs", 128)
-        found = {name: [] for name in IOC_PATTERNS}
-        truncated = set()
-        fragments = 0
-        for text, cut in retained:
-            for name, pattern in IOC_PATTERNS.items():
-                for match in pattern.finditer(text):
-                    group = match.lastindex or 0
-                    value = match.group(group)
-                    # A string that hit `strings_max_length` ends mid-value,
-                    # and the value sitting against that end is the half we
-                    # kept of something longer. `http://sche` is what a DOCX
-                    # header's namespace block looks like after a 1024-byte
-                    # cut: it matches no boilerplate prefix, because it is
-                    # not a URL at all. Dropped rather than counted into
-                    # `report.data`, which is the one list here that is meant
-                    # to say what the file holds.
-                    #
-                    # It costs a real value that happens to end on the cut.
-                    # That is unavoidable - the bytes that would tell the two
-                    # apart are the bytes we did not keep - so the count is
-                    # published and the cut is already reported.
-                    #
-                    # The group's end rather than the match's, which today is
-                    # the same byte in every pattern here: `unix_paths` is the
-                    # only one whose value is a group, and the group is the
-                    # tail of its match. Mutation testing confirms no test
-                    # fails if this reads `match.end(0)`, so it says so here
-                    # rather than pretending to be pinned. It is written this
-                    # way because the next pattern with a trailing context
-                    # would otherwise measure the wrong byte quietly.
-                    if cut and match.end(group) == len(text):
-                        fragments += 1
+    def _indicators(self, config: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+        """What `_scan` collected, with the measured exclusions counted."""
+        limit = self._ioc_limit
+        truncated = set(self._ioc_truncated)
+        found: dict[str, list[str]] = {}
+        for name in IOC_PATTERNS:
+            merged: list[str] = []
+            for kind in ("ascii", "wide"):
+                for value in self._iocs[kind][name]:
+                    if value in merged:
                         continue
-                    if name == "ipv4" and not _is_ipv4(value):
-                        continue
-                    bucket = found[name]
-                    if value in bucket:
-                        continue
-                    if len(bucket) >= limit:
+                    if len(merged) >= limit:
                         truncated.add(name)
                         continue
-                    bucket.append(value)
+                    merged.append(value)
+            found[name] = merged
+        fragments = self._fragments
         result: dict[str, Any] = dict(found)
         result["indicators_truncated"] = sorted(truncated)
         result["indicators_fragments"] = fragments
@@ -475,6 +579,14 @@ class _RunScanner:
         self.carry = b""
         self.skipping = False
         self.skip_half = False
+        # A run longer than the ceiling, not yet handed over: the bytes since
+        # the last whole block, where they start, and whether a block of it
+        # has been handed over yet. Until v0.7.1 the rest of a long run was
+        # discarded here, which is how a URL 10 KB into `document.xml` was
+        # never seen; it is now handed over a block at a time.
+        self.long = b""
+        self.long_offset = 0
+        self.long_first = True
         # The byte immediately before the current buffer, so the wide
         # pattern's lookbehind has something to look at even when a run
         # begins at a chunk boundary. NUL rather than None at the start of a
@@ -516,17 +628,15 @@ class _RunScanner:
         """
         index = 0
         if self.step == 1:
-            while index < len(buffer) and 0x20 <= buffer[index] <= 0x7E:
-                index += 1
-            return index, False
+            # A regex rather than a loop over bytes: inside a long run this
+            # is called on every chunk, and the loop cost 1.3 s per 5 MB.
+            return _ASCII_PREFIX.match(buffer).end(), False
         if self.skip_half:
             if index < len(buffer) and buffer[index] == 0:
                 index += 1
             else:
                 return index, False
-        while (index + 1 < len(buffer) and 0x20 <= buffer[index] <= 0x7E
-               and buffer[index + 1] == 0):
-            index += 2
+        index = _WIDE_PREFIX.match(buffer, index).end()
         half = index < len(buffer) and 0x20 <= buffer[index] <= 0x7E
         return (index + 1 if half else index), half
 
@@ -536,14 +646,25 @@ class _RunScanner:
         self.fed += len(chunk)
 
         if self.skipping:
-            # Inside a run already emitted at its full length. Discard the
-            # rest of it, and stop skipping the moment it ends - which the
-            # first version never did, so an unrelated later string was
-            # thrown away as though it were a tail.
+            # Inside a run longer than the ceiling. Hand it over a block at a
+            # time, and stop the moment it ends - which the first version of
+            # the skip never did, so an unrelated later string was thrown
+            # away as though it were a tail.
             consumed, half = self._leading_run_end(chunk)
             if consumed == len(chunk):
+                self.long += chunk
+                yield from self._blocks(last=False)
                 self.skip_half = half
                 return
+            # A lone printable byte the run ended on is not half of a pair in
+            # it; it was dropped here before, and still is. Nor is one held
+            # over from the previous chunk, when a boundary fell right after
+            # it and only this chunk showed that no NUL follows: a run of
+            # pairs has an even length, and an odd one ends on that byte.
+            self.long += chunk[:consumed - (1 if half else 0)]
+            if self.step == 2 and len(self.long) % 2:
+                self.long = self.long[:-1]
+            yield from self._blocks(last=True)
             self.skipping = False
             self.skip_half = False
             if consumed:
@@ -575,13 +696,30 @@ class _RunScanner:
                 break
             run = match.group()
             if len(run) >= self.ceiling:
-                yield run[: self.ceiling], True, origin + match.start()
+                self.long, self.long_offset, self.long_first = run, origin + match.start(), True
+                yield from self._blocks(last=True)
             else:
-                yield run, False, origin + match.start()
+                yield run, origin + match.start(), True, True, False
 
         pending = buffer[tail:]
         if len(pending) >= self.ceiling:
-            yield pending[: self.ceiling], True, origin + tail
+            # Where the run starts is the pattern's to say, not the backwards
+            # walk's: the walk finds bytes that could continue a run, and a
+            # UTF-16 run may not begin right after a printable byte. Until
+            # v0.7.1 this branch took the walk's word for it, and the text it
+            # wrongly included was then thrown away as a cut fragment; read
+            # in full, it surfaced as `http://` where the run is `ttp://`.
+            found = self.pattern.search(buffer, tail)
+            # A UTF-16 run can stop one byte short of the buffer's end, on a
+            # half pair the next chunk may complete.
+            reaches = found is not None and found.end() >= len(buffer) - (self.step - 1)
+            if reaches and found.start() > tail:
+                tail = found.start()
+                self.prior = buffer[tail - 1]
+                pending = buffer[tail:]
+        if len(pending) >= self.ceiling:
+            self.long, self.long_offset, self.long_first = pending, origin + tail, True
+            yield from self._blocks(last=False)
             self.skipping = True
             # The ceiling is a whole number of units, so what is left of the
             # run keeps the alignment `pending` started with.
@@ -589,14 +727,52 @@ class _RunScanner:
         else:
             self.carry = pending
 
+    def _blocks(self, last: bool):
+        """Hand over the whole blocks of a long run, and with `last` the rest.
+
+        Blocks are a ceiling long and counted from the run's first byte, so
+        where they fall depends on the run and never on where the chunks
+        did. Each is (bytes, offset, first, last, over_length), and only the
+        first carries `over_length`, so a long run is counted once.
+        """
+        # An index rather than slicing what is left after each block: a run
+        # held whole in a 1 MiB buffer is a thousand blocks, and re-slicing
+        # the remainder each time copied it a thousand times. Trimmed once.
+        # A whole block is never the last piece, whichever path produced it;
+        # the remainder, possibly empty, always is. The first version marked
+        # a final block of exactly the ceiling as last when the run was held
+        # whole in one buffer and as not last when it arrived across chunks,
+        # and the token reader cuts the two differently: a fuzzer found 12 of
+        # 1,500 inputs whose indicators depended on the chunk size.
+        at, size = 0, len(self.long)
+        while size - at >= self.ceiling:
+            yield (self.long[at:at + self.ceiling], self.long_offset, self.long_first, False,
+                   self.long_first)
+            at += self.ceiling
+            self.long_offset += self.ceiling
+            self.long_first = False
+        self.long = self.long[at:]
+        if last:
+            # Possibly empty: the run may end exactly on a block boundary,
+            # and the reader still has to be told it ended.
+            yield self.long, self.long_offset, self.long_first, True, self.long_first
+            self.long = b""
+            self.long_first = True
+
     def flush(self):
+        if self.skipping:
+            # The file ended inside a long run. A trailing half pair is not
+            # part of a UTF-16 run.
+            if self.step == 2 and len(self.long) % 2:
+                self.long = self.long[:-1]
+            yield from self._blocks(last=True)
         # Guarded the same way, so a run left in the carry is subject to the
         # same rule as one found mid-buffer. `fullmatch` against the bare
         # carry would have no predecessor to look at and would accept a run
         # the buffer path had refused.
         guarded = bytes([self.prior]) + self.carry
         if self.carry and self.pattern.fullmatch(guarded, 1):
-            yield self.carry[: self.ceiling], False, self.fed - len(self.carry)
+            yield self.carry[: self.ceiling], self.fed - len(self.carry), True, True, False
         self.carry = b""
         self.skipping = False
         self.skip_half = False

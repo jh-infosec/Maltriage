@@ -1,5 +1,129 @@
 # Changelog
 
+## Version 0.7.1 - the rest of every long string
+
+### What the document corpus showed
+
+The v0.7.0 run over 273 documents said `came back short: strings on 1417
+file(s)`: 1,417 of about 3,975 files and parts. The note was true and
+understated. A printable run longer than `strings_max_length` (1,024 bytes)
+gave its first 1,024 bytes to every reader in this extractor and the rest
+to nothing, and an OOXML part is usually one run from start to end. So for
+every `.docx`, `.xlsx` and `.pptx`, a URL, address, path or credential more
+than a kilobyte into a part was never looked at:
+
+```
+document.xml   10,216 bytes
+before   urls: the namespace in its first line
+after    urls: that, and https://deep-link.example/report, 10 KB in
+```
+
+The ceiling was meant to bound memory, and it did; it also bounded what was
+read, which nobody chose. The retained-string cap had the same side effect
+one level up: indicators came from the first 2,048 strings kept, so a file
+with more strings than that was searched in part.
+
+### Reading it all, in bounded memory
+
+**Every indicator pattern excludes spaces, quotes and angle brackets from
+its value.** No URL, address, path or email can contain one. So a long run
+is now handed over in blocks of the ceiling, and each block is read up to
+its last such break, with the unfinished token carried into the next. Every
+token is read exactly once and whole, with the character before it as
+context. Nothing is read twice, and no half value has to be explained away.
+
+Only a single token longer than the ceiling with no break in it (a base64
+blob, say) is still cut, and only that is now reported:
+
+```
+strings: 1 token(s) longer than strings_max_length with no break in them
+were read only up to it, setting aside 1 indicator(s) left incomplete by
+the cut
+```
+
+The v0.5.4 rule still applies to it: a value against the cut is half of
+something, and is counted as a fragment rather than reported. A long run
+that is read in full says nothing, so the 1,417 should fall to the handful
+of parts that hold an unbroken blob.
+
+Indicators, secrets and API names are now collected as runs arrive, over
+every string, rather than afterwards over the retained list. The retained
+cap shortens the listed text (`strings_include_text`) and nothing else, and
+says so only when the text is listed.
+
+### What it cost, and how much of that was avoidable
+
+Reading all of a part is more work than reading its head. The first version
+took 19 MiB of XML-like text from 1.9 s to 13.2 s, and nearly all of that
+was avoidable:
+
+- **Exact pre-filters.** Every secret rule and every indicator pattern has
+  a substring its matches must contain (`AKIA`, `ghp_`, `://`, `@`, `:\`).
+  A rule none of whose substrings is in a stretch of text cannot match it,
+  so it is not run. A substring test is a scan at memory speed, and the
+  rules' leading lookbehinds defeat the regex engine's own literal shortcut.
+  The email pattern alone tried sixty four characters at every word before
+  failing on `@`. Tests hold each hint list in step with its patterns, with
+  an example match per rule, so a rule added without a hint fails.
+- **A regex where a byte loop was.** Finding where a long run ends walked it
+  a byte at a time in Python, 1.3 s per 5 MB. That loop was in v0.7.0 too.
+
+```
+19 MiB of XML-like text      v0.7.0  1.94 s   v0.7.1  2.19 s
+19 MiB with no break in it   v0.7.0  1.99 s   v0.7.1  0.45 s
+```
+
+### Three chunk-size dependencies, found by fuzzing before release
+
+This extractor's one promise is that its result does not depend on how the
+file was read in chunks. A fuzzer compared every result at chunk sizes of
+1, 2, 3, 7 and 64 bytes against the whole file, over random mixes of ASCII,
+UTF-16, breaks, indicators and long tokens. The first draft failed it, and
+each failure became a test:
+
+- **A final block of exactly the ceiling** was marked last when the run was
+  held whole in one buffer and not last when it arrived across chunks, and
+  the token reader cuts the two differently. Whole blocks are never last
+  now, on either path.
+- **A half pair held over a chunk boundary.** A printable byte after the
+  last UTF-16 pair, with a boundary right after it, was kept as part of the
+  run because only the next chunk showed no NUL follows. A UTF-16 run has
+  an even length, and an odd one now ends on that byte.
+- **A UTF-16 run starting right after printable ASCII**, which the pattern
+  forbids. The path for a long run that reaches the buffer's end took its
+  start from a backwards walk that never asked the pattern. This one is from
+  v0.4: the text it wrongly included used to be cut away as a fragment, so
+  it never showed. The pattern now says where the run starts.
+
+On ASCII, no result depends on the chunk size. On mixed ASCII and UTF-16,
+17 of 1,000 random inputs still do, against 23 for v0.7.0 on the same
+inputs, and every remaining case gives the same answers on both versions:
+it is the ambiguity this class has documented since v0.4, a UTF-16 string
+that begins right after ASCII with no NUL between.
+
+### What will move on a corpus
+
+`urls_present`, `ipv4_present`, the path keys and `secret_candidate` read
+more of every document, so their rates should rise. None of them is at the
+gate, so the gate should not move. `maltriage diff` against the v0.7.0 run
+will show which files changed and why.
+
+### Tests
+
+Fifty more than v0.7.0, 900 in all. Five old tests encoded the old cut
+and were rewritten to the new behaviour with their intent kept: a half
+value is never reported, and now fewer values are halved.
+
+Seventeen mutants. Seven were caught at once. Four became tests: a half
+pair at the end of a long run, the same at the end of the file, an offset
+after a dropped token, and the context tier for names other than
+`password`. One only costs speed and is held by the hint and timing tests.
+Four are equivalent. **One I called equivalent was not:** emitting a final
+block of exactly the ceiling as not-last changes nothing in a single
+buffer, so no test failed, and it was the first of the three chunk-size
+bugs above. The fuzzer found what the reasoning missed, and the three fixes
+each fail their test when reverted.
+
 ## Version 0.7.0 - what changed between two runs
 
 The first v0.7 item. Since v0.5.17 every release was checked the same way:
