@@ -598,6 +598,129 @@ def build_elf(sections=None, segments=None, bitness=64, endian="<",
     return bytes(out) + trailing
 
 
+# Windows shortcuts
+
+_MY_COMPUTER = bytes.fromhex("e04fd020ea3a6910a2d808002b30309d")
+
+
+def _short_name(name: str) -> str:
+    """An 8.3 name the way Windows would make one, for the cases that need it."""
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    if len(stem) <= 8 and len(ext) <= 3 and " " not in name:
+        return name.upper()
+    short = stem.replace(" ", "").upper()[:6] + "~1"
+    return short + ("." + ext.upper()[:3] if ext else "")
+
+
+def _file_entry(name: str, is_file: bool, short_names: bool, version: int) -> bytes:
+    primary = (_short_name(name) if short_names else name).encode("cp1252") + b"\0"
+    if len(primary) % 2:
+        primary += b"\0"
+    body = struct.pack("<IIH", 0, 0, 0x20 if is_file else 0x10) + primary
+    extension = struct.pack("<HIII", version, 0xBEEF0004, 0, 0) + struct.pack("<H", 0x2E)
+    if version >= 7:
+        extension += struct.pack("<H", 0) + b"\0" * 16
+    extension += struct.pack("<H", 0)
+    if version >= 9:
+        extension += b"\0" * 4
+    if version >= 8:
+        extension += b"\0" * 4
+    extension += name.encode("utf-16-le") + b"\0\0"
+    extension += struct.pack("<H", 14 + len(primary))
+    extension = struct.pack("<H", len(extension) + 2) + extension
+    # `extension` now starts at its own size field, which the struct.pack
+    # above put first; the version follows it.
+    kind = 0x32 if is_file else 0x31
+    item = bytes([kind, 0]) + body + extension
+    return struct.pack("<H", len(item) + 2) + item
+
+
+def _id_list(path: str, short_names: bool, version: int) -> bytes:
+    drive, _, rest = path.partition("\\")
+    items = struct.pack("<H", 20) + bytes([0x1F, 0x50]) + _MY_COMPUTER
+    volume = bytes([0x2F]) + (drive + "\\").encode() + b"\0" * 19
+    items += struct.pack("<H", len(volume) + 2) + volume
+    parts = [part for part in rest.split("\\") if part]
+    for index, part in enumerate(parts):
+        items += _file_entry(part, index == len(parts) - 1, short_names, version)
+    items += b"\0\0"
+    return struct.pack("<H", len(items)) + items
+
+
+def _link_info(path: str, unicode: bool = False) -> bytes:
+    """LinkInfo with a local path; with `unicode`, the 0x24 header and a
+    UTF-16 copy of the path, which Windows writes when the ANSI one would
+    lose characters."""
+    volume = struct.pack("<IIII", 0x11, 3, 0x12345678, 0x10) + b"\0"
+    base = path.encode("cp1252", "replace") + b"\0"
+    header = 0x24 if unicode else 0x1C
+    suffix_at = header + len(volume) + len(base)
+    body = volume + base + b"\0"
+    tail = b""
+    if unicode:
+        body += b"\0"
+        wide_at = header + len(body)
+        tail = path.encode("utf-16-le") + b"\0\0"
+        wide_suffix_at = wide_at + len(tail)
+        tail += b"\0\0"
+    size = header + len(body) + len(tail)
+    fields = struct.pack("<IIIIIII", size, header, 1, header, header + len(volume), 0, suffix_at)
+    if unicode:
+        fields += struct.pack("<II", wide_at, wide_suffix_at)
+    return fields + body + tail
+
+
+def _counted(text: str, unicode: bool) -> bytes:
+    raw = text.encode("utf-16-le" if unicode else "cp1252")
+    return struct.pack("<H", len(text)) + raw
+
+
+def build_lnk(target: str = "C:\\Windows\\System32\\notepad.exe", arguments: str | None = None,
+              icon: str | None = None, working_dir: str | None = None,
+              description: str | None = None, relative_path: str | None = None,
+              show: int = 1, id_list: bool = True, link_info: bool = True,
+              environment: str | None = None, icon_environment: str | None = None,
+              machine_id: str | None = "test-pc", trailing: bytes = b"",
+              unicode: bool = True, short_names: bool = False,
+              item_version: int = 9, link_info_unicode: bool = False) -> bytes:
+    """A Windows shortcut built to MS-SHLLINK, the way Explorer writes one.
+
+    Every part is optional, because the attacks differ in which parts they
+    keep: a shortcut made by a script often has no shell item list at all,
+    only the environment block.
+    """
+    flags = 0x80 if unicode else 0
+    parts = b""
+    if id_list:
+        flags |= 0x1
+        parts += _id_list(target, short_names, item_version)
+    if link_info:
+        flags |= 0x2
+        parts += _link_info(target, link_info_unicode)
+    for text, bit in ((description, 0x4), (relative_path, 0x8), (working_dir, 0x10),
+                      (arguments, 0x20), (icon, 0x40)):
+        if text is not None:
+            flags |= bit
+            parts += _counted(text, unicode)
+    extra = b""
+    for path, signature, bit in ((environment, 0xA0000001, 0x200),
+                                 (icon_environment, 0xA0000007, 0x4000)):
+        if path is not None:
+            flags |= bit
+            ansi = path.encode("cp1252")[:259].ljust(260, b"\0")
+            wide = path.encode("utf-16-le")[:518].ljust(520, b"\0")
+            extra += struct.pack("<II", 0x314, signature) + ansi + wide
+    if machine_id is not None:
+        extra += (struct.pack("<IIII", 0x60, 0xA0000003, 0x58, 0)
+                  + machine_id.encode()[:15].ljust(16, b"\0") + b"\0" * 64)
+    header = (struct.pack("<I", 0x4C) + bytes.fromhex("0114020000000000c000000000000046")
+              + struct.pack("<II", flags, 0x20) + b"\0" * 24
+              + struct.pack("<IiI", 0, 0, show) + b"\0" * 12)
+    return header + parts + extra + b"\0\0\0\0" + trailing
+
+
 # Sample files
 #
 # Every fixture is synthetic. The whole test suite runs without a single

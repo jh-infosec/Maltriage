@@ -1,5 +1,122 @@
 # Changelog
 
+## Version 0.7.3 - shortcut files
+
+### Why shortcuts
+
+When Office began blocking macros in files from the internet, the
+attachment that replaced the macro document was, more often than not, a
+shortcut: `invoice.pdf.lnk`, usually inside an archive or a disk image,
+starting `powershell -w hidden -enc ...` when opened. Explorer never shows
+the `.lnk` extension, even with extensions turned on. Until this release a
+shortcut was `unrecognised_format` and nothing else.
+
+### What it reads
+
+A shortcut starts with its header size and a class identifier, twenty bytes
+no other format starts with, so it gets a magic number and a family, `lnk`.
+The new `lnk` extractor reads the structure (MS-SHLLINK) from the one pass
+the stream extractors share, keeping at most `lnk_max_bytes` (1 MiB):
+
+- **the target, from every place a shortcut names one**: the shell item
+  list, the `LinkInfo` block and the environment block. They need not
+  agree, and a shortcut whose item list says Notepad and whose environment
+  block says PowerShell is reported as both. A reader that trusted one
+  place would be a reader told which place to trust.
+- the working directory, the icon location (from either place it can be),
+  the window it asks for, and the machine name of the computer it was made
+  on, from the tracker block. These are paths and a host name, reported
+  through `safe_text` the way member names are, because they are what an
+  analyst pivots on.
+- **the arguments, which never reach a report**, for the reason a script's
+  text does not. Their length and the longest run of whitespace in them do.
+
+The shell items store an 8.3 primary name, `POWERS~1.EXE` for
+`powershell.exe`, which says nothing about what runs. The long name is in
+an extension block whose layout moved twice between Windows versions; it is
+read for every version, found from the pointer each item keeps to it, and
+preferred, because it is the name the shell resolves.
+
+### What it says
+
+The command line, target and arguments together, is handed to the script
+reader from v0.7.2, so a shortcut needs no dropper rules of its own and
+cannot disagree with a script about what a dropper is. Two things are done
+to it first:
+
+- **whitespace is collapsed**, so arguments padded with spaces or line
+  breaks to push the command out of the Properties dialog push nothing out
+  of reach of the shapes;
+- **for a `cmd.exe` target, the caret is removed**, because
+  `p^o^w^e^r^s^h^e^l^l` is `powershell` to cmd.
+
+| key | severity | what it says |
+|---|---|---|
+| `lnk_dropper` | medium | the command line has the shape of a dropper, named |
+| `lnk_interpreter_target` | low | it starts PowerShell, cmd, mshta, wscript and the like |
+| `lnk_padded_arguments` | low | a run of 64 or more whitespace characters, or any line break, in the arguments |
+| `lnk_document_icon` | low | it starts an interpreter wearing a document's icon or a document program's |
+| `lnk_hidden_window` | low | it asks for no window, or starts an interpreter minimised |
+| `lnk_appended_data` | low | bytes after the shortcut's terminal block |
+
+Only the shape is at the gate, as with scripts. Every Start Menu has a
+PowerShell shortcut, Git's shortcuts start a shell, and nothing in the
+other four keys is something an ordinary shortcut never does. Each may
+earn a higher severity on a measurement; none has one yet.
+
+### Measured
+
+77 real shortcuts from a Windows Start Menu (the others there are hard
+links Windows shares between profiles, which the device bridge would not
+read):
+
+```
+gate (medium+): flags 0.0% of benign files
+benign families: lnk 77
+```
+
+No `lnk_` key fired on any of them. Every field was compared with
+LnkParse3, an independent parser, on all 77: arguments, icon, working
+directory, relative path, LinkInfo path, environment path and machine name
+agreed on every one, and the long names read from the shell items agreed
+with the LinkInfo path on all 63 shortcuts that have both. pylnk3, a third
+implementation, writes shortcuts that this reader reads, and reads the long
+names out of `build_lnk`'s for extension block versions 3, 7, 8 and 9.
+
+A larger benign set is on every Windows machine: the Start Menu of the
+current user, the Desktop, and `Recent`, which holds a shortcut for every
+document opened lately.
+
+### Hostile input
+
+Every truncation of a shortcut, 3,000 randomly mutated ones, an item list
+claiming 65,535 bytes, a `LinkInfo` claiming 4 GiB, a string count past the
+end and a chain of a thousand extra blocks are read without raising, and
+the result says what was cut short. The item count, the block count and the
+bytes kept are capped, and every offset the file supplies is checked
+against what was read.
+
+### Found on the way
+
+**A test constant shadowed another 2,800 lines away.** The shortcut tests
+defined `_CMD` for cmd.exe's path; the DDE tests had defined `_CMD` for a
+DDE field, and six of them failed reading a path where a field should be.
+Caught because they failed. A test function defined twice would not have
+been: the first silently stops running. A test now fails if any
+module-level name in the test file is defined twice. There were none
+before this release.
+
+### Tests
+
+990 pass. Every mutant of the reader was killed: the extension block
+offsets and pointer, the printable check, the alignment after an odd
+length name, whitespace collapsing, caret removal, reading every target,
+the padding threshold, line breaks, the icon rule, the minimised rule,
+appended data, the dropper's severity, the block cap, the read limit and
+its note, the Unicode `LinkInfo` path, the ANSI strings, the family gate,
+`safe_text` on paths, the environment and icon blocks, the machine name,
+unread shell items, and the terminal block.
+
 ## Version 0.7.2 - script files
 
 ### Why scripts, and why now

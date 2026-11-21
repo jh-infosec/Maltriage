@@ -100,6 +100,7 @@ from .archives import (
 from .elf import ELF_MAGIC, ElfExtractor
 from .ole import OLE_MAGIC, OleExtractor
 from .scripts import ScriptExtractor
+from .lnk import LnkExtractor
 from .rules import (
     BUNDLED_RULES,
     HAVE_YARA,
@@ -125,6 +126,7 @@ __all__ = [
     "ElfExtractor", "ELF_MAGIC",
     "OleExtractor", "OLE_MAGIC",
     "ScriptExtractor",
+    "LnkExtractor",
     "ArchiveExtractor", "ARCHIVE_FAMILIES", "UNSUPPORTED_FAMILIES",
     "Budget", "budget_from", "safe_member_path",
     "YaraExtractor", "HAVE_YARA", "BUNDLED_RULES", "RULE_SUFFIXES",
@@ -140,5 +142,6 @@ def default_extractors() -> list[Extractor]:
             StringsExtractor(),
             PEExtractor(), ElfExtractor(), ArchiveExtractor(), OleExtractor(),
             ScriptExtractor(),
+            LnkExtractor(),
             YaraExtractor(),
             FuzzyHashExtractor()]

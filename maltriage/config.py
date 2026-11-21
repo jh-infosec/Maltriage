@@ -52,6 +52,9 @@ DEFAULT_CONFIG = {
         [0, "3c3f786d6c", "XML document", "xml"],
         [0, "7b5c727466", "RTF document", "rtf"],
         [0, "edabeedb", "RPM package", "rpm"],
+        # A shortcut's header size and class identifier, which every one
+        # starts with and nothing else does.
+        [0, "4c0000000114020000000000c000000000000046", "Windows shortcut", "lnk"],
     ],
     "executable_families": ["pe", "elf", "macho"],
 
@@ -314,6 +317,8 @@ DEFAULT_CONFIG = {
     # Text nothing else identified is read as a script up to this many
     # bytes. A dropper is short; a longer file says what was not read.
     "script_max_bytes": 1048576,
+    # A shortcut is a few kilobytes. Past this, only the size is counted.
+    "lnk_max_bytes": 1048576,
     "archive_max_member_bytes": 67108864,
 
     # Wall-clock seconds for the recursion. The known gap `architecture.md`
@@ -605,6 +610,7 @@ def validate_config(config):
     check_int("ppt_max_object_bytes")
     check_int("ppt_max_total_bytes")
     check_int("script_max_bytes")
+    check_int("lnk_max_bytes")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

@@ -421,7 +421,7 @@ precision and recall, so it comes before the classifier rather than after.
 - [x] A corpus manifest, so a sample set cannot shrink quietly *(v0.5.9; counts copies since v0.5.17)*
 - [x] Every indicator in a long string, not only its first kilobyte *(v0.7.1)*
 - [x] Script files: PowerShell, VBScript, JScript, HTA, WSF, batch and shell, and the shapes of a dropper in them *(v0.7.2)*
-- [ ] Shortcut files (`.lnk`) and what they run
+- [x] Shortcut files (`.lnk`) and what they run *(v0.7.3)*
 - [ ] Disk images (`.iso`, `.img`, `.vhd`) as containers
 - [ ] Objects embedded in RTF
 
