@@ -10927,3 +10927,164 @@ def test_the_extension_block_after_an_odd_length_primary_name_is_found_without_i
     item = bytearray(fixtures_module._file_entry("abcdefghij.exe", True, True, 9))
     item[-2:] = b"\x00\x00"
     assert lnk_module._id_list_path(bytes(item) + b"\x00\x00", []) == "abcdefghij.exe"
+
+
+# v0.7.4: the shell items Recent is made of, measured on one machine's 1,290
+# shortcuts: 588 web documents (a root folder and a URI item), 31 files under
+# the user's folder (delegate items), and four with nothing to spell out.
+
+_INTERNET = "871c5380-42a0-1069-a2ea-08002b30309d"
+_USERS_FILES = "59031a47-3f72-44a7-89c5-5595fe6b30ee"
+
+
+def _items_lnk(*items, **kwargs):
+    from maltriage import fixtures as fixtures_module
+    return lnk_module.parse(build_lnk(link_info=False, machine_id=None,
+                                      id_items=fixtures_module.lnk_id_list(*items), **kwargs))
+
+
+@pytest.mark.parametrize("unicode", [True, False])
+@pytest.mark.parametrize("data", [b"", b"\x01" * 40])
+def test_a_uri_item_is_the_target(unicode, data):
+    from maltriage import fixtures as fx
+    parsed = _items_lnk(fx.lnk_root_item(_INTERNET),
+                        fx.lnk_uri_item("https://contoso.invalid/sites/a/b.docx", unicode, data))
+    assert parsed["targets"] == {"id_list": "https://contoso.invalid/sites/a/b.docx"}
+    assert parsed["problems"] == [] and parsed["unread_items"] == []
+
+
+def test_a_uri_after_an_unexpected_data_block_is_found_by_its_scheme():
+    from maltriage import fixtures as fx
+    item = bytearray(fx.lnk_uri_item("https://contoso.invalid/a.docx", True, b"\x01" * 40))
+    struct.pack_into("<H", item, 4, 12)
+    parsed = _items_lnk(fx.lnk_root_item(_INTERNET), bytes(item))
+    assert parsed["targets"]["id_list"] == "https://contoso.invalid/a.docx"
+
+
+def test_a_uri_item_with_no_uri_is_unread():
+    from maltriage import fixtures as fx
+    item = bytearray(fx.lnk_uri_item("xx", True))
+    parsed = _items_lnk(fx.lnk_root_item(_INTERNET), bytes(item))
+    assert parsed["unread_items"] == ["61"]
+    assert "id_list" not in parsed["targets"]
+    assert any("class 0x61" in problem for problem in parsed["problems"])
+
+
+def test_an_unread_item_is_not_a_gap_when_another_part_names_the_target():
+    """v0.7.3 said `came back short` on 622 of 1,290 real shortcuts, most of
+    which it had read in full."""
+    from maltriage import fixtures as fx
+    parsed = lnk_module.parse(build_lnk(
+        target="C:\\Windows\\System32\\notepad.exe",
+        id_items=fx.lnk_id_list(fx.lnk_root_item(_INTERNET), fx.lnk_uri_item("xx", True))))
+    assert parsed["unread_items"] == ["61"]
+    assert parsed["targets"]["link_info"] == "C:\\Windows\\System32\\notepad.exe"
+    assert parsed["problems"] == []
+
+
+def test_files_under_the_users_folder_are_read_through_their_delegate_items():
+    from maltriage import fixtures as fx
+    parsed = _items_lnk(fx.lnk_root_item(_USERS_FILES),
+                        fx.lnk_delegate_item("Documents", False),
+                        fx.lnk_delegate_item("Quarterly Report 2026.docx", True))
+    assert parsed["targets"]["id_list"] == "%USERPROFILE%\\Documents\\Quarterly Report 2026.docx"
+    assert parsed["problems"] == []
+
+
+def test_a_delegate_items_long_name_is_found_by_its_signature_without_the_pointer():
+    from maltriage import fixtures as fx
+    item = bytearray(fx.lnk_delegate_item("Quarterly Report 2026.docx", True))
+    item[-2:] = b"\x00\x00"
+    parsed = _items_lnk(fx.lnk_root_item(_USERS_FILES), bytes(item))
+    assert parsed["targets"]["id_list"] == "%USERPROFILE%\\Quarterly Report 2026.docx"
+
+
+def test_a_delegate_item_that_does_not_wrap_a_file_entry_is_unread():
+    from maltriage import fixtures as fx
+    item = bytearray(fx.lnk_delegate_item("Documents", False))
+    item[12] = 0x01
+    parsed = _items_lnk(fx.lnk_root_item(_USERS_FILES), bytes(item))
+    assert parsed["unread_items"] == ["74"]
+
+
+def test_an_unknown_root_folder_is_written_as_a_parsing_name():
+    from maltriage import fixtures as fx
+    control_panel = struct.pack("<H", 8) + bytes([0x01, 0, 0, 0, 0, 0])
+    parsed = _items_lnk(fx.lnk_root_item("21ec2020-3aea-1069-a2dd-08002b30309d"), control_panel)
+    assert parsed["targets"]["id_list"] == "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
+    assert parsed["unread_items"] == ["01"]
+    # The root is where the path starts, not where it ends.
+    assert any("class 0x01" in problem for problem in parsed["problems"])
+
+
+def test_a_volume_known_only_by_its_guid_is_unread():
+    """A phone or other portable device: a volume item with no name flag
+    and a GUID where the drive letter would be."""
+    from maltriage import fixtures as fx
+    volume = struct.pack("<H", 22) + bytes([0x2E, 0]) + b"\x22" * 18
+    parsed = _items_lnk(fx.lnk_root_item("20d04fe0-3aea-1069-a2d8-08002b30309d"), volume)
+    assert parsed["unread_items"] == ["2e"]
+    assert "id_list" not in parsed["targets"]
+    assert parsed["problems"]
+
+
+def test_the_unread_items_reach_the_report(write):
+    from maltriage import fixtures as fx
+    path = write("a.lnk", build_lnk(id_items=fx.lnk_id_list(fx.lnk_root_item(_INTERNET),
+                                                            fx.lnk_uri_item("xx", True))))
+    assert analyse(path).data["lnk"]["unread_items"] == ["61"]
+
+
+@pytest.mark.parametrize("text, mutex", [
+    ("C:\\Users\\a\\AppData\\Local\\Temp\\x.tmp", False),
+    ("%LOCALAPPDATA%/Local\\Programs", False),
+    ("Local\\SomeAppSingleInstance", True),
+    ("name=Global\\SomeMutexName", True),
+])
+def test_a_mutex_is_not_read_out_of_a_path(write, text, mutex):
+    data = _strings(write("a.bin", b"\x00" * 16 + text.encode() + b"\x00" * 16))
+    assert bool(data.get("mutexes")) is mutex
+
+
+
+def test_a_root_folder_starts_the_path_wherever_it_appears():
+    from maltriage import fixtures as fx
+    volume = struct.pack("<H", 25) + bytes([0x2F]) + b"C:\\" + b"\x00" * 19
+    parsed = _items_lnk(volume, fx.lnk_root_item(_USERS_FILES), fx.lnk_delegate_item("a.txt", True))
+    assert parsed["targets"]["id_list"] == "%USERPROFILE%\\a.txt"
+
+
+def test_a_uri_is_the_whole_target_whatever_came_before_it():
+    from maltriage import fixtures as fx
+    parsed = _items_lnk(fx.lnk_root_item(_USERS_FILES),
+                        fx.lnk_uri_item("https://contoso.invalid/a.docx", True))
+    assert parsed["targets"]["id_list"] == "https://contoso.invalid/a.docx"
+
+
+@pytest.mark.parametrize("unicode", [True, False])
+def test_the_uri_after_the_data_block_wins_over_one_inside_it(unicode):
+    """The data block can hold strings of its own (an FTP host, a user
+    name). The URI is the one after it."""
+    from maltriage import fixtures as fx
+    decoy = ("ftp://decoy.invalid/".encode("utf-16-le") if unicode
+             else b"ftp://decoy.invalid/") + b"\x00\x00"
+    parsed = _items_lnk(fx.lnk_root_item(_INTERNET),
+                        fx.lnk_uri_item("https://contoso.invalid/a.docx", unicode, b"\x01" * 8 + decoy))
+    assert parsed["targets"]["id_list"] == "https://contoso.invalid/a.docx"
+
+
+def test_a_delegate_items_own_pointer_beats_a_signature_in_its_guids():
+    """The two GUIDs are 32 arbitrary bytes, and nothing stops them
+    holding the extension block's signature."""
+    from maltriage import fixtures as fx
+    item = bytearray(fx.lnk_delegate_item("Quarterly Report 2026.docx", True))
+    guids = item.index(b"\x11" * 32)
+    item[guids + 4:guids + 8] = struct.pack("<I", 0xBEEF0004)
+    parsed = _items_lnk(fx.lnk_root_item(_USERS_FILES), bytes(item))
+    assert parsed["targets"]["id_list"] == "%USERPROFILE%\\Quarterly Report 2026.docx"
+
+
+def test_a_volume_name_is_read_from_its_twenty_bytes_only():
+    volume = struct.pack("<H", 40) + bytes([0x2F]) + b"C:\\" + b"A" * 34 + b"\x00"
+    parsed = _items_lnk(volume)
+    assert parsed["targets"]["id_list"] == "C:\\" + "A" * 17

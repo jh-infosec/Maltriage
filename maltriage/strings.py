@@ -43,7 +43,10 @@ IOC_PATTERNS = {
     "ipv4": re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])"),
     "registry_paths": re.compile(
         r"\b(?:HKEY_[A-Z_]{4,24}|HKLM|HKCU|HKCR|HKU)\\[^\s\"'<>|]{2,200}"),
-    "mutexes": re.compile(r"\b(?:Global|Local)\\[^\s\"'<>|]{2,200}"),
+    # Not after a path separator: `\b` sits between `\` and `L`, so every
+    # `AppData\Local\...` was a mutex. 29 of 1,290 shortcuts on one machine
+    # held one, and every one was a path.
+    "mutexes": re.compile(r"(?<![\\/\w])(?:Global|Local)\\[^\s\"'<>|]{2,200}"),
     "windows_paths": re.compile(r"\b[A-Za-z]:\\\\?[^\s\"'<>|]{2,200}"),
     "unix_paths": re.compile(
         r"(?:^|[\s\"'=:])(/(?:usr|etc|tmp|var|opt|home|bin|sbin|lib|dev|proc)"

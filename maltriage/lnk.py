@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 import struct
+import uuid
 from typing import Any
 
 from . import scripts
@@ -156,14 +157,83 @@ def _long_name(item: bytes, at: int) -> str | None:
     return None
 
 
-def _id_list_path(idl: bytes, problems: list[str]) -> str | None:
+#: Root folders whose place in a path is known. Any other root is written
+#: the way the shell writes a parsing name, `::{GUID}`.
+ROOT_FOLDERS = {
+    "20d04fe0-3aea-1069-a2d8-08002b30309d": "",                          # This PC
+    "59031a47-3f72-44a7-89c5-5595fe6b30ee": "%USERPROFILE%",             # the user's folder
+    "450d8fba-ad25-11d0-98a8-0800361b1103": "%USERPROFILE%\\Documents",  # Documents
+    "871c5380-42a0-1069-a2ea-08002b30309d": "",                          # Internet
+    "208d2c60-3aea-1069-a2d7-08002b30309d": "",                          # Network
+}
+_EXTENSION = struct.pack("<I", 0xBEEF0004)
+_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{1,31}:\S")
+
+
+def _guid(raw: bytes) -> str:
+    return str(uuid.UUID(bytes_le=raw)) if len(raw) == 16 else ""
+
+
+def _entry_name(entry: bytes, outer: bytes) -> str:
+    """A file entry's name: the long one if it can be found, else the primary.
+
+    `entry` is the file entry item; `outer` is the item that carries its
+    extension block, which is the same item except inside a delegate. The
+    block is looked for where the outer item's last two bytes point, then
+    just after the padded primary name, then by its signature.
+    """
+    kind = entry[2]
+    if kind & 0x04:
+        primary = _wstring(entry, 14)
+        name_end = 14 + 2 * len(primary) + 2
+    else:
+        primary = _cstring(entry, 14)
+        name_end = 14 + len(primary.encode("cp1252", "replace")) + 1
+    name_end += name_end & 1
+    pointer = _u16(outer, len(outer) - 2) if len(outer) >= 4 else 0
+    found = outer.find(_EXTENSION)
+    return ((_long_name(outer, pointer) if 14 <= pointer < len(outer) - 2 else None)
+            or _long_name(entry, name_end)
+            or (_long_name(outer, found - 4) if found >= 4 else None)
+            or primary)
+
+
+def _uri(item: bytes) -> str | None:
+    """The URI in a URI item (class 0x61).
+
+    It follows a block of `data size` bytes (libfwsi), in UTF-16 when the
+    item's flags say so. Accepted only if it reads as a URI; otherwise the
+    item is searched for one, and if there is none it was not read.
+    """
+    if len(item) < 6:
+        return None
+    flags, data_size = item[3], _u16(item, 4)
+    at = 6 + data_size
+    wide = bool(flags & 0x80)
+    candidate = _wstring(item, at) if wide else _cstring(item, at)
+    if _SCHEME.match(candidate or ""):
+        return candidate
+    for text in (item.decode("utf-16-le", "replace"), item[1:].decode("utf-16-le", "replace"),
+                 item.decode("cp1252", "replace")):
+        found = re.search(r"[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00\ufffd]+", text)
+        if found and _SCHEME.match(found.group()):
+            return found.group()
+    return None
+
+
+def _id_list_path(idl: bytes, problems: list[str],
+                  unread: list[str] | None = None) -> str | None:
     """The path a list of shell items spells, as far as it can be read.
 
-    Only the items that name a path are read: a volume (`C:\\`) and file
-    entries. A root folder item adds nothing to a path; anything else (a
-    network location, a control panel item, a delegate) ends what can be
-    said, and is said.
+    Read: root folders this module knows, volumes with a name (`C:\\`),
+    file entries, the delegate items Explorer wraps file entries in under
+    the user's folder (`CFSF`), and URI items. Anything else (a control
+    panel item, a portable device, a volume known only by its GUID) ends
+    what the list can say. Its class goes into `unread`, and the caller
+    decides whether that matters: it does not when another part of the
+    shortcut names the target.
     """
+    unread = [] if unread is None else unread
     parts: list[str] = []
     at = items = 0
     while at + 2 <= len(idl):
@@ -176,27 +246,29 @@ def _id_list_path(idl: bytes, problems: list[str]) -> str | None:
             break
         item = idl[at:at + size]
         kind = item[2]
-        if kind & 0x70 == 0x20:
-            parts.append(_cstring(item, 3).rstrip("\\"))
+        if kind in (0x1E, 0x1F) and size >= 20:
+            guid = _guid(item[4:20])
+            root = ROOT_FOLDERS.get(guid, "::{" + guid.upper() + "}")
+            parts = [root] if root else []
+        elif kind & 0x70 == 0x20 and kind & 0x01:
+            parts.append(_cstring(item, 3, 23).rstrip("\\"))
         elif kind & 0x70 == 0x30 and size > 14:
-            if kind & 0x04:
-                primary = _wstring(item, 14)
-                name_end = 14 + 2 * len(primary) + 2
+            parts.append(_entry_name(item, item))
+        elif kind == 0x74 and size > 14 and item[6:10] == b"CFSF":
+            inner = item[10:10 + _u16(item, 10)]
+            if len(inner) > 14 and inner[2] & 0x70 == 0x30:
+                parts.append(_entry_name(inner, item))
             else:
-                primary = _cstring(item, 14)
-                name_end = 14 + len(primary.encode("cp1252", "replace")) + 1
-            name_end += name_end & 1
-            # The item's last two bytes say where its extension block
-            # starts. Read from there first, then from just after the
-            # primary name, which is where it is when nothing lies.
-            pointer = _u16(item, size - 2)
-            long = ((_long_name(item, pointer) if 14 <= pointer < size - 2 else None)
-                    or _long_name(item, name_end))
-            parts.append(long or primary)
-        elif kind != 0x1F:
-            # A shell item this reader does not spell out; what came before
-            # it is still a path, and what it names is not.
-            problems.append(f"lnk: a shell item of class 0x{kind:02x} was not read")
+                unread.append(f"{kind:02x}")
+                break
+        elif kind == 0x61:
+            uri = _uri(item)
+            if not uri:
+                unread.append(f"{kind:02x}")
+                break
+            parts = [uri]
+        else:
+            unread.append(f"{kind:02x}")
             break
         at += size
     return "\\".join(parts) if parts else None
@@ -232,7 +304,8 @@ def parse(data: bytes) -> dict[str, Any]:
     against what was read.
     """
     problems: list[str] = []
-    out: dict[str, Any] = {"problems": problems, "targets": {}, "extra_blocks": []}
+    out: dict[str, Any] = {"problems": problems, "targets": {}, "extra_blocks": [],
+                           "unread_items": []}
     if len(data) < HEADER_SIZE or data[:20] != MAGIC:
         problems.append("lnk: no shell link header")
         return out
@@ -251,7 +324,7 @@ def parse(data: bytes) -> dict[str, Any]:
         size = _u16(data, at)
         if at + 2 + size > len(data):
             problems.append(short)
-        target = _id_list_path(data[at + 2:at + 2 + size], problems)
+        target = _id_list_path(data[at + 2:at + 2 + size], problems, out["unread_items"])
         if target:
             out["targets"]["id_list"] = target
         at += 2 + size
@@ -311,6 +384,16 @@ def parse(data: bytes) -> dict[str, Any]:
             out["machine_id"] = _cstring(block, 16, 32)
         at += size
     out["end"] = at
+    # An item this reader does not spell out is a gap only when nothing
+    # else in the shortcut names the target: the item list's own path then
+    # stops short, or never starts. 588 of 1,290 shortcuts on one
+    # machine were Recent entries for web documents, whose LinkInfo-less
+    # item list ends in a URI item, and every one was "came back short" in
+    # v0.7.3 although most had been read in full.
+    if out["unread_items"] and not {"link_info", "environment"} & set(out["targets"]):
+        problems.append(f"lnk: the shell item list ends in an item of class 0x{out['unread_items'][0]} "
+                        "that this reader does not spell out, and nothing else in the "
+                        "shortcut names the target")
     return out
 
 
@@ -405,6 +488,7 @@ class LnkExtractor(StreamExtractor):
             "show_command": parsed.get("show_command"),
             "targets": {k: safe_text(v, _PATH_LIMIT) for k, v in parsed.get("targets", {}).items()},
             "extra_blocks": parsed.get("extra_blocks", []),
+            "unread_items": parsed.get("unread_items", []),
         }
         for key in ("relative_path", "working_dir", "icon_location", "icon_environment",
                     "machine_id"):

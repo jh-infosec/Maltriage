@@ -637,6 +637,42 @@ def _file_entry(name: str, is_file: bool, short_names: bool, version: int) -> by
     return struct.pack("<H", len(item) + 2) + item
 
 
+def lnk_root_item(guid: str) -> bytes:
+    """A root folder shell item for `guid`."""
+    import uuid
+    body = bytes([0x1F, 0x50]) + uuid.UUID(guid).bytes_le
+    return struct.pack("<H", len(body) + 2) + body
+
+
+def lnk_uri_item(uri: str, unicode: bool = True, data: bytes = b"") -> bytes:
+    """A URI shell item (class 0x61): flags, a data block, then the URI."""
+    text = uri.encode("utf-16-le") + b"\0\0" if unicode else uri.encode() + b"\0"
+    body = bytes([0x61, 0x80 if unicode else 0]) + struct.pack("<H", len(data)) + data + text
+    return struct.pack("<H", len(body) + 2) + body
+
+
+def lnk_delegate_item(name: str, is_file: bool, version: int = 9) -> bytes:
+    """The `CFSF` delegate item Explorer wraps a file entry in under the
+    user's folder: the entry without its extension block, two GUIDs, and
+    then the extension block with the long name."""
+    entry = _file_entry(name, is_file, True, version)
+    at = entry.index(struct.pack("<I", 0xBEEF0004)) - 4
+    bare = entry[2:at]
+    sub = struct.pack("<H", len(bare) + 2) + bare
+    inner = b"CFSF" + sub
+    head = bytes([0x74, 0]) + struct.pack("<H", len(inner)) + inner + b"\x11" * 32
+    extension = bytearray(entry[at:])
+    struct.pack_into("<H", extension, len(extension) - 2, 2 + len(head))
+    body = head + bytes(extension)
+    return struct.pack("<H", len(body) + 2) + body
+
+
+def lnk_id_list(*items: bytes) -> bytes:
+    """An item list from items built above, with its size and terminator."""
+    data = b"".join(items) + b"\0\0"
+    return struct.pack("<H", len(data)) + data
+
+
 def _id_list(path: str, short_names: bool, version: int) -> bytes:
     drive, _, rest = path.partition("\\")
     items = struct.pack("<H", 20) + bytes([0x1F, 0x50]) + _MY_COMPUTER
@@ -684,7 +720,8 @@ def build_lnk(target: str = "C:\\Windows\\System32\\notepad.exe", arguments: str
               environment: str | None = None, icon_environment: str | None = None,
               machine_id: str | None = "test-pc", trailing: bytes = b"",
               unicode: bool = True, short_names: bool = False,
-              item_version: int = 9, link_info_unicode: bool = False) -> bytes:
+              item_version: int = 9, link_info_unicode: bool = False,
+              id_items: bytes | None = None) -> bytes:
     """A Windows shortcut built to MS-SHLLINK, the way Explorer writes one.
 
     Every part is optional, because the attacks differ in which parts they
@@ -693,7 +730,10 @@ def build_lnk(target: str = "C:\\Windows\\System32\\notepad.exe", arguments: str
     """
     flags = 0x80 if unicode else 0
     parts = b""
-    if id_list:
+    if id_items is not None:
+        flags |= 0x1
+        parts += id_items
+    elif id_list:
         flags |= 0x1
         parts += _id_list(target, short_names, item_version)
     if link_info:

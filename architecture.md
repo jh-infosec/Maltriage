@@ -204,7 +204,7 @@ plus the names everything imports:
 | `diff.py` | 163 | two corpus runs compared by content, for the `diff` command |
 | `ppt.py` | 101 | the compound files a `.ppt` keeps inside its presentation stream |
 | `xlm.py` | 294 | Excel 4.0 macro sheets and `Auto_Open`, from BIFF, XML and BIFF12 workbooks alike |
-| `lnk.py` | 468 | Windows shortcuts: every place a target is named, and the command line handed to `scripts.py` |
+| `lnk.py` | 552 | Windows shortcuts: every place a target is named, and the command line handed to `scripts.py` |
 | `scripts.py` | 418 | script text: decoding, the language it reads as, and the shapes of a dropper |
 | `vba.py` | 306 | MS-OVBA decompression, the `dir` stream, and what module source declares and calls |
 

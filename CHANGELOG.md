@@ -1,5 +1,82 @@
 # Changelog
 
+## Version 0.7.4 - what Recent is made of
+
+### What the shortcut corpus showed
+
+v0.7.3 was measured on every shortcut on one Windows machine: both Start
+Menus, the Desktop, and `Recent`, 1,291 files.
+
+```
+gate (medium+): flags 0.0% of benign files
+came back short: lnk on 622 file(s)
+low  mutexes_present          benign 2.2%
+low  lnk_interpreter_target   benign 0.5%
+```
+
+The gate and `lnk_interpreter_target` were as predicted (six shortcuts:
+PowerShell, its ISE and the command prompt). The other two lines were
+defects, and a drill that printed only counts and shell item classes, never
+a name, said which:
+
+```
+588  lnk: a shell item of class 0x61 was not read    root folder, then a URI
+ 31  lnk: a shell item of class 0x74 was not read    root folder, then CFSF delegates
+  4  classes 0x00, 0x01                               a device, a control panel item
+ 29  shortcuts with \Local\ somewhere in them        = mutexes_present, exactly
+```
+
+### Shortcuts whose item list ends in something else
+
+**Recent is mostly web documents.** Opening a document from SharePoint or
+OneDrive leaves a shortcut whose item list is a root folder (Internet) and
+a URI item, with no `LinkInfo`. v0.7.3 read neither, so 588 shortcuts had
+no target at all. A URI item is now read: the URI follows a data block
+whose size the item states, in UTF-16 when its flags say so (libfwsi), and
+is accepted only if it reads as a scheme and a colon. If it is not there,
+the item is searched for one, so a data block of a different size still
+gives up its URI rather than nothing.
+
+**Files under the user's folder are wrapped in delegate items.** Explorer
+writes `%USERPROFILE%` as a root folder and each folder and file beneath it
+as a `CFSF` delegate holding an ordinary file entry, two GUIDs, and the
+extension block with the long name after them. These are read, with the
+long name found by the item's own pointer to its extension block first:
+the GUIDs are 32 arbitrary bytes and can hold the block's signature.
+
+**Root folders are read.** Known ones become the start of the path (This
+PC, Internet and Network become nothing; the user's folder becomes
+`%USERPROFILE%`; Documents becomes `%USERPROFILE%\Documents`) and any other
+is written the way the shell writes a parsing name, `::{GUID}`. A volume is
+read only when its flags say it has a name, so a phone's volume, which has
+a GUID where a drive letter would be, is no longer read as one.
+
+**An item that is not read is a gap only when nothing else names the
+target.** v0.7.3 said `came back short` for every unread item, including
+on shortcuts whose `LinkInfo` had given the whole path. Unread classes are
+now listed in `unread_items`, and they are a problem only when neither
+`LinkInfo` nor the environment block names the target, because then the
+item list's own path stops short or never starts.
+
+### `mutexes_present` on paths
+
+The mutex pattern began with `\b`, and `\b` sits between `\` and `L`, so
+every `AppData\Local\...` in every file was a named mutex. The 29 shortcuts
+holding `\Local\` were exactly the 29 it fired on. It now refuses a match
+straight after a path separator or a word character. This is older than
+shortcuts: every corpus measured before this release counted these, at
+`low`.
+
+### Tests
+
+1,013 pass. Every mutant of the new reading was killed: where a root starts
+the path, `::{GUID}` for unknown roots, the volume name flag and its 20
+byte field, the delegate signature and its inner file entry, a URI
+replacing what came before, the data block offset, the Unicode flag, the
+search by scheme, the item pointer and the signature fallback, the rule for
+when an unread item is a problem, `unread_items` in the report, and both
+halves of the mutex lookbehind.
+
 ## Version 0.7.3 - shortcut files
 
 ### Why shortcuts
