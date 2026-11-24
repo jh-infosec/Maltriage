@@ -22,6 +22,10 @@ rule embedded_pe_header : structural executable
     meta:
         severity = "medium"
         description = "a Windows executable header appears inside a file that is not one"
+        // An installer package carries its custom actions as executables, so
+        // a PE inside an MSI is the format working. Measured on two real MSIs
+        // in v0.7.5, both matched. The match is kept, at low.
+        expected_in = "msi"
         rationale = "a dropper carries its payload somewhere, and a document or archive with a PE header inside it is carrying something it has no reason to carry"
         false_negative = "a payload with the DOS stub stripped will not match; the stub is required here because two of these three strings alone match random data often enough to matter"
 

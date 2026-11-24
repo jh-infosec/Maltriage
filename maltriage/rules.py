@@ -283,6 +283,9 @@ class YaraExtractor(RandomAccessExtractor):
             for match in found:
                 matches.append(self._describe(match, namespace, config, not fast))
 
+        for match in matches:
+            _place(match, ctx)
+
         data: dict[str, Any] = {
             "rule_files": self._loaded_from,
             "namespaces": [namespace for namespace, _ in rules],
@@ -395,6 +398,12 @@ class YaraExtractor(RandomAccessExtractor):
             tags = match.get("tags") or []
             if tags:
                 detail += f" [{', '.join(tags)}]"
+            if match.get("expected_in"):
+                detail += (f"; expected in an {match['expected_in']}, as the rule's "
+                           "own expected_in says")
+            elif match.get("inside_members"):
+                detail += ("; every match lies inside members of this container, "
+                           "which are analysed on their own")
             out.append(mk_finding(self.name, "yara_match",
                 f"{match['rule']}: {detail}", match["severity"],
                 mitre=match.get("mitre") or None,
@@ -405,7 +414,41 @@ class YaraExtractor(RandomAccessExtractor):
                 # that matches secrets.
                 evidence=[{"name": "rule", "value": match["rule"]},
                           {"name": "string_count", "value": len(match.get("strings") or [])},
+                          # `offsets`, a list. Until v0.7.6 this read `offset`,
+                          # which no match has, so it was always None.
                           {"name": "first_offset",
-                           "value": (match.get("strings") or [{}])[0].get("offset")}],
+                           "value": (where or [None])[0]}],
                 discriminator=match["rule"]))
         return out
+
+
+def _lower(match: dict[str, Any]) -> None:
+    if SEVERITY_RANK.get(match.get("severity"), 0) > SEVERITY_RANK["low"]:
+        match["severity"] = "low"
+
+
+def _place(match: dict[str, Any], ctx: dict[str, Any]) -> None:
+    """Where a match is, when that changes what it means.
+
+    Two cases, both measured on one machine's disk images in v0.7.5. An
+    installer package carries executables by design: `embedded_pe_header`
+    fired on both MSIs there, and a rule can now say, in `expected_in`,
+    the kinds of file it expects its match in. And an ISO stores its
+    members as they are, so a PE inside it matched the same rule on the
+    image as well as on the member: a match that lies wholly inside
+    members of a container whose members are analysed is theirs to report.
+    Either way the match stays in the report, at `low`.
+    """
+    expected = {kind.strip() for kind in str((match.get("meta") or {}).get("expected_in") or "")
+                .split(",") if kind.strip()}
+    kind = ctx.get("ole_kind")
+    if kind and kind in expected:
+        match["expected_in"] = kind
+        _lower(match)
+        return
+    extents = ctx.get("member_extents") or []
+    offsets = [offset for string in match.get("strings") or [] for offset in string["offsets"]]
+    if extents and offsets and all(any(start <= offset < start + length
+                                       for start, length in extents) for offset in offsets):
+        match["inside_members"] = True
+        _lower(match)

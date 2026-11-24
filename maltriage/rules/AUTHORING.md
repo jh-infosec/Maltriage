@@ -131,6 +131,30 @@ demonstrated against something `sample_data.py` can build, that is a reason to
 question the rule.
 
 
+## Saying where a match is expected
+
+A rule may name the kinds of file in which its match is the format working
+rather than something to look at, comma separated:
+
+```
+meta:
+    severity = "medium"
+    expected_in = "msi"
+```
+
+The kinds are the ones the OLE reader reports (`word`, `excel`,
+`powerpoint`, `outlook`, `msi`, `vba_project`). A match in one of them is
+kept in the report at `low`, and its detail says why. `embedded_pe_header`
+declares `msi`: an installer package carries its custom actions as
+executables, and it matched both real MSIs it was measured on.
+
+Separately, and for every rule: a match that lies wholly inside members of
+a container whose members are each analysed (an ISO, a FAT image, a TAR) is
+lowered to `low` the same way, because the member's own report carries it.
+A match outside every member, in an image's free space for instance, keeps
+its severity.
+
+
 ## Declaring an ATT&CK technique
 
 A rule may name techniques in its `meta`, comma separated:

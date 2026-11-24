@@ -379,6 +379,11 @@ class ArchiveExtractor(RandomAccessExtractor):
             # extension both land here.
             data["parse_errors"].append(f"{family}: {type(exc).__name__}: {exc}")
 
+        if data.get("oversized_members"):
+            data["parse_errors"].append(
+                f"members: {data['oversized_members']} member(s) larger than "
+                f"archive_max_member_bytes ({budget.max_member_bytes}) were analysed "
+                "only up to it")
         if budget.exhausted:
             data["parse_errors"].extend(f"budget: {why}" for why in budget.exhausted)
 
@@ -421,9 +426,13 @@ class ArchiveExtractor(RandomAccessExtractor):
                 data["parse_errors"].append(
                     "relationships: the listing stopped at the budget, so finding "
                     "no external relationship is not evidence that there is none")
+        # Where the members are in the container, for the YARA extractor: a
+        # match that lies wholly inside members is the members' to report.
+        # Kept out of the report; it is offsets, but there can be thousands.
+        ctx["member_extents"] = data.pop("_member_extents", [])
         data["macro_capable_name"] = (
             path.suffix.lower() in config_list(config, "macro_capable_extensions", []))
-        if data["truncated"] and not data["macro_project"]:
+        if data["truncated"] and not data["macro_project"] and family == "zip":
             # Absence of evidence. The listing stopped early, so "no macro
             # project" means "none among the members we got to", and a
             # container built to put its VBA last would read as clean.
@@ -504,6 +513,7 @@ class ArchiveExtractor(RandomAccessExtractor):
                 handle = archive.extractfile(member)
                 if handle is None:
                     continue
+                data.setdefault("_member_extents", []).append((member.offset_data, member.size))
                 self._stage(handle, member.name, entry, staging, budget, data)
                 if data["truncated"]:
                     return
@@ -534,6 +544,7 @@ class ArchiveExtractor(RandomAccessExtractor):
         point of the shape below.
         """
         size = path.stat().st_size
+        extents = data.setdefault("_member_extents", [])
         with path.open("rb") as image:
             def read(offset: int, length: int) -> bytes:
                 image.seek(offset)
@@ -550,6 +561,7 @@ class ArchiveExtractor(RandomAccessExtractor):
                     "encrypted": False,
                     "hidden": member.hidden,
                 }
+                extents.extend(member.extents)
                 self._stage(disk.ExtentReader(image, member.extents, size),
                             member.name, entry, staging, budget, data)
                 if data["truncated"]:
@@ -596,7 +608,19 @@ class ArchiveExtractor(RandomAccessExtractor):
         entry["truncated"] = truncated
         entry["staged"] = written > 0
         if truncated:
-            data["truncated"] = True
+            if budget.bytes_used >= budget.max_total_bytes:
+                # Nothing left for the next member, so the walk stops here,
+                # and says which limit stopped it.
+                budget.note(f"total byte limit of {budget.max_total_bytes} reached")
+                data["truncated"] = True
+            else:
+                # One member over the per-member limit. Until v0.7.6 this
+                # stopped the walk too, and an ISO of installer media, which
+                # always has one large file, had most of its members never
+                # analysed and said only that "the listing stopped". The
+                # member is analysed as far as it was written, and the walk
+                # goes on under the total budget.
+                data["oversized_members"] = data.get("oversized_members", 0) + 1
         if written:
             # Both halves: where the bytes are now, and where they came from.
             # The second is taken from the container rather than from the

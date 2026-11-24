@@ -1,5 +1,83 @@
 # Changelog
 
+## Version 0.7.6 - what four real disk images said
+
+### The measurement
+
+v0.7.5 was run on every disk image on one Windows machine: four, three ISO
+and one UDF, 557.7 MB. All four were held at the gate. `disk_image_lure`
+fired on none, as predicted, and the ISOs' own `entropy_hotspot` was `low`,
+as intended. A drill that printed keys, rule names and the reader's notes,
+never a name, said what held each one and why the reader came back short:
+
+```
+image 1: udf, 107 MB    entropy_hotspot on the image (not opened, so the image's own)
+image 2: iso, 142 MB    virtual_size_mismatch on a PE member, entropy_hotspot on a member
+                        note: the listing stopped at the budget, so finding no macro
+                        project is not evidence that there is none
+image 3: iso,  50 MB    yara_match embedded_pe_header on the image
+image 4: iso, 259 MB    yara_match embedded_pe_header on two OLE members (both MSIs)
+                        note: the same
+```
+
+Three of those lines were defects.
+
+### One large member stopped the walk
+
+A member larger than `archive_max_member_bytes` (64 MiB) was analysed up to
+the limit, and then the walk stopped, so every member after it was never
+analysed. Installer media always has one large file. The note that said so
+was wrong twice over: it blamed "the budget" without saying which limit,
+and it was the macro caveat, which is about OOXML and has nothing to say
+about an ISO.
+
+The walk now goes on past an oversized member, under the total budget, and
+says how many members were analysed only up to the limit. When the total
+budget is what runs out, the walk stops as before and the note names the
+total limit. The macro caveat is said only of a ZIP. ZIP and TAR get the
+same change: an oversized member stopped them too.
+
+### An image counted its members' YARA matches again
+
+An ISO stores its members as they are, so an executable in one matched
+`embedded_pe_header` twice: on the member, and on the image. The archive
+extractor now publishes where its members are, and a YARA match whose every
+offset lies inside members of a container whose members are analysed (ISO,
+FAT, TAR) is kept at `low`, saying so. A match with any offset outside
+every member, in an image's free space for instance, keeps its severity,
+because no member's report will carry it.
+
+### A PE inside an installer package is the package working
+
+Both MSIs matched `embedded_pe_header`: an MSI carries its custom actions as
+executables. A rule can now declare, in `expected_in`, the kinds of file in
+which its match is the format working (`rules/AUTHORING.md`), and a match
+in one is kept at `low` and says so. `embedded_pe_header` declares `msi`.
+A PE inside a Word document is still `medium`.
+
+### Found on the way
+
+A YARA finding's `first_offset` evidence read `offset` from a string match,
+which has only `offsets`, so it was always `None`. It is the first offset
+now.
+
+### What this does not change
+
+The PE keys holding images 2 and 4 by their members, `virtual_size_mismatch`
+and `entropy_hotspot`, are the open decisions they were on the binary
+corpora: installers trip them, and only a labelled malicious corpus prices
+what lowering them would miss. Four images is a sample that says the lure
+key is quiet on these and that an image is held by what is inside it.
+
+### Tests
+
+1,059 pass. Every mutant of the change was killed: the total budget check,
+the oversized count, the ZIP-only caveat, the extents from images and from
+TAR, publishing them, the total limit's note, `expected_in` matching only
+the declared kind, every offset rather than any, never raising a severity,
+calling the placement at all, the `first_offset` fix, the OLE kind, and the
+rule's own declaration.
+
 ## Version 0.7.5 - disk images
 
 ### Why images

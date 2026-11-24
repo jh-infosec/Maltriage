@@ -549,7 +549,11 @@ class OleExtractor(RandomAccessExtractor):
               config: dict[str, Any]) -> dict[str, Any]:
         with path.open("rb") as handle:
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                return describe(data, config)
+                described = describe(data, config)
+        # For the YARA extractor, which runs after this one: a rule can say
+        # which kinds of file it expects its match in.
+        ctx["ole_kind"] = described.get("kind")
+        return described
 
     def findings(self, data: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
         out = []

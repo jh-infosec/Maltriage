@@ -11349,3 +11349,142 @@ def test_a_contiguous_fat_file_is_one_extent():
 def test_the_extent_reader_stops_at_the_image_size_it_was_given():
     handle = io.BytesIO(b"A" * 300)
     assert len(disk_module.ExtentReader(handle, [(150, 100)], 200).read()) == 50
+
+
+# v0.7.6: what four real disk images showed.
+
+def test_an_oversized_member_is_analysed_up_to_the_limit_and_the_walk_goes_on(write):
+    """Installer media always has one large file. Until v0.7.6 it stopped
+    the walk, and the members after it were never analysed."""
+    files = [("big.bin", b"\x01" * 20_000, False), ("after.lnk", build_lnk(), False),
+             ("z.txt", b"x", False)]
+    report = analyse(write("a.iso", build_iso(files)),
+                     config={**DEFAULT_CONFIG, "archive_max_member_bytes": 4096})
+    archive = report.data["archive"]
+    assert archive["truncated"] is False
+    assert sorted(e["name"] for e in archive["entries"]) == ["after.lnk", "big.bin", "z.txt"]
+    assert [e["bytes_staged"] for e in archive["entries"] if e["name"] == "big.bin"] == [4096]
+    assert any("larger than archive_max_member_bytes (4096)" in n for n in archive["parse_errors"])
+    assert len(report.children) == 3
+
+
+def test_an_oversized_zip_member_no_longer_stops_the_walk_either(write):
+    body = _zip_bytes([("big.bin", b"\x00" * 200_000), ("small.txt", b"hi")])
+    report = analyse(write("a.zip", body),
+                     config={**DEFAULT_CONFIG, "archive_max_member_bytes": 4096})
+    assert {e["name"] for e in report.data["archive"]["entries"]} == {"big.bin", "small.txt"}
+    assert report.data["archive"]["truncated"] is False
+
+
+def test_the_total_budget_still_stops_the_walk(write):
+    files = [(f"m{i}.bin", bytes([i]) * 3000, False) for i in range(5)]
+    report = analyse(write("a.iso", build_iso(files)),
+                     config={**DEFAULT_CONFIG, "archive_max_total_bytes": 7000})
+    archive = report.data["archive"]
+    assert archive["truncated"] is True
+    assert any("total byte limit" in n for n in archive["parse_errors"])
+
+
+def test_the_macro_caveat_is_said_only_of_a_zip(write):
+    files = [(f"m{i}.bin", bytes([i]) * 3000, False) for i in range(5)]
+    notes = analyse(write("a.iso", build_iso(files)),
+                    config={**DEFAULT_CONFIG, "archive_max_total_bytes": 7000}).data["archive"]["parse_errors"]
+    assert not any("macro project" in n for n in notes)
+    body = _zip_bytes([(f"m{i}.bin", bytes([i]) * 3000) for i in range(5)])
+    notes = analyse(write("a.zip", body),
+                    config={**DEFAULT_CONFIG, "archive_max_total_bytes": 7000}).data["archive"]["parse_errors"]
+    assert any("macro project" in n for n in notes)
+
+
+def _match(offsets, severity="medium", meta=None):
+    return {"rule": "r", "severity": severity, "meta": meta or {},
+            "strings": [{"identifier": "$a", "offsets": offsets}]}
+
+
+def test_a_match_wholly_inside_analysed_members_is_theirs():
+    from maltriage import rules as rules_module
+    match = _match([100, 150])
+    rules_module._place(match, {"member_extents": [(90, 100)]})
+    assert match["severity"] == "low" and match["inside_members"] is True
+
+
+def test_a_match_with_any_offset_outside_every_member_keeps_its_severity():
+    """A PE in an image's free space belongs to no member, and no member's
+    report will say it."""
+    from maltriage import rules as rules_module
+    match = _match([100, 5000])
+    rules_module._place(match, {"member_extents": [(90, 100)]})
+    assert match["severity"] == "medium" and "inside_members" not in match
+
+
+def test_a_rule_says_which_kinds_of_file_it_expects_its_match_in():
+    from maltriage import rules as rules_module
+    match = _match([10], meta={"expected_in": "msi, cab"})
+    rules_module._place(match, {"ole_kind": "msi"})
+    assert match["severity"] == "low" and match["expected_in"] == "msi"
+    other = _match([10], meta={"expected_in": "msi"})
+    rules_module._place(other, {"ole_kind": "word"})
+    assert other["severity"] == "medium"
+
+
+def test_lowering_never_raises_a_match():
+    from maltriage import rules as rules_module
+    match = _match([100], severity="info")
+    rules_module._place(match, {"member_extents": [(0, 1000)]})
+    assert match["severity"] == "info"
+
+
+@needs_yara
+def test_a_pe_inside_an_image_member_is_the_members_finding(write):
+    pe = build_pe()
+    report = analyse(write("a.iso", build_iso([("app.exe", pe, False), ("b.txt", b"x", False)])))
+    image = [f for f in report.findings if f["key"] == "yara_match"
+             and f["discriminator"] == "embedded_pe_header"]
+    assert image and image[0]["severity"] == "low"
+    assert "inside members" in image[0]["detail"]
+
+
+@needs_yara
+def test_a_pe_in_an_images_free_space_is_still_medium(write):
+    image = bytearray(build_iso([("b.txt", b"x", False)]))
+    image += b"\x00" * 2048 + build_pe()
+    report = analyse(write("a.iso", bytes(image)))
+    found = [f for f in report.findings if f["key"] == "yara_match"
+             and f["discriminator"] == "embedded_pe_header"]
+    assert found and found[0]["severity"] == "medium"
+
+
+@needs_yara
+def test_a_pe_inside_an_msi_is_the_installer_working(write):
+    clsid = bytes.fromhex("84100c0000000000c000000000000046")
+    blob, _ = _cfb({"Binary.CustomAction": build_pe() + b"\x00" * 600}, root_clsid=clsid)
+    report = analyse(write("setup.msi", blob))
+    found = [f for f in report.findings if f["key"] == "yara_match"
+             and f["discriminator"] == "embedded_pe_header"]
+    assert found and found[0]["severity"] == "low" and "expected in an msi" in found[0]["detail"]
+    word, _ = _cfb({"WordDocument": build_pe() + b"\x00" * 600})
+    found = [f for f in analyse(write("a.doc", word)).findings if f["key"] == "yara_match"
+             and f["discriminator"] == "embedded_pe_header"]
+    assert found and found[0]["severity"] == "medium"
+
+
+@needs_yara
+def test_a_yara_findings_first_offset_is_the_first_offset(write):
+    report = analyse(write("a.pdf", _carrier(build_pe())))
+    finding = [f for f in report.findings if f["key"] == "yara_match"][0]
+    first = [e["value"] for e in finding["evidence"] if e["name"] == "first_offset"][0]
+    assert isinstance(first, int)
+
+
+@needs_yara
+def test_a_pe_inside_a_tar_member_is_the_members_finding(write):
+    buffer = io.BytesIO()
+    with tarfile.TarFile(fileobj=buffer, mode="w") as archive:
+        pe = build_pe()
+        info = tarfile.TarInfo("app.exe")
+        info.size = len(pe)
+        archive.addfile(info, io.BytesIO(pe))
+    report = analyse(write("a.tar", buffer.getvalue()))
+    found = [f for f in report.findings if f["key"] == "yara_match"
+             and f["discriminator"] == "embedded_pe_header"]
+    assert found and found[0]["severity"] == "low"
