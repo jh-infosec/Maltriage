@@ -117,6 +117,7 @@ DIRECTORY_IMPORT = 1
 DIRECTORY_SECURITY = 4
 DIRECTORY_DEBUG = 6
 DIRECTORY_TLS = 9
+DIRECTORY_CLR = 14
 
 TLS_DIRECTORY_SIZE = 24
 DEBUG_DIRECTORY_SIZE = 28
@@ -186,7 +187,7 @@ def build_certificate(common_names=("Example Signing Ltd",), revision=0x0200,
 def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
              timestamp=0x5D2C0000, subsystem=3, characteristics=0x0102,
              entry_section=".text", tls_callbacks=None, pdb_path=None,
-             certificate=None, entry_point=None):
+             certificate=None, entry_point=None, clr=None):
     """Build a structurally valid PE32 executable.
 
     `sections` is a list of (name, characteristics, body). `imports` is a
@@ -198,6 +199,11 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     a resource-only module has no entry point at all. Windows ships thousands
     of them - every `en-US\\*.mui` is one - so it is a fixture this suite
     needs rather than a curiosity.
+
+    `clr` adds a `.clr` section holding a .NET runtime header and the start
+    of its metadata: `"valid"` for a real one, `"no_metadata"` for a header
+    whose metadata lacks its `BSJB` signature, `"bad_size"` for a header
+    whose own size field is wrong.
 
     `tls_callbacks` is a list of virtual addresses and adds a `.tls` section;
     `pdb_path` adds a `.debug` section carrying a CodeView record; and
@@ -221,6 +227,9 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
         extra["tls"] = len(sections)
         sections.append((".tls", SECTION_RDATA,
                          bytes(TLS_DIRECTORY_SIZE + (len(tls_callbacks) + 1) * 4)))
+    if clr:
+        extra["clr"] = len(sections)
+        sections.append((".clr", SECTION_RDATA, bytes(72 + 16)))
     if pdb_path:
         extra["debug"] = len(sections)
         sections.append((".debug", SECTION_RDATA,
@@ -277,6 +286,16 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
         entry_["body"] = _tls_blob(entry_["rva"], tls_callbacks)
         tls_directory = (entry_["rva"], TLS_DIRECTORY_SIZE)
 
+    clr_directory = (0, 0)
+    if clr:
+        entry_ = placed[extra["clr"]]
+        header = bytearray(72)
+        struct.pack_into("<IHHII", header, 0, 72 if clr != "bad_size" else 64, 2, 5,
+                         entry_["rva"] + 72, 16)
+        signature = b"BSJB" if clr != "no_metadata" else b"XXXX"
+        entry_["body"] = bytes(header) + signature + bytes(12)
+        clr_directory = (entry_["rva"], 72)
+
     debug_directory = (0, 0)
     if pdb_path:
         entry_ = placed[extra["debug"]]
@@ -325,6 +344,7 @@ def build_pe(sections=None, imports=None, overlay=b"", machine=MACHINE_I386,
     directories[DIRECTORY_SECURITY] = security_directory
     directories[DIRECTORY_DEBUG] = debug_directory
     directories[DIRECTORY_TLS] = tls_directory
+    directories[DIRECTORY_CLR] = clr_directory
     for index, (dir_rva, dir_size) in enumerate(directories):
         struct.pack_into("<II", out, offset + index * 8, dir_rva, dir_size)
     offset += 128

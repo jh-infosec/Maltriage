@@ -11563,3 +11563,64 @@ def test_regions_are_dropped_when_a_span_is_cut_from_the_stream():
     extractor.begin(Path("x"), {"size": 100000, "certificate_range": (1000, 500),
                                 "format_regions": [(0, 50000)]}, DEFAULT_CONFIG)
     assert extractor._regions == []
+
+
+
+# v0.7.8: what held 2,000 Program Files binaries at the gate.
+
+def _pe_keys(report):
+    return {f["key"]: f for f in report.findings}
+
+
+def test_the_packer_and_standard_section_lists_share_no_name():
+    """`.edata` was in both until v0.7.8, and the packer list is the one the
+    finding reads, so every export section was a packer at medium."""
+    packers = {n.lower() for n in DEFAULT_CONFIG["pe_packer_sections"]}
+    standard = {n.lower() for n in DEFAULT_CONFIG["pe_standard_sections"]}
+    assert packers & standard == set()
+
+
+def test_an_export_section_is_not_a_packer(write):
+    pe = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180),
+                            (".edata", SECTION_RDATA, b"\x00" * 0x80)])
+    keys = _pe_keys(analyse(write("a.dll", pe)))
+    assert "known_packer_section" not in keys and "nonstandard_section_name" not in keys
+
+
+def test_a_data_section_holding_its_bss_is_not_an_unpacking_stub(write):
+    """Microsoft's linker folds `.bss` into `.data`, so its virtual size is
+    the variables it zeroes. 137 of 145 swollen sections on Program Files."""
+    pe = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180),
+                            (".data", SECTION_DATA, b"\x01" * 0x200, 0x8000)])
+    assert "virtual_size_mismatch" not in _pe_keys(analyse(write("a.exe", pe)))
+
+
+def test_a_code_section_that_swells_in_memory_is_still_the_stub(write):
+    pe = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x200, 0x8000)])
+    assert _pe_keys(analyse(write("a.exe", pe)))["virtual_size_mismatch"]["severity"] == "medium"
+
+
+def test_a_net_assembly_without_imports_is_managed_not_packed(write):
+    """.NET Core assemblies have no import table and, as DLLs, no entry
+    point; they were the `no_imports` hits on Program Files."""
+    pe = build_pe(clr="valid", entry_point=0, characteristics=0x2102)
+    report = analyse(write("a.dll", pe))
+    keys = _pe_keys(report)
+    assert report.data["pe"]["managed"] is True
+    assert "no_imports" not in keys and keys["managed_assembly"]["severity"] == "info"
+
+
+@pytest.mark.parametrize("shape", ["no_metadata", "bad_size"])
+def test_a_clr_directory_alone_does_not_buy_a_native_file_out(write, shape):
+    pe = build_pe(clr=shape, entry_point=0, characteristics=0x2102)
+    report = analyse(write("a.dll", pe))
+    assert report.data["pe"]["managed"] is False
+    assert "no_imports" in _pe_keys(report)
+
+
+def test_a_section_declared_as_code_counts_even_if_not_marked_executable(write):
+    """A stub can flip a section's protection at runtime; what the section
+    says it holds is code, and that is where code is unpacked to."""
+    pe = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180),
+                            (".pk", 0x40000020, b"\x00" * 0x200, 0x8000)])
+    assert "virtual_size_mismatch" in _pe_keys(analyse(write("a.exe", pe)))

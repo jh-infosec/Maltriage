@@ -1,5 +1,81 @@
 # Changelog
 
+## Version 0.7.8 - what held Program Files at the gate
+
+### The measurement
+
+The roadmap had waited on a Program Files corpus since v0.4.3. Run on
+2,000 executables and DLLs sampled from 13,111 on one Windows machine:
+
+```
+gate (medium+): flags 47.1% of benign files
+medium  virtual_size_mismatch      22.7%   lowering it alone: 28.6%
+medium  entropy_hotspot            16.1%                      39.1%
+medium  known_packer_section        8.2%                      42.2%
+medium  no_imports                  7.5%                      41.5%
+```
+
+Nearly half of ordinary installed software was held. A drill over 600 of
+them printed counts of what held each one and why, never a name:
+
+```
+virtual_size_mismatch   137 of 145 swollen sections were .data, writable, not executable
+known_packer_section     58 of 60 hits were the section name .edata
+no_imports               35 of 37 were DLLs with no entry point and two or three sections
+```
+
+All three were defects.
+
+### `.edata` was a packer
+
+`.edata` was in `pe_packer_sections` and in `pe_standard_sections` both, and
+the packer finding reads the first. It is the export directory's standard
+name, which GCC, MinGW, Delphi and Borland linkers all write, so every
+binary built by one of them was "a known packer's conventional layout" at
+`medium`. It is a standard name now, and a test fails if the two lists ever
+share a name again. Two lists answering one question, and disagreeing, is
+a shape this project has met before.
+
+### `.data` holds `.bss`
+
+`virtual_size_mismatch` was meant to find the room an unpacker reserves to
+unpack into: a section much larger in memory than in the file. Microsoft's
+linker folds `.bss` into `.data`, so `.data` has that shape by design, and
+the rule took any initialised section. Code is unpacked into a section that
+will run, so only a section that is executable or declares code counts now.
+
+### .NET assemblies have no imports
+
+A .NET Core or later assembly has no import table and, as a DLL, no entry
+point: the runtime loads it and compiles its IL. `no_imports` argued that a
+binary with no imports must resolve its API at runtime with instructions of
+its own, which is not true of IL. The runtime header is now read, checked to
+be the size it says and to point at metadata starting `BSJB`, and an
+assembly gets `managed_assembly` at `info` instead. A CLR directory entry
+alone is not enough, because it is one field a packed native binary could
+set to buy its way out of the finding.
+
+### What it does not touch
+
+`entropy_hotspot` held 79 of the 600, almost all signed and without an
+overlay, so the hot windows are inside the image: compressed resources,
+most likely. That is the open decision it has been since v0.4.3, and it is
+now the largest holder on Program Files. It needs a labelled malicious
+corpus to price, not a change made on benign files alone.
+
+### Predicted
+
+From the drill sample: `virtual_size_mismatch`, `known_packer_section` and
+`no_imports` each fall to a handful, and the gate falls from 47.1% to
+around 15%, most of what is left held by `entropy_hotspot`.
+
+### Tests
+
+1,078 pass. Every mutant of the change was killed: the executable-or-code
+condition and each half of it, skipping `no_imports` for managed code, the
+`managed_assembly` finding, the header size check, the metadata signature,
+reading the header at all, and `.edata` back in the packer list.
+
 ## Version 0.7.7 - icons and help files
 
 ### What the unrecognised members were

@@ -159,6 +159,8 @@ DIRECTORY_IMPORT = 1
 # than an RVA, which is the one exception in the table and a standing trap.
 DIRECTORY_SECURITY = 4
 DIRECTORY_DEBUG = 6
+DIRECTORY_CLR = 14
+COR20_HEADER_SIZE = 72
 
 DEBUG_ENTRY_SIZE = 28
 DEBUG_TYPE_CODEVIEW = 2
@@ -333,6 +335,7 @@ class PEExtractor(RandomAccessExtractor):
         data.update(attempt("exports", lambda: self._exports(pe, config),
                             {"exports": [], "export_count": 0,
                              "exports_truncated": False}))
+        data["managed"] = attempt("clr", lambda: _managed(pe), False)
         data["tls_callbacks"] = attempt("tls", lambda: self._tls(pe, config), [])
         data["debug"] = attempt("debug", lambda: self._debug(pe, config), [])
         data["pdb_path"] = next((e["pdb_path"] for e in data["debug"] if e.get("pdb_path")),
@@ -729,8 +732,16 @@ class PEExtractor(RandomAccessExtractor):
 
         # A virtual size far above the raw size is space reserved in memory
         # that no bytes in the file fill: the room an unpacker unpacks into.
+        # Code is unpacked into a section that will run, so only an
+        # executable or code section counts. Until v0.7.8 any initialised
+        # section did, and a writable `.data` is that shape by design:
+        # Microsoft's linker folds `.bss` into it, so its virtual size covers
+        # the zeroed variables no file bytes need to hold. On 600 files from
+        # Program Files, 137 of 145 swollen sections were `.data`, writable
+        # and not executable.
         swollen = [s for s in sections
                    if not s["uninitialised"] and s["raw_size"]
+                   and (s["executable"] or s["code"])
                    and s["virtual_size"] * 100 > s["raw_size"] * percent]
         if swollen:
             out.append(mk_finding(self.name, "virtual_size_mismatch",
@@ -797,7 +808,20 @@ class PEExtractor(RandomAccessExtractor):
                 "no entry point and no executable section, so this module "
                 "carries resources rather than code", "info"))
 
-        if (not count and data.get("imports_parsed")
+        # A .NET assembly built for .NET Core or later has no import table
+        # and, as a DLL, no entry point: the runtime loads it, and its code
+        # is IL the runtime compiles, not instructions that need the
+        # operating system's API resolved. Measured on Program Files, those
+        # were the `no_imports` hits. The header is checked down to its
+        # metadata signature before this counts, because a CLR directory
+        # entry alone is one field a packed binary could set to buy its way
+        # out of the finding.
+        if data.get("managed"):
+            out.append(mk_finding(self.name, "managed_assembly",
+                "a .NET assembly: its code is IL that the runtime loads and "
+                "compiles, so the native import findings do not apply", "info"))
+
+        if (not count and data.get("imports_parsed") and not data.get("managed")
                 and not data.get("is_driver") and not resource_only):
             out.append(mk_finding(self.name, "no_imports",
                 "no imports at all, so this cannot reach the API it needs "
@@ -921,3 +945,23 @@ def _section_for_rva(sections: list[dict[str, Any]], rva: int) -> str | None:
         if start <= rva < start + span:
             return section["name"]
     return None
+
+
+def _managed(pe) -> bool:
+    """Whether this is a .NET assembly, by its runtime header and metadata.
+
+    The CLR directory entry points at a 72 byte header whose first field is
+    its own size; that header points at the metadata, which starts with the
+    signature `BSJB`. All three are checked, so a directory entry set on a
+    native file is not enough.
+    """
+    directory = pe.OPTIONAL_HEADER.DATA_DIRECTORY
+    if len(directory) <= DIRECTORY_CLR or not directory[DIRECTORY_CLR].VirtualAddress:
+        return False
+    header = pe.get_data(directory[DIRECTORY_CLR].VirtualAddress, COR20_HEADER_SIZE)
+    if len(header) < COR20_HEADER_SIZE or struct.unpack_from("<I", header, 0)[0] != COR20_HEADER_SIZE:
+        return False
+    metadata_rva, metadata_size = struct.unpack_from("<II", header, 8)
+    if not metadata_rva or metadata_size < 4:
+        return False
+    return pe.get_data(metadata_rva, 4) == b"BSJB"

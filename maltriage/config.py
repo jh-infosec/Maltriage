@@ -472,10 +472,15 @@ DEFAULT_CONFIG = {
         ".itablink", ".gcdata", ".gcbss", ".zdebug_info",
     ],
 
+    # `.edata` was in this list and in `pe_standard_sections` both, until
+    # v0.7.8. It is the export directory's standard name, written by GCC,
+    # MinGW, Delphi and Borland linkers, and 58 of 60 packer findings on
+    # 600 Program Files binaries were that name. A test now keeps the two
+    # lists apart.
     "pe_packer_sections": [
         "upx0", "upx1", "upx2", "upx!", ".upx0", ".upx1", ".aspack", ".adata",
         ".asdata", "aspack", ".boom", ".ccg", ".charmve", "bitarts", "dxpack",
-        ".ecode", ".edata", ".enigma1", ".enigma2", "fsg!", ".gentee", "kkrunchy",
+        ".ecode", ".enigma1", ".enigma2", "fsg!", ".gentee", "kkrunchy",
         ".mackt", ".mpress1", ".mpress2", ".neolit", ".neolite", ".nsp0", ".nsp1",
         ".nsp2", "nsp0", "nsp1", "nsp2", "packedbyskpe", "pebundle", "pec",
         "pec1", "pec2", "pec3", "pec4", "pec5", "pec6", "pelocknt", ".perplex",
