@@ -53,17 +53,24 @@ from typing import Any
 from .base import RandomAccessExtractor
 from .config import config_bool, config_int, config_list
 from .models import mk_finding
-from . import xlm
+from . import disk, xlm
 
 #: Families this extractor will open. RAR and 7z are recognised by the
 #: signature table and deliberately not opened: both need a third-party
 #: decompressor, and an optional dependency that unpacks hostile input is a
 #: larger decision than an optional dependency that parses it.
-ARCHIVE_FAMILIES = ("zip", "gzip", "tar")
+ARCHIVE_FAMILIES = ("zip", "gzip", "tar", "iso", "fat")
 
 #: Recognised, not opened. Reported so the absence of member analysis has a
 #: reason attached rather than looking like an archive with nothing in it.
-UNSUPPORTED_FAMILIES = ("rar", "7z")
+UNSUPPORTED_FAMILIES = ("rar", "7z", "udf", "vhd", "vhdx")
+_UNSUPPORTED_REASONS = {
+    "rar": "unpacking it needs a third-party decompressor this tool does not take",
+    "7z": "unpacking it needs a third-party decompressor this tool does not take",
+    "udf": "it is a UDF image with no ISO 9660 tree, and this tool reads ISO 9660 and FAT",
+    "vhd": "a virtual disk holds a partitioned volume, usually NTFS, which this tool does not read",
+    "vhdx": "a virtual disk holds a partitioned volume, usually NTFS, which this tool does not read",
+}
 
 FINDING_KEY = "archive_member"
 
@@ -341,8 +348,8 @@ class ArchiveExtractor(RandomAccessExtractor):
 
         if family in UNSUPPORTED_FAMILIES:
             data["parse_errors"].append(
-                f"{family}: recognised but not opened, because unpacking it "
-                f"needs a third-party decompressor this tool does not take")
+                f"{family}: recognised but not opened, because "
+                f"{_UNSUPPORTED_REASONS[family]}")
             return data
 
         if depth >= budget.max_depth:
@@ -362,6 +369,8 @@ class ArchiveExtractor(RandomAccessExtractor):
                 self._zip(path, Path(staging) if staging else None, budget, data)
             elif family == "gzip":
                 self._gzip(path, Path(staging) if staging else None, budget, data)
+            elif family in disk.READERS:
+                self._disk(path, family, Path(staging) if staging else None, budget, data)
             else:
                 self._tar(path, Path(staging) if staging else None, budget, data)
         except Exception as exc:
@@ -514,6 +523,37 @@ class ArchiveExtractor(RandomAccessExtractor):
         }
         with gzip.open(path, "rb") as handle:
             self._stage(handle, stored, entry, staging, budget, data)
+
+    def _disk(self, path: Path, family: str, staging: Path | None, budget: Budget,
+              data: dict[str, Any]) -> None:
+        """An ISO 9660 or FAT image, read by `disk.py` through one handle.
+
+        The image says where every member is; `disk.py` checks each offset
+        against the image and `ExtentReader` cannot read outside it. The
+        hidden flag is kept, because which files Explorer shows is the
+        point of the shape below.
+        """
+        size = path.stat().st_size
+        with path.open("rb") as image:
+            def read(offset: int, length: int) -> bytes:
+                image.seek(offset)
+                return image.read(max(0, length))
+            for member in disk.READERS[family](read, size, data["parse_errors"]):
+                if budget.out_of_time() or not budget.take_listing():
+                    data["truncated"] = True
+                    return
+                data["member_count"] += 1
+                entry = {
+                    "name": _display(member.name),
+                    "declared_size": member.size,
+                    "compressed_size": None,
+                    "encrypted": False,
+                    "hidden": member.hidden,
+                }
+                self._stage(disk.ExtentReader(image, member.extents, size),
+                            member.name, entry, staging, budget, data)
+                if data["truncated"]:
+                    return
 
     def _stage(self, handle, raw_name: str, entry: dict[str, Any],
                staging: Path | None, budget: Budget, data: dict[str, Any]) -> None:
@@ -676,6 +716,8 @@ class ArchiveExtractor(RandomAccessExtractor):
                 f"were not analysed", "low",
                 evidence=[{"name": "encrypted_members", "value": encrypted}]))
 
+        out.extend(_disk_findings(self.name, data))
+
         ratio = _expansion_ratio(data)
         floor = config_int(config, "archive_ratio_floor_bytes", 1048576)
         limit = config_int(config, "archive_max_ratio", 200)
@@ -691,6 +733,47 @@ class ArchiveExtractor(RandomAccessExtractor):
                           {"name": "bytes_staged", "value": staged}]))
 
         return out
+
+
+#: Extensions Explorer runs, or hands to something that runs them, when a
+#: file is opened from a mounted image.
+_LURE_EXTENSIONS = (".lnk",)
+
+
+def _disk_findings(extractor: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    """What a disk image shows and what it hides.
+
+    The shape every write-up of 2022's ISO campaigns describes: a shortcut
+    is the visible file, and what it starts sits beside it with the hidden
+    flag set, so a person who mounts the image sees one icon and opens it.
+    """
+    if data.get("format") not in disk.READERS:
+        return []
+    entries = data.get("entries") or []
+    hidden = [e for e in entries if e.get("hidden")]
+    visible = [e for e in entries if not e.get("hidden")]
+    lures = [e for e in visible
+             if str(e.get("name") or "").lower().endswith(_LURE_EXTENSIONS)]
+    out = []
+    if hidden and lures:
+        # At the gate. Neither half is unusual alone: installers ship
+        # shortcuts, and an image can hide a file for an ordinary reason. A
+        # shortcut on show with the rest hidden is the arrangement made for
+        # someone who will double-click the one thing they can see.
+        out.append(mk_finding(
+            extractor, "disk_image_lure",
+            f"a disk image showing {len(lures)} shortcut(s) and hiding "
+            f"{len(hidden)} file(s), the way a lure is laid out", "medium",
+            evidence=[{"name": "visible_shortcuts", "value": len(lures)},
+                      {"name": "hidden_files", "value": len(hidden)},
+                      {"name": "visible_files", "value": len(visible)}]))
+    elif hidden:
+        out.append(mk_finding(
+            extractor, "disk_hidden_files",
+            f"a disk image with {len(hidden)} hidden file(s), which Explorer "
+            "does not show when it is mounted", "low",
+            evidence=[{"name": "hidden_files", "value": len(hidden)}]))
+    return out
 
 
 def _expansion_ratio(data: dict[str, Any]) -> float | None:

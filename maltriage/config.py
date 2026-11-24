@@ -55,6 +55,16 @@ DEFAULT_CONFIG = {
         # A shortcut's header size and class identifier, which every one
         # starts with and nothing else does.
         [0, "4c0000000114020000000000c000000000000046", "Windows shortcut", "lnk"],
+        # Disk images. Last, so a polyglot cannot hide a PE behind "CD001"
+        # at 32 KiB: the first match wins, and the PE's comes first. An ISO's
+        # mark is past the first 4 KiB, so the pipeline reads as far as the
+        # furthest signature here, whatever `header_bytes` says.
+        [0, "636f6e6563746978", "VHD disk image", "vhd"],
+        [0, "7668647866696c65", "VHDX disk image", "vhdx"],
+        [32769, "4344303031", "ISO 9660 disk image", "iso"],
+        [32769, "4245413031", "UDF disk image", "udf"],
+        [54, "46415431", "FAT disk image", "fat"],
+        [82, "4641543332", "FAT32 disk image", "fat"],
     ],
     "executable_families": ["pe", "elf", "macho"],
 
@@ -79,6 +89,11 @@ DEFAULT_CONFIG = {
     # and `high_file_entropy` fired on 94.7% of them. A finding that fires on
     # nineteen files in twenty of a format says something about the format.
     "compressed_families": ["zip", "gzip", "png", "jpeg", "gif", "pdf"],
+    # Containers stored, not compressed, whose members are unpacked and
+    # analysed as children. A hot window in one is a member's, and is that
+    # member's finding; at the container it is `low`. Added in v0.7.5 with
+    # disk images, whose members are usually compressed installers.
+    "member_analysed_families": ["tar", "iso", "fat"],
     # Extensions whose name promises the file may carry macros. The point of
     # the list is the disagreement: a `.docx` holding a compiled VBA project
     # is a document whose name says it cannot run code and whose content says
@@ -675,7 +690,7 @@ def validate_config(config):
 
     for key in ("executable_families", "document_extensions", "signatures",
                 "pe_packer_sections", "pe_standard_sections", "yara_rule_paths",
-                "strings_run_keys",
+                "strings_run_keys", "member_analysed_families",
                 "elf_packer_sections", "elf_standard_sections"):
         if key in config and not isinstance(config[key], list):
             problems.append(f"{key} is not a list, default used")

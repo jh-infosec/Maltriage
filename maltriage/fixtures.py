@@ -647,7 +647,7 @@ def lnk_root_item(guid: str) -> bytes:
 def lnk_uri_item(uri: str, unicode: bool = True, data: bytes = b"") -> bytes:
     """A URI shell item (class 0x61): flags, a data block, then the URI."""
     text = uri.encode("utf-16-le") + b"\0\0" if unicode else uri.encode() + b"\0"
-    body = bytes([0x61, 0x80 if unicode else 0]) + struct.pack("<H", len(data)) + data + text
+    body = bytes([0x61, 0x80 if unicode else 0]) + struct.pack("<I", len(data)) + data + text
     return struct.pack("<H", len(body) + 2) + body
 
 
@@ -759,6 +759,230 @@ def build_lnk(target: str = "C:\\Windows\\System32\\notepad.exe", arguments: str
               + struct.pack("<II", flags, 0x20) + b"\0" * 24
               + struct.pack("<IiI", 0, 0, show) + b"\0" * 12)
     return header + parts + extra + b"\0\0\0\0" + trailing
+
+
+# Disk images
+
+def _both16(value: int) -> bytes:
+    return struct.pack("<H", value) + struct.pack(">H", value)
+
+
+def _both32(value: int) -> bytes:
+    return struct.pack("<I", value) + struct.pack(">I", value)
+
+
+def _iso_record(name: bytes, lba: int, size: int, flags: int) -> bytes:
+    body = (_both32(lba) + _both32(size) + b"\0" * 7 + bytes([flags, 0, 0])
+            + _both16(1) + bytes([len(name)]) + name)
+    record = bytes([0]) + body
+    if (len(record) + 1) % 2:
+        record += b"\0"
+    return bytes([len(record) + 1]) + record
+
+
+def build_iso(files: list[tuple[str, bytes, bool]], joliet: bool = True) -> bytes:
+    """An ISO 9660 image of `(path, data, hidden)` files, with a Joliet tree
+    of the same files when asked. Directories come from the paths. Each
+    directory must fit in one sector, which is plenty for a test.
+    """
+    dirs: dict[str, list] = {"": []}
+    for path, _, _ in files:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            parent, here = "/".join(parts[:depth - 1]), "/".join(parts[:depth])
+            if here not in dirs:
+                dirs[here] = []
+                dirs[parent].append(("dir", parts[depth - 1], here))
+    for index, (path, data, hidden) in enumerate(files):
+        parent, _, leaf = path.rpartition("/")
+        dirs[parent].append(("file", leaf, index))
+    order = sorted(dirs, key=lambda d: (d.count("/"), d))
+    trees = [False, True] if joliet else [False]
+
+    def name_of(text: str, tree: bool, is_file: bool) -> bytes:
+        if tree:
+            return text.encode("utf-16-be") + (";1".encode("utf-16-be") if is_file else b"")
+        if is_file and "." not in text:
+            text += "."          # level 1 writes `README.;1` for a name with no extension
+        return text.upper().encode("ascii", "replace") + (b";1" if is_file else b"")
+
+    def records_of(tree: bool, d: str, lba: dict, file_lba: list) -> list[bytes]:
+        here = lba.get((tree, d), 0)
+        parent = d.rpartition("/")[0] if "/" in d else ""
+        size_of = lambda key: sectors.get(key, 1) * 2048
+        out = [_iso_record(b"\0", here, size_of((tree, d)), 2),
+               _iso_record(b"\1", lba.get((tree, parent), 0), size_of((tree, parent)), 2)]
+        for kind, leaf, ref in dirs[d]:
+            if kind == "dir":
+                out.append(_iso_record(name_of(leaf, tree, False), lba.get((tree, ref), 0),
+                                       size_of((tree, ref)), 2))
+            else:
+                _, data, hidden = files[ref]
+                out.append(_iso_record(name_of(leaf, tree, True), file_lba[ref] if file_lba else 0,
+                                       len(data), 1 if hidden else 0))
+        return out
+
+    def packed(records: list[bytes]) -> bytes:
+        """Records never cross a sector: one that would not fit starts the next."""
+        out = bytearray()
+        for record in records:
+            room = 2048 - len(out) % 2048
+            if len(record) > room:
+                out += b"\0" * room
+            out += record
+        return bytes(out)
+
+    sectors: dict = {}
+    for tree in trees:
+        for d in order:
+            sectors[(tree, d)] = max(1, (len(packed(records_of(tree, d, {}, []))) + 2047) // 2048)
+    next_lba = 19 if joliet else 18
+    lba = {}
+    for tree in trees:
+        for d in order:
+            lba[(tree, d)] = next_lba
+            next_lba += sectors[(tree, d)]
+    file_lba = []
+    for _, data, _ in files:
+        file_lba.append(next_lba)
+        next_lba += max(1, (len(data) + 2047) // 2048)
+    total = next_lba
+
+    image = bytearray(total * 2048)
+    for tree in trees:
+        for d in order:
+            here = lba[(tree, d)]
+            body = packed(records_of(tree, d, lba, file_lba))
+            image[here * 2048:here * 2048 + len(body)] = body
+    for index, (_, data, _) in enumerate(files):
+        image[file_lba[index] * 2048:file_lba[index] * 2048 + len(data)] = data
+
+    def descriptor(kind: int, tree: bool) -> bytes:
+        block = bytearray(2048)
+        block[0:7] = bytes([kind]) + b"CD001" + b"\1"
+        block[881] = 1
+        block[80:88] = _both32(total)
+        if tree:
+            block[88:91] = b"%/E"
+        block[120:124] = _both16(1)
+        block[124:128] = _both16(1)
+        block[128:132] = _both16(2048)
+        block[156:190] = _iso_record(b"\0", lba[(tree, "")], sectors[(tree, "")] * 2048, 2)
+        return bytes(block)
+
+    image[16 * 2048:17 * 2048] = descriptor(1, False)
+    at = 17
+    if joliet:
+        image[17 * 2048:18 * 2048] = descriptor(2, True)
+        at = 18
+    image[at * 2048:at * 2048 + 7] = b"\xffCD001\x01"
+    return bytes(image)
+
+
+def _fat_short(index: int, name: str) -> bytes:
+    stem, _, ext = name.rpartition(".")
+    if not stem:
+        stem, ext = name, ""
+    short = f"F{index:05d}~1"[:8].ljust(8) + ext.upper()[:3].ljust(3)
+    return short.encode("ascii")
+
+
+def _lfn_entries(name: str, short: bytes) -> bytes:
+    checksum = 0
+    for byte in short:
+        checksum = (((checksum & 1) << 7) + (checksum >> 1) + byte) & 0xFF
+    raw = name.encode("utf-16-le") + b"\0\0"
+    while len(raw) % 26:
+        raw += b"\xff\xff"
+    pieces = [raw[i:i + 26] for i in range(0, len(raw), 26)]
+    out = b""
+    for ordinal in range(len(pieces), 0, -1):
+        piece = pieces[ordinal - 1]
+        seq = ordinal | (0x40 if ordinal == len(pieces) else 0)
+        out += (bytes([seq]) + piece[0:10] + bytes([0x0F, 0, checksum]) + piece[10:22]
+                + b"\0\0" + piece[22:26])
+    return out
+
+
+def build_fat(files: list[tuple[str, bytes, bool]]) -> bytes:
+    """A 1.44 MB FAT12 floppy image of `(path, data, hidden)` files, with long
+    names and subdirectories, laid out the way mkfs.fat and Windows do."""
+    bps, total, fat_sectors, root_entries = 512, 2880, 9, 224
+    data_start = (1 + 2 * fat_sectors + root_entries * 32 // bps) * bps
+    image = bytearray(total * bps)
+    boot = bytearray(512)
+    boot[0:3] = b"\xeb\x3c\x90"
+    boot[3:11] = b"MALTRIAG"
+    struct.pack_into("<HBHBHHBHHHII", boot, 11, bps, 1, 1, 2, root_entries, total, 0xF0,
+                     fat_sectors, 18, 2, 0, 0)
+    boot[38] = 0x29
+    boot[43:54] = b"NO NAME    "
+    boot[54:62] = b"FAT12   "
+    boot[510:512] = b"\x55\xaa"
+    image[0:512] = boot
+    fat = {0: 0xFF0, 1: 0xFFF}
+    next_cluster = [2]
+
+    def allocate(length: int) -> int:
+        count = max(1, (length + bps - 1) // bps)
+        first = next_cluster[0]
+        for i in range(count):
+            fat[first + i] = first + i + 1 if i < count - 1 else 0xFFF
+        next_cluster[0] += count
+        return first
+
+    def entry(name: str, index: int, cluster: int, size: int, attributes: int) -> bytes:
+        short = _fat_short(index, name)
+        body = short + bytes([attributes]) + b"\0" * 8 + struct.pack("<HHHHI", 0, 0, 0,
+                                                                   cluster, size)
+        return _lfn_entries(name, short) + body
+
+    dirs: dict[str, list] = {"": []}
+    for path, _, _ in files:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            parent, here = "/".join(parts[:depth - 1]), "/".join(parts[:depth])
+            if here not in dirs:
+                dirs[here] = []
+                dirs[parent].append(("dir", parts[depth - 1], here))
+    for index, (path, _, _) in enumerate(files):
+        parent, _, leaf = path.rpartition("/")
+        dirs[parent].append(("file", leaf, index))
+    cluster_of = {"": 0}
+    for d in sorted(dirs, key=lambda d: (d.count("/"), d)):
+        if d:
+            cluster_of[d] = allocate(bps)
+    counter = [0]
+    for d in sorted(dirs, key=lambda d: (d.count("/"), d)):
+        records = b""
+        if d:
+            records += (b".          " + bytes([0x10]) + b"\0" * 14 + struct.pack("<HI", cluster_of[d], 0)
+                        + b"..         " + bytes([0x10]) + b"\0" * 14
+                        + struct.pack("<HI", cluster_of[d.rpartition("/")[0] if "/" in d else ""], 0))
+        for kind, leaf, ref in dirs[d]:
+            counter[0] += 1
+            if kind == "dir":
+                records += entry(leaf, counter[0], cluster_of[ref], 0, 0x10)
+            else:
+                _, data, hidden = files[ref]
+                cluster = allocate(len(data)) if data else 0
+                start = data_start + (cluster - 2) * bps
+                if data:
+                    image[start:start + len(data)] = data
+                records += entry(leaf, counter[0], cluster, len(data), 0x22 if hidden else 0x20)
+        where = (bps * (1 + 2 * fat_sectors) if not d
+                 else data_start + (cluster_of[d] - 2) * bps)
+        image[where:where + len(records)] = records
+    table = bytearray(fat_sectors * bps)
+    for cluster, value in fat.items():
+        at = cluster + cluster // 2
+        pair = struct.unpack_from("<H", table, at)[0]
+        pair = (pair & 0x000F) | (value << 4) if cluster & 1 else (pair & 0xF000) | value
+        struct.pack_into("<H", table, at, pair)
+    for copy in range(2):
+        start = bps * (1 + copy * fat_sectors)
+        image[start:start + len(table)] = table
+    return bytes(image)
 
 
 # Sample files

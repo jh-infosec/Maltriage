@@ -199,12 +199,13 @@ plus the names everything imports:
 | `elf.py` | 703 | ELF structure |
 | `rules.py` | 407 | YARA compilation and matching |
 | `archives.py` | 466 | container recursion, and the caps that make it safe |
+| `disk.py` | 399 | ISO 9660 and FAT images: the directory trees, the hidden flags, and a reader that cannot leave a member's extents |
 | `ole.py` | 553 | OLE2 compound file structure: the chain walker, the directory tree, and stream reads |
 | `msdoc.py` | 209 | Word 97-2003 text through the piece table, and the fields in it |
 | `diff.py` | 163 | two corpus runs compared by content, for the `diff` command |
 | `ppt.py` | 101 | the compound files a `.ppt` keeps inside its presentation stream |
 | `xlm.py` | 294 | Excel 4.0 macro sheets and `Auto_Open`, from BIFF, XML and BIFF12 workbooks alike |
-| `lnk.py` | 552 | Windows shortcuts: every place a target is named, and the command line handed to `scripts.py` |
+| `lnk.py` | 554 | Windows shortcuts: every place a target is named, and the command line handed to `scripts.py` |
 | `scripts.py` | 418 | script text: decoding, the language it reads as, and the shapes of a dropper |
 | `vba.py` | 306 | MS-OVBA decompression, the `dir` stream, and what module source declares and calls |
 

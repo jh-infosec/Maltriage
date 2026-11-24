@@ -56,7 +56,8 @@ from maltriage import xlm as xlm_module
 from maltriage import diff as diff_module
 from maltriage import scripts as scripts_module
 from maltriage import lnk as lnk_module
-from maltriage.fixtures import build_lnk
+from maltriage.fixtures import build_lnk, build_iso, build_fat
+from maltriage import disk as disk_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
 from maltriage import pe as pe_module
@@ -6064,8 +6065,12 @@ def test_a_truncated_header_yields_no_range(write):
     # And a cut before the directory, which fails earlier and must also be None.
     assert extractors_module.certificate_range(body[:96], len(body)) is None
 
+    # The pipeline reads at least as far as the furthest signature, so the
+    # ones that look past the cut are left out for this test (v0.7.5).
+    near = [sig for sig in DEFAULT_CONFIG["signatures"] if sig[0] + len(sig[1]) // 2 <= 100]
     report = analyse(write("signed.exe", body),
-                     config={**DEFAULT_CONFIG, "header_bytes": sections_at + 20})
+                     config={**DEFAULT_CONFIG, "header_bytes": sections_at + 20,
+                             "signatures": near})
     assert report.data["entropy"]["excluded"] is None
     assert report.data["entropy"]["bytes_scanned"] == report.size_bytes
 
@@ -10956,7 +10961,7 @@ def test_a_uri_item_is_the_target(unicode, data):
 def test_a_uri_after_an_unexpected_data_block_is_found_by_its_scheme():
     from maltriage import fixtures as fx
     item = bytearray(fx.lnk_uri_item("https://contoso.invalid/a.docx", True, b"\x01" * 40))
-    struct.pack_into("<H", item, 4, 12)
+    struct.pack_into("<I", item, 4, 12)
     parsed = _items_lnk(fx.lnk_root_item(_INTERNET), bytes(item))
     assert parsed["targets"]["id_list"] == "https://contoso.invalid/a.docx"
 
@@ -11088,3 +11093,259 @@ def test_a_volume_name_is_read_from_its_twenty_bytes_only():
     volume = struct.pack("<H", 40) + bytes([0x2F]) + b"C:\\" + b"A" * 34 + b"\x00"
     parsed = _items_lnk(volume)
     assert parsed["targets"]["id_list"] == "C:\\" + "A" * 17
+
+
+
+def test_a_real_uri_item_has_a_four_byte_size_and_the_uri_at_eight():
+    """Measured on 588 URI items from one machine's Recent folder: the size
+    was zero in every one and the URI began at offset 8. v0.7.4 read a two
+    byte size and looked at 6, and only its search by scheme found them."""
+    uri = "ms-photos:viewer?fileName=x".encode("utf-16-le") + b"\x00\x00"
+    body = bytes([0x61, 0x80]) + b"\x00\x00\x00\x00" + uri + b"\x00\x00"
+    item = struct.pack("<H", len(body) + 2) + body
+    assert lnk_module._uri(item) == "ms-photos:viewer?fileName=x"
+    assert lnk_module._wstring(item, 8) == "ms-photos:viewer?fileName=x"
+
+
+# Disk images (v0.7.5). Every image here is built by `build_iso` or
+# `build_fat` from harmless bytes; a `.lnk` member is a shortcut to notepad.
+
+_LURE = [("Invoice November.pdf.lnk", build_lnk(), False),
+         ("lib/payload.dll", b"\x00" * 5000, True),
+         ("readme.txt", b"hello", False)]
+
+
+def _image_keys(report):
+    return {f["key"]: f for f in report.findings
+            if f["key"].startswith(("disk_", "archive_"))}
+
+
+@pytest.mark.parametrize("builder, family", [(build_iso, "iso"), (build_fat, "fat")])
+def test_a_disk_image_is_opened_and_its_members_analysed(write, builder, family):
+    report = analyse(write("a.img", builder(_LURE)))
+    assert report.data["filetype"]["family"] == family
+    archive = report.data["archive"]
+    assert sorted(e["name"] for e in archive["entries"]) == sorted(n for n, _, _ in _LURE)
+    assert [e["hidden"] for e in archive["entries"] if e["name"].endswith(".dll")] == [True]
+    shortcut = [c for c in report.children if c.data.get("lnk")]
+    assert len(shortcut) == 1 and shortcut[0].data["lnk"]["targets"]["link_info"].endswith("notepad.exe")
+
+
+@pytest.mark.parametrize("builder", [build_iso, build_fat])
+def test_a_shortcut_on_show_with_the_rest_hidden_is_a_lure(write, builder):
+    report = analyse(write("a.iso", builder(_LURE)))
+    finding = _image_keys(report)["disk_image_lure"]
+    assert finding["severity"] == "medium" and at_gate(report, "medium")
+
+
+@pytest.mark.parametrize("builder", [build_iso, build_fat])
+def test_hidden_files_without_a_shortcut_are_low(write, builder):
+    files = [("setup.exe", b"MZ" + b"\x00" * 100, False), ("data.bin", b"\x01" * 100, True)]
+    keys = _image_keys(analyse(write("a.iso", builder(files))))
+    assert keys["disk_hidden_files"]["severity"] == "low" and "disk_image_lure" not in keys
+
+
+@pytest.mark.parametrize("builder", [build_iso, build_fat])
+def test_a_shortcut_with_nothing_hidden_is_not_a_lure(write, builder):
+    files = [("Start Here.lnk", build_lnk(), False), ("app.exe", b"MZ" + b"\x00" * 100, False)]
+    keys = _image_keys(analyse(write("a.iso", builder(files))))
+    assert "disk_image_lure" not in keys and "disk_hidden_files" not in keys
+
+
+def test_a_hidden_shortcut_is_not_the_visible_lure(write):
+    files = [("a.lnk", build_lnk(), True), ("b.txt", b"x", False)]
+    keys = _image_keys(analyse(write("a.iso", build_iso(files))))
+    assert "disk_image_lure" not in keys and "disk_hidden_files" in keys
+
+
+def test_an_iso_without_joliet_is_read_by_its_plain_names(write):
+    report = analyse(write("a.iso", build_iso([("readme.txt", b"hello", False)], joliet=False)))
+    assert [e["name"] for e in report.data["archive"]["entries"]] == ["README.TXT"]
+
+
+def test_an_iso_is_identified_whatever_the_header_size(write):
+    """Its mark is at 32 KiB; the pipeline reads as far as the furthest
+    signature whatever `header_bytes` says."""
+    path = write("a.bin", build_iso(_LURE))
+    report = analyse(path, config={**DEFAULT_CONFIG, "header_bytes": 64})
+    assert report.data["filetype"]["family"] == "iso"
+    assert extractors_module.FileTypeExtractor  # still the one doing it
+    from maltriage.filetype import signature_reach
+    assert signature_reach(DEFAULT_CONFIG) == 32769 + 5
+
+
+def test_a_signature_cannot_make_the_header_enormous():
+    from maltriage.filetype import signature_reach
+    config = {**DEFAULT_CONFIG, "signatures": [[10 ** 12, "00", "x", "x"]]}
+    assert signature_reach(config) == 1 << 20
+
+
+def test_a_pe_wearing_an_iso_mark_is_still_a_pe(write):
+    """First match wins, and the PE's signature comes before the ISO's, so a
+    polyglot cannot turn the PE parser off by putting CD001 at 32 KiB."""
+    body = bytearray(build_pe())
+    body += b"\x00" * max(0, 32774 - len(body))
+    body[32769:32774] = b"CD001"
+    assert analyse(write("a.exe", bytes(body))).data["filetype"]["family"] == "pe"
+
+
+@pytest.mark.parametrize("magic, offset, family", [
+    (b"conectix", 0, "vhd"), (b"vhdxfile", 0, "vhdx"), (b"BEA01", 32769, "udf")])
+def test_images_that_are_recognised_but_not_opened_say_why(write, magic, offset, family):
+    body = bytearray(40000)
+    body[offset:offset + len(magic)] = magic
+    report = analyse(write("a.bin", bytes(body)))
+    assert report.data["filetype"]["family"] == family
+    errors = report.data["archive"]["parse_errors"]
+    assert any("recognised but not opened" in e for e in errors)
+
+
+def test_an_image_inside_a_zip_is_opened(write):
+    report = analyse(write("a.zip", _zip_bytes([("invoice.iso", build_iso(_LURE))])))
+    assert at_gate(report, "medium")
+    assert report.children[0].data["filetype"]["family"] == "iso"
+
+
+def test_a_hot_window_in_an_image_is_its_members_finding(write):
+    """A member's bytes are analysed as the member. The image saying it
+    again at medium is the same window counted twice."""
+    files = [("a.bin", os.urandom(40000), False), ("b.txt", b"\x00" * 200000, False)]
+    report = analyse(write("a.iso", build_iso(files)))
+    hot = [f for f in report.findings if f["key"] == "entropy_hotspot"]
+    assert hot and hot[0]["severity"] == "low"
+    child = [c for c in report.children if c.filename == "a.bin"][0]
+    assert any(f["key"] == "high_file_entropy" for f in child.findings)
+
+
+def test_the_extent_reader_cannot_leave_its_extents_or_the_image():
+    image = io.BytesIO(b"A" * 100 + b"B" * 100)
+    reader = disk_module.ExtentReader(image, [(90, 20), (150, 500), (1000, 10)], 200)
+    assert reader.read() == b"A" * 10 + b"B" * 10 + b"B" * 50
+    reader.close()
+    assert not image.closed
+
+
+def _members(kind, data):
+    problems = []
+    handle = io.BytesIO(data)
+    found = list(disk_module.READERS[kind](
+        lambda o, n: (handle.seek(o), handle.read(n))[1], len(data), problems))
+    return found, problems
+
+
+def test_an_iso_directory_that_contains_itself_is_read_once():
+    image = bytearray(build_iso([("d/a.txt", b"x", False)], joliet=False))
+    # The subdirectory's record in the root points back at the root.
+    root_lba = struct.unpack_from("<I", image, 16 * 2048 + 156 + 2)[0]
+    at = root_lba * 2048
+    first = image[at]
+    second = image[at + first]
+    third = at + first + second
+    struct.pack_into("<I", image, third + 2, root_lba)
+    struct.pack_into(">I", image, third + 6, root_lba)
+    found, problems = _members("iso", bytes(image))
+    assert any("appears twice" in p for p in problems)
+
+
+def test_a_fat_chain_that_loops_is_followed_once():
+    image = bytearray(build_fat([("a.bin", b"\x01" * 2000, False)]))
+    # a.bin starts at cluster 2 and takes four; point its last back at its first.
+    table, cluster, value = 512, 5, 2
+    at = table + cluster + cluster // 2
+    pair = struct.unpack_from("<H", image, at)[0]
+    pair = (pair & 0x000F) | (value << 4) if cluster & 1 else (pair & 0xF000) | value
+    struct.pack_into("<H", image, at, pair)
+    # Ask for more than the chain holds so the loop is reached.
+    entry = bytes(image).index(b"F00001~1BIN")
+    struct.pack_into("<I", image, entry + 28, 100000)
+    found, problems = _members("fat", bytes(image))
+    assert any("loops" in p for p in problems)
+    assert any("ends before its size" in p for p in problems)
+
+
+def test_a_boot_sector_that_is_not_fat_is_said_and_not_walked():
+    found, problems = _members("fat", b"\x00" * 54 + b"FAT12   " + b"\x00" * 2000)
+    assert found == [] and any("not a FAT volume" in p for p in problems)
+
+
+@pytest.mark.parametrize("builder, kind", [(build_iso, "iso"), (build_fat, "fat")])
+def test_every_truncation_and_mutation_of_an_image_is_read_without_raising(builder, kind):
+    whole = builder(_LURE)
+    rng = random.Random(11)
+    started = time.perf_counter()
+    for end in list(range(0, len(whole), 4099)) + [len(whole) - 1]:
+        _members(kind, whole[:end])
+    hot = [i for i in range(len(whole)) if whole[i]][:4000]
+    for _ in range(1500):
+        data = bytearray(whole)
+        for _ in range(rng.randint(1, 6)):
+            at = rng.choice(hot) if rng.random() < 0.8 else rng.randrange(len(data))
+            data[at] = rng.randrange(256)
+        found, _ = _members(kind, bytes(data))
+        for member in found:
+            disk_module.ExtentReader(io.BytesIO(bytes(data)), member.extents, len(data)).read(1 << 16)
+    assert time.perf_counter() - started < 60
+
+
+def test_a_pycdlib_image_is_read_like_windows_reads_it():
+    """An independent writer, where it is installed: pycdlib writes Joliet
+    and sets the existence flag the way Windows reads it."""
+    pycdlib = pytest.importorskip("pycdlib")
+    iso = pycdlib.PyCdlib()
+    iso.new(joliet=3)
+    shortcut, payload = build_lnk(), b"\x00" * 3000
+    iso.add_fp(io.BytesIO(shortcut), len(shortcut), "/INVOICE.LNK;1",
+               joliet_path="/Invoice November.pdf.lnk")
+    iso.add_fp(io.BytesIO(payload), len(payload), "/PAYLOAD.DLL;1", joliet_path="/payload.dll")
+    iso.set_hidden(iso_path="/PAYLOAD.DLL;1")
+    iso.set_hidden(joliet_path="/payload.dll")
+    out = io.BytesIO()
+    iso.write_fp(out)
+    iso.close()
+    found, problems = _members("iso", out.getvalue())
+    assert problems == []
+    assert {(m.name, m.hidden) for m in found} == {("Invoice November.pdf.lnk", False),
+                                                   ("payload.dll", True)}
+
+
+
+def test_a_plain_iso_name_with_no_extension_loses_its_trailing_dot():
+    found, _ = _members("iso", build_iso([("README", b"x", False)], joliet=False))
+    assert [m.name for m in found] == ["README"]
+
+
+@pytest.mark.parametrize("joliet", [True, False])
+def test_a_directory_longer_than_a_sector_is_read_past_its_padding(joliet):
+    """Records never cross a sector, so the end of one is padding and the
+    next record starts the next sector."""
+    files = [(f"file number {i:03d} with a long name.txt", b"x", False) for i in range(80)]
+    found, problems = _members("iso", build_iso(files, joliet=joliet))
+    assert len(found) == 80 and problems == []
+
+
+def test_long_name_entries_whose_checksum_does_not_match_are_ignored():
+    """An orphaned long name, left behind when a short-name-only tool
+    renamed the file, belongs to nothing; the 8.3 name is the name."""
+    image = bytearray(build_fat([("a long file name.txt", b"x", False)]))
+    root = 512 * 19
+    assert image[root + 11] == 0x0F
+    image[root + 13] ^= 0xFF
+    found, _ = _members("fat", bytes(image))
+    assert [m.name for m in found] == ["F00001~1.TXT"]
+
+
+def test_fat_short_names_follow_the_lower_case_flags():
+    entry = b"README  TXT" + bytes([0x20, 0x18]) + b"\x00" * 19
+    assert disk_module._short_name(entry) == "readme.txt"
+    assert disk_module._short_name(entry[:12] + b"\x08" + entry[13:]) == "readme.TXT"
+    assert disk_module._short_name(entry[:12] + b"\x00" + entry[13:]) == "README.TXT"
+
+
+def test_a_contiguous_fat_file_is_one_extent():
+    found, _ = _members("fat", build_fat([("a.bin", b"\x01" * 3000, False)]))
+    assert len(found[0].extents) == 1 and found[0].extents[0][1] == 3000
+
+
+def test_the_extent_reader_stops_at_the_image_size_it_was_given():
+    handle = io.BytesIO(b"A" * 300)
+    assert len(disk_module.ExtentReader(handle, [(150, 100)], 200).read()) == 50

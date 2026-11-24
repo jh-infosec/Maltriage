@@ -80,6 +80,12 @@ class EntropyExtractor(StreamExtractor):
         # with the argument written out there.
         self._compressed_container = ctx.get("family") in config_list(
             config, "compressed_families", [])
+        # A container whose members are each analysed. A hot window in it is
+        # a member's bytes, and the member's own report says so at whatever
+        # severity it earns, so the container saying it again at `medium`
+        # is the same observation counted twice.
+        self._members_analysed = ctx.get("family") in config_list(
+            config, "member_analysed_families", [])
         self._exclude: tuple[int, int] | None = None
         found = ctx.get("certificate_range")
         if found:
@@ -161,6 +167,7 @@ class EntropyExtractor(StreamExtractor):
             #: and silent are different things: the numbers are still here.
             "whole_file_finding_withheld": (
                 "compressed format" if self._compressed_container else None),
+            "members_analysed": self._members_analysed,
             "excluded": (
                 {"reason": "authenticode_certificate",
                  "offset": self._exclude[0],
@@ -186,10 +193,13 @@ class EntropyExtractor(StreamExtractor):
 
         # the interesting case: low overall, but a hot region inside
         if data["overall_ratio"] < file_ratio and data["high_entropy_windows"] > 0:
+            members = data.get("members_analysed")
             out.append(mk_finding(self.name, "entropy_hotspot",
                 f"{data['high_entropy_windows']} of {data['window_count']} window(s) at or "
                 f"above {window_ratio} of random, in an otherwise low-entropy file, "
-                "possible embedded packed or encrypted payload", "medium",
+                + ("inside a container whose members are analysed on their own"
+                   if members else "possible embedded packed or encrypted payload"),
+                "low" if members else "medium",
                 evidence=[{"name": "high_entropy_windows",
                            "value": data["high_entropy_windows"]},
                           {"name": "window_count", "value": data["window_count"]},

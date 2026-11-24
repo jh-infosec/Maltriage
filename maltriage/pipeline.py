@@ -53,6 +53,7 @@ from .extractors import (
 )
 from .archives import Budget, budget_from
 from .models import Report
+from .filetype import signature_reach
 from .config import DEFAULT_CONFIG, config_int, config_str, validate_config
 
 log = logging.getLogger(__name__)
@@ -106,7 +107,10 @@ def analyse(
         log.warning("config problems on %s: %s", path, "; ".join(problems))
         report.errors["config"] = "; ".join(problems)
 
-    header_bytes = config_int(config, "header_bytes", 8192)
+    # At least as far as the furthest signature reaches, or an ISO, whose
+    # mark is at 32 KiB, could never be identified. Still one slice of the
+    # one read, and still fed to the stream phase.
+    header_bytes = max(config_int(config, "header_bytes", 8192), signature_reach(config))
     chunk_bytes = config_int(config, "read_chunk_bytes", 1048576)
 
     budget = _budget if _budget is not None else budget_from(config)

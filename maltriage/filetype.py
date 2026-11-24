@@ -16,6 +16,28 @@ from .models import mk_finding
 from .pe import certificate_range
 
 
+#: The furthest a signature may make the pipeline read for its header. A
+#: config is trusted input, and still a typo should not mean a gigabyte.
+_MAX_REACH = 1 << 20
+
+
+def signature_reach(config: dict[str, Any]) -> int:
+    """How far into a file the configured signatures look."""
+    reach = 0
+    for signature in config_list(config, "signatures", []):
+        if not isinstance(signature, (list, tuple)) or len(signature) != 4:
+            continue
+        offset, magic_hex = signature[0], signature[1]
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            continue
+        try:
+            length = len(bytes.fromhex(str(magic_hex)))
+        except ValueError:
+            continue
+        reach = max(reach, offset + length)
+    return min(reach, _MAX_REACH)
+
+
 # file type
 
 class FileTypeExtractor(HeaderExtractor):

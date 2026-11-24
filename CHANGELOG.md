@@ -1,5 +1,102 @@
 # Changelog
 
+## Version 0.7.5 - disk images
+
+### Why images
+
+Windows marks a file from the internet, and before November 2022 the files
+inside a mounted image did not inherit the mark. So after macros were
+blocked, one of the commonest deliveries for a while was an `.iso` or an `.img`
+holding a shortcut and the DLL it starts, the DLL hidden so that the
+person who mounts the image sees one icon. Until this release an image was
+`unrecognised_format`, and its members were never looked at.
+
+### What is opened
+
+Two formats are opened, by `disk.py`, which reads their own structures
+and nothing else:
+
+- **ISO 9660**, from the Joliet tree when there is one (that is where
+  Windows writes long names), from the primary tree when there is not. A
+  file whose existence flag is set is one Explorer does not show.
+- **FAT12, FAT16 and FAT32**: the boot sector's parameters, the allocation
+  table, directories with their long names (checked against the short
+  name's checksum, so an orphaned long name names nothing), and the case
+  flags Windows uses for an 8.3 name. The hidden attribute is the one
+  Explorer reads.
+
+Members are handed to the archive extractor, staged under the same budget
+as a ZIP's, and analysed as children, so the shortcut inside an image is
+read by v0.7.3's reader and the DLL by the PE parser.
+
+Three more are recognised and not opened, with the reason said: UDF (an
+image with no ISO 9660 tree to fall back on), VHD and VHDX (a partitioned
+volume, usually NTFS).
+
+An ISO's mark is at 32 KiB, past the 4 KiB header. The pipeline now reads
+its header as far as the furthest configured signature reaches (capped at
+1 MiB), whatever `header_bytes` says. It is still one slice of the one
+read. The image signatures come last in the table, so a polyglot cannot
+turn the PE parser off by writing `CD001` at 32 KiB: the first match wins.
+
+### What it says
+
+| key | severity | what it says |
+|---|---|---|
+| `disk_image_lure` | medium | a visible shortcut, and hidden files beside it |
+| `disk_hidden_files` | low | hidden files, and no visible shortcut |
+
+Neither half is unusual alone. Installers ship shortcuts, and an image can
+hide a file for an ordinary reason. A shortcut on show with the rest hidden
+is an arrangement made for someone who will double-click the one thing they
+can see, which is why it is the only image key at the gate.
+
+**`entropy_hotspot` on a container whose members are analysed is now
+`low`.** A hot window in a TAR, ISO or FAT image is a member's bytes, and
+the member's own report carries whatever that earns. At `medium` on the
+container it was the same window counted twice, and on install media,
+which is mostly compressed, it would have been most images. The families
+are in config, `member_analysed_families`. TAR is included, which changes
+its behaviour too.
+
+### How it was checked
+
+Real images were made by independent tools and read back: xorriso (with
+and without Joliet), pycdlib (with the existence flag set) and mkfs.fat
+with mtools (FAT12, FAT16 and FAT32, long names, a subdirectory, a hidden
+DLL). Every member's name, size, hidden flag and bytes matched. The test
+builders `build_iso` and `build_fat` are read correctly by xorriso, mtools
+and fsck.fat in turn; the first version of `build_fat` was not, and the
+reader had agreed with it, which is why both directions were checked.
+
+Hostile input: every truncation and 1,500 mutations of each format, a
+directory that contains itself, a cluster chain that loops, a chain that
+ends before its file, a boot sector that is not FAT, a reader asked for
+bytes outside the image. Directory count, depth, directory size and the
+allocation table read are capped.
+
+### Two corrections to v0.7.4
+
+**The URI item layout was wrong.** v0.7.4 read a two byte data size at
+offset 4 and the URI from 6. Measured on 588 URI items from one machine,
+the URI began at offset 8 in every one, with a data size of zero: the size
+is four bytes. Every URI in that corpus had been found only by the search
+by scheme. The direct read now uses the four byte size; the search stays
+as the fallback.
+
+**Recent is not mostly web documents.** The v0.7.4 notes said those 588
+shortcuts were SharePoint and OneDrive documents. They were not. By
+scheme: `ms-actioncenter` 266, `ms-photos` 236, `ms-screenclip` 28,
+`https` 24, `ms-screensketch` 16, `ms-gamingoverlay` 7, `ms-settings` 5,
+and eight others. They are Windows app activations, notifications above
+all, and 25 of 588 were web addresses.
+
+### Tests
+
+1,046 pass. Every mutant of the new code was killed but one: reading the
+URI item's data size as two bytes rather than four is equivalent on every
+valid item, since the item itself cannot be larger than 65,535 bytes.
+
 ## Version 0.7.4 - what Recent is made of
 
 ### What the shortcut corpus showed

@@ -201,14 +201,16 @@ def _entry_name(entry: bytes, outer: bytes) -> str:
 def _uri(item: bytes) -> str | None:
     """The URI in a URI item (class 0x61).
 
-    It follows a block of `data size` bytes (libfwsi), in UTF-16 when the
-    item's flags say so. Accepted only if it reads as a URI; otherwise the
+    It follows a four byte data size and that many bytes of data, in UTF-16
+    when the item's flags say so. v0.7.4 read the size as two bytes and the
+    URI from offset 6, after libfwsi; on 588 real items the size was zero and
+    the URI was at 8 in every one, and only the search below had found them. Accepted only if it reads as a URI; otherwise the
     item is searched for one, and if there is none it was not read.
     """
-    if len(item) < 6:
+    if len(item) < 8:
         return None
-    flags, data_size = item[3], _u16(item, 4)
-    at = 6 + data_size
+    flags, data_size = item[3], _u32(item, 4)
+    at = 8 + data_size
     wide = bool(flags & 0x80)
     candidate = _wstring(item, at) if wide else _cstring(item, at)
     if _SCHEME.match(candidate or ""):
