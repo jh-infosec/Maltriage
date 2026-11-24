@@ -1,5 +1,74 @@
 # Changelog
 
+## Version 0.7.7 - icons and help files
+
+### What the unrecognised members were
+
+After v0.7.6 analysed every member of four real disk images, three images
+were still held at the gate by `entropy_hotspot` on a member this tool did
+not recognise. A drill printed the first four bytes of each, which say what
+a format is and nothing about the file:
+
+```
+00 00 01 00   twice   a Windows icon: autorun.ico, which install media carries
+49 54 53 46   once    "ITSF", a compiled HTML help file
+```
+
+The guess before the drill was cabinet and WIM files. It was wrong, and
+the drill is why that did not matter.
+
+### Icons
+
+An icon is a small directory and the images it points at, and since Vista
+its large frames are PNG files. So an icon is a mostly plain bitmap file
+with compressed regions in it, which is exactly the shape `entropy_hotspot`
+looks for.
+
+Its magic number is four bytes, `00 00 01 00`, too weak to call a file an
+icon on. A signature may now have a validator (`filetype.VALIDATORS`) that
+must accept the structure behind it before the signature counts, and the
+icon's checks its directory against the file: a frame count, a zero
+reserved byte in every entry, and every frame inside the file and past the
+directory. A file that starts like an icon and fails any of that is still
+`unknown`.
+
+The frames are then published as regions the format declares, and the
+entropy extractor checks each hot window against them. A hotspot whose
+every hot window lies inside a frame is the frame's own compression and is
+kept at `low`, saying so. A hot window anywhere else (after the last frame,
+say) keeps the finding at `medium`, because no image accounts for it. The
+data now carries `hot_outside_format_regions` for every file, `None` when
+the format declares no regions. If a span is ever cut from the stream, as
+a PE's signature is, window positions stop being file offsets and the
+regions are dropped rather than trusted.
+
+### Compiled HTML help
+
+`ITSF` and version 3 is identified as `chm`. It is a delivery format of its
+own (`hh.exe` runs the scripts inside one), and until now it was
+`unrecognised_format`. It is not opened yet: its content is LZX-compressed
+inside an internal directory, and reading it is a release of its own.
+
+Its whole-file entropy finding is withheld like a ZIP's, and so is an
+icon's. Its `entropy_hotspot` is not: a CHM is a plain directory around
+compressed content, which is the PDF's shape, and `entropy_hotspot` on PDFs
+is an open decision waiting on a labelled malicious corpus. The CHM joins
+it there rather than being decided differently on the strength of one file.
+
+### Predicted for the four images
+
+The image held only by its icon is released; the other icon's image is
+still held by an executable; the CHM's image is still held by its CHM and
+its executables. Three of four, from four.
+
+### Tests
+
+1,070 pass. Every mutant of the change was killed: each validator check,
+using the validator at all, publishing the frames, a window wholly rather
+than partly inside a frame, `None` without regions, `== 0` rather than
+falsy, merging adjacent frames, the CHM version bytes, and dropping regions
+when a span is cut.
+
 ## Version 0.7.6 - what four real disk images said
 
 ### The measurement

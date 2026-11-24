@@ -985,6 +985,18 @@ def build_fat(files: list[tuple[str, bytes, bool]]) -> bytes:
     return bytes(image)
 
 
+def build_ico(frames: list[bytes], trailing: bytes = b"") -> bytes:
+    """An icon of the given frame images, each in its own directory entry,
+    with `trailing` after the last frame."""
+    table_end = 6 + 16 * len(frames)
+    header = struct.pack("<HHH", 0, 1, len(frames))
+    offset = table_end
+    for frame in frames:
+        header += struct.pack("<BBBBHHII", 32, 32, 0, 0, 1, 32, len(frame), offset)
+        offset += len(frame)
+    return header + b"".join(frames) + trailing
+
+
 # Sample files
 #
 # Every fixture is synthetic. The whole test suite runs without a single

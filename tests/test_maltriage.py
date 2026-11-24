@@ -56,7 +56,7 @@ from maltriage import xlm as xlm_module
 from maltriage import diff as diff_module
 from maltriage import scripts as scripts_module
 from maltriage import lnk as lnk_module
-from maltriage.fixtures import build_lnk, build_iso, build_fat
+from maltriage.fixtures import build_lnk, build_iso, build_fat, build_ico
 from maltriage import disk as disk_module
 from maltriage import base as base_module
 from maltriage import elf as elf_module
@@ -11488,3 +11488,78 @@ def test_a_pe_inside_a_tar_member_is_the_members_finding(write):
     found = [f for f in report.findings if f["key"] == "yara_match"
              and f["discriminator"] == "embedded_pe_header"]
     assert found and found[0]["severity"] == "low"
+
+
+# v0.7.7: what the unrecognised members of four real disk images were. Two
+# icons (`00 00 01 00`) and a compiled help file (`ITSF`).
+
+def _png_frame(size=6000):
+    return b"\x89PNG\r\n\x1a\n" + os.urandom(size)
+
+
+def _bitmap_frame(size=40000):
+    return b"\x28\x00\x00\x00" + b"\x00\x11" * (size // 2)
+
+
+def _hotspot(report):
+    return [f for f in report.findings if f["key"] == "entropy_hotspot"]
+
+
+def test_an_icon_is_identified_by_its_directory(write):
+    report = analyse(write("autorun.ico", build_ico([_bitmap_frame(), _png_frame()])))
+    assert report.data["filetype"]["family"] == "ico"
+
+
+@pytest.mark.parametrize("body", [
+    b"\x00\x00\x01\x00" + b"\x00" * 200,
+    struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", 1, 1, 0, 0, 1, 32, 10, 9999) + b"\x00" * 50,
+    struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", 1, 1, 0, 7, 1, 32, 10, 22) + b"\x00" * 50,
+    struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", 1, 1, 0, 0, 1, 32, 10, 2) + b"\x00" * 50,
+])
+def test_four_bytes_of_icon_magic_are_not_an_icon(write, body):
+    """No frames, a frame past the end, a reserved byte set, a frame inside
+    the directory: each starts like an icon and is not one."""
+    assert analyse(write("a.bin", body)).data["filetype"]["family"] == "unknown"
+
+
+def test_a_hot_png_frame_in_an_icon_is_the_frame(write):
+    report = analyse(write("autorun.ico", build_ico([_bitmap_frame(), _png_frame()])))
+    hot = _hotspot(report)
+    assert hot and hot[0]["severity"] == "low" and "image frame" in hot[0]["detail"]
+    assert report.data["entropy"]["hot_outside_format_regions"] == 0
+
+
+def test_hot_bytes_after_an_icons_frames_are_still_a_hotspot(write):
+    """The directory says where the images are. What is past them is no
+    image's."""
+    report = analyse(write("a.ico", build_ico([_bitmap_frame()], trailing=os.urandom(8000))))
+    hot = _hotspot(report)
+    assert hot and hot[0]["severity"] == "medium"
+    assert report.data["entropy"]["hot_outside_format_regions"] > 0
+
+
+def test_a_file_with_no_declared_regions_says_none(write):
+    report = analyse(write("a.bin", b"\x00" * 40000 + os.urandom(20000) + b"\x00" * 40000))
+    assert report.data["entropy"]["hot_outside_format_regions"] is None
+    assert _hotspot(report)[0]["severity"] == "medium"
+
+
+def test_adjacent_frames_count_as_one_region():
+    from maltriage import entropy_scan
+    assert entropy_scan._merged([(100, 50), (150, 50), (300, 10)]) == [(100, 200), (300, 310)]
+
+
+def test_a_compiled_help_file_is_identified(write):
+    body = b"ITSF" + struct.pack("<I", 3) + b"\x00" * 200
+    assert analyse(write("help.chm", body)).data["filetype"]["family"] == "chm"
+    other = b"ITSF" + struct.pack("<I", 2) + b"\x00" * 200
+    assert analyse(write("x.bin", other)).data["filetype"]["family"] == "unknown"
+
+
+def test_regions_are_dropped_when_a_span_is_cut_from_the_stream():
+    """With a span excluded, window positions stop being file offsets. No
+    format publishes both today; this keeps it that way if one ever does."""
+    extractor = EntropyExtractor()
+    extractor.begin(Path("x"), {"size": 100000, "certificate_range": (1000, 500),
+                                "format_regions": [(0, 50000)]}, DEFAULT_CONFIG)
+    assert extractor._regions == []

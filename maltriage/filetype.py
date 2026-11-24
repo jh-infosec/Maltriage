@@ -14,6 +14,12 @@ from .base import HeaderExtractor
 from .config import config_list
 from .models import mk_finding
 from .pe import certificate_range
+from . import icon
+
+#: Families whose magic number is too weak to name a file on. The signature
+#: counts only if the structure behind it checks out against the file; if it
+#: does not, the search goes on as though the signature had not matched.
+VALIDATORS = {"ico": icon.is_icon}
 
 
 #: The furthest a signature may make the pipeline read for its header. A
@@ -70,6 +76,9 @@ class FileTypeExtractor(HeaderExtractor):
             except ValueError:
                 continue
             if magic and header[offset : offset + len(magic)] == magic:
+                check = VALIDATORS.get(fam)
+                if check is not None and not check(header, ctx.get("size") or 0):
+                    continue
                 label, family = lbl, fam
                 break
 
@@ -85,6 +94,12 @@ class FileTypeExtractor(HeaderExtractor):
         # absent would be a poor trade. Without a size there is no range, and
         # the entropy pass then scores every byte, which is the safe direction.
         size = ctx.get("size")
+        if family == "ico":
+            # The frames, as regions the format declares: the entropy
+            # extractor reads a hot window inside one as the frame's own
+            # compression. Published here, in phase 1, so the stream phase
+            # has it from its first byte.
+            ctx["format_regions"] = icon.frames(header, size or 0) or []
         if family == "pe" and size:
             found = certificate_range(header, size)
             if found:

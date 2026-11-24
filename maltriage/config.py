@@ -65,6 +65,14 @@ DEFAULT_CONFIG = {
         [32769, "4245413031", "UDF disk image", "udf"],
         [54, "46415431", "FAT disk image", "fat"],
         [82, "4641543332", "FAT32 disk image", "fat"],
+        # Compiled HTML help: `ITSF` and version 3. LZX-compressed content in
+        # a plain directory, and a delivery format of its own (hh.exe runs
+        # the scripts in it). Identified, not yet opened.
+        [0, "4954534603000000", "Compiled HTML help", "chm"],
+        # An icon. Four bytes of magic, so `filetype.VALIDATORS` checks the
+        # directory against the file before this counts. Last, so it can
+        # never shadow anything stronger.
+        [0, "00000100", "Windows icon", "ico"],
     ],
     "executable_families": ["pe", "elf", "macho"],
 
@@ -88,7 +96,7 @@ DEFAULT_CONFIG = {
     # ratio had a median of 0.996 of what random data of that length reaches,
     # and `high_file_entropy` fired on 94.7% of them. A finding that fires on
     # nineteen files in twenty of a format says something about the format.
-    "compressed_families": ["zip", "gzip", "png", "jpeg", "gif", "pdf"],
+    "compressed_families": ["zip", "gzip", "png", "jpeg", "gif", "pdf", "chm", "ico"],
     # Containers stored, not compressed, whose members are unpacked and
     # analysed as children. A hot window in one is a member's, and is that
     # member's finding; at the container it is `low`. Added in v0.7.5 with

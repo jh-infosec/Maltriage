@@ -68,6 +68,12 @@ class EntropyExtractor(StreamExtractor):
         self._window_total = 0.0
         self._hot = 0
         self._window_count = 0
+        # Regions the format itself declares, an icon's image frames for
+        # now, merged so a window spanning two adjacent frames still counts
+        # as inside. A hot window outside all of them is counted apart.
+        self._regions = _merged(ctx.get("format_regions") or [])
+        self._hot_outside = 0
+        self._scored = 0
         self._size = 0
         self._fed = 0
         # A PE's signature is not the PE's content. `FileTypeExtractor`
@@ -94,6 +100,9 @@ class EntropyExtractor(StreamExtractor):
             # a sample can aim is an evasion rather than a refinement.
             start, length = found
             self._exclude = (start, start + length)
+            # With a span cut out, window positions are no longer file
+            # offsets, so no region can be trusted to line up with them.
+            self._regions = []
 
     def _add_to_totals(self, data: bytes) -> None:
         for value, count in enumerate(byte_counts(data)):
@@ -110,8 +119,13 @@ class EntropyExtractor(StreamExtractor):
                             else max(self._window_max, entropy))
         self._window_total += entropy
         self._window_count += 1
+        start = self._scored
+        self._scored += len(window)
         if _ratio(entropy, self._window) >= self._threshold:
             self._hot += 1
+            if not any(low <= start and start + len(window) <= high
+                       for low, high in self._regions):
+                self._hot_outside += 1
 
     def feed(self, chunk: bytes) -> None:
         start = self._fed
@@ -168,6 +182,9 @@ class EntropyExtractor(StreamExtractor):
             "whole_file_finding_withheld": (
                 "compressed format" if self._compressed_container else None),
             "members_analysed": self._members_analysed,
+            #: Hot windows outside every region the format declares, or
+            #: `None` when it declares none.
+            "hot_outside_format_regions": self._hot_outside if self._regions else None,
             "excluded": (
                 {"reason": "authenticode_certificate",
                  "offset": self._exclude[0],
@@ -194,15 +211,28 @@ class EntropyExtractor(StreamExtractor):
         # the interesting case: low overall, but a hot region inside
         if data["overall_ratio"] < file_ratio and data["high_entropy_windows"] > 0:
             members = data.get("members_analysed")
+            framed = data.get("hot_outside_format_regions") == 0
             out.append(mk_finding(self.name, "entropy_hotspot",
                 f"{data['high_entropy_windows']} of {data['window_count']} window(s) at or "
                 f"above {window_ratio} of random, in an otherwise low-entropy file, "
-                + ("inside a container whose members are analysed on their own"
-                   if members else "possible embedded packed or encrypted payload"),
-                "low" if members else "medium",
+                + ("inside a container whose members are analysed on their own" if members
+                   else "every one inside an image frame the file declares" if framed
+                   else "possible embedded packed or encrypted payload"),
+                "low" if members or framed else "medium",
                 evidence=[{"name": "high_entropy_windows",
                            "value": data["high_entropy_windows"]},
                           {"name": "window_count", "value": data["window_count"]},
                           {"name": "window_bytes", "value": data.get("window_bytes")},
                           {"name": "threshold", "value": window_ratio}]))
         return out
+
+
+def _merged(regions: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """(offset, length) regions as sorted, merged (low, high) spans."""
+    out: list[list[int]] = []
+    for low, high in sorted((offset, offset + length) for offset, length in regions):
+        if out and low <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], high)
+        else:
+            out.append([low, high])
+    return [(low, high) for low, high in out]
