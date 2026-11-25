@@ -424,7 +424,7 @@ precision and recall, so it comes before the classifier rather than after.
 - [x] Shortcut files (`.lnk`) and what they run *(v0.7.3)*
 - [x] Disk images as containers: ISO 9660 with Joliet, and FAT12/16/32 *(v0.7.5)*
 - [ ] UDF-only images, and VHD/VHDX (recognised since v0.7.5, not opened: they need UDF and NTFS readers)
-- [ ] Objects embedded in RTF
+- [x] Objects embedded in RTF *(v0.7.9)*
 
 **Two severity decisions are now waiting on this release rather than on an
 argument.** `entropy_hotspot` is the largest lever ever measured here:

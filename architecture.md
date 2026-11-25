@@ -200,6 +200,7 @@ plus the names everything imports:
 | `rules.py` | 407 | YARA compilation and matching |
 | `archives.py` | 466 | container recursion, and the caps that make it safe |
 | `icon.py` | 49 | the frames a Windows icon declares, checked against the file before its weak magic counts |
+| `rtf.py` | 361 | objects embedded in RTF: the hex read through what Word skips, the OLE1 header, Packager's file |
 | `disk.py` | 399 | ISO 9660 and FAT images: the directory trees, the hidden flags, and a reader that cannot leave a member's extents |
 | `ole.py` | 553 | OLE2 compound file structure: the chain walker, the directory tree, and stream reads |
 | `msdoc.py` | 209 | Word 97-2003 text through the piece table, and the fields in it |

@@ -11624,3 +11624,237 @@ def test_a_section_declared_as_code_counts_even_if_not_marked_executable(write):
     pe = build_pe(sections=[(".text", SECTION_CODE, b"\x90" * 0x180),
                             (".pk", 0x40000020, b"\x00" * 0x200, 0x8000)])
     assert "virtual_size_mismatch" in _pe_keys(analyse(write("a.exe", pe)))
+
+
+# v0.7.9: objects embedded in RTF. Every object here is built from harmless
+# bytes: the "executables" are `build_pe()`, the Equation object is an empty
+# compound file with the editor's class id, and nothing runs anything.
+
+from maltriage.fixtures import build_rtf, ole1_object, package_native
+from maltriage import rtf as rtf_module
+
+_EQUATION_CLSID = bytes.fromhex("02ce020000000000c000000000000046")
+
+
+def _equation(class_name="Equation.3", clsid=_EQUATION_CLSID):
+    native, _ = _cfb({"Equation Native": b"\x1c\x00" + b"\x00" * 600}, root_clsid=clsid)
+    return (class_name, ole1_object(class_name, native))
+
+
+def _package(label, data=b"hello"):
+    return ("Package", ole1_object("Package", package_native(label, data)))
+
+
+def _rtf_keys(report):
+    return {f["key"]: f for f in report.findings if f["key"].startswith("rtf_")}
+
+
+def test_a_packaged_executable_is_staged_analysed_and_at_the_gate(write):
+    report = analyse(write("a.rtf", build_rtf([_package("invoice.pdf.exe", build_pe())])))
+    keys = _rtf_keys(report)
+    assert keys["rtf_embedded_executable"]["severity"] == "medium"
+    assert report.data["archive"]["rtf"]["objects"][0]["package_name"] == "invoice.pdf.exe"
+    child = report.children[0]
+    assert child.filename == "invoice.pdf.exe" and child.data["filetype"]["family"] == "pe"
+
+
+def test_an_equation_editor_object_is_at_the_gate(write):
+    report = analyse(write("a.rtf", build_rtf([_equation()])))
+    assert _rtf_keys(report)["rtf_equation_object"]["severity"] == "medium"
+    assert report.children[0].data["filetype"]["family"] == "ole"
+
+
+def test_an_equation_object_is_known_by_its_class_id_whatever_it_is_called(write):
+    """Lures rename the class; the compound file inside still says what it is."""
+    doc = build_rtf([_equation(class_name="Xq.1")], rtf_class=False)
+    assert "rtf_equation_object" in _rtf_keys(analyse(write("a.rtf", doc)))
+
+
+def test_an_ole2link_object_is_at_the_gate(write):
+    native, _ = _cfb({"\x01Ole": b"\x01\x00\x00\x02" + b"\x00" * 100})
+    report = analyse(write("a.rtf", build_rtf([("OLE2Link", ole1_object("OLE2Link", native))])))
+    assert _rtf_keys(report)["rtf_ole2link_object"]["severity"] == "medium"
+
+
+def test_an_embedded_spreadsheet_is_an_object_and_nothing_more(write):
+    native, _ = _cfb({"Workbook": b"\x09\x08" + b"\x00" * 600})
+    report = analyse(write("a.rtf", build_rtf([("Excel.Sheet.8", ole1_object("Excel.Sheet.8", native))])))
+    keys = _rtf_keys(report)
+    assert set(keys) == {"rtf_embedded_object"} and keys["rtf_embedded_object"]["severity"] == "low"
+    assert not at_gate(report, "medium")
+
+
+def test_a_packaged_text_file_is_low(write):
+    keys = _rtf_keys(analyse(write("a.rtf", build_rtf([_package("notes.txt")]))))
+    assert set(keys) == {"rtf_embedded_object"}
+
+
+def test_an_object_that_updates_itself_on_open_is_said(write):
+    keys = _rtf_keys(analyse(write("a.rtf", build_rtf([_package("notes.txt")], update=True))))
+    assert keys["rtf_object_autoupdate"]["severity"] == "low"
+
+
+@pytest.mark.parametrize("options", [
+    {"wrap": 64},
+    {"junk": b" "},
+    {"junk": b"\r\n"},
+    {"junk": b"\\par "},
+    {"junk": b"{\\*\\shp 0123}"},
+    {"junk": b"\\'20"},
+    {"junk": b"{}"},
+    {"junk": b"\\u1234 "},
+    {"header": b"{\\rtxa"},
+])
+def test_the_hex_is_read_through_what_word_skips(write, options):
+    doc = build_rtf([_package("invoice.pdf.exe", build_pe())], **options)
+    report = analyse(write("a.rtf", doc))
+    assert report.data["filetype"]["family"] == "rtf"
+    assert "rtf_embedded_executable" in _rtf_keys(report)
+    assert report.children[0].data["filetype"]["family"] == "pe"
+
+
+def test_bin_inserts_raw_bytes_where_it_stands():
+    payload = ole1_object("Package", package_native("a.exe", b"MZ" + b"\x7b\x7d" * 40))
+    digits = payload.hex().encode()
+    doc = (b"{\\rtf1{\\object\\objemb{\\*\\objdata " + digits[:40]
+           + b"\\bin" + str(len(payload) - 20).encode() + b" " + payload[20:] + b"}}}")
+    found = rtf_module.objects(doc, 1 << 26, [])
+    assert bytes(found[0].data) == payload and found[0].package_name == "a.exe"
+
+
+def test_an_odd_hex_digit_at_the_end_is_dropped():
+    payload = ole1_object("Package", package_native("a.txt", b"x"))
+    doc = b"{\\rtf1{\\object{\\*\\objdata " + payload.hex().encode() + b"f}}}"
+    assert bytes(rtf_module.objects(doc, 1 << 26, [])[0].data) == payload
+
+
+def test_objdata_outside_an_object_is_still_read():
+    payload = ole1_object("Package", package_native("a.exe", build_pe()))
+    doc = b"{\\rtf1 {\\*\\objdata " + payload.hex().encode() + b"}}"
+    found = rtf_module.objects(doc, 1 << 26, [])
+    assert len(found) == 1 and found[0].package_name == "a.exe"
+
+
+def test_a_linked_object_has_no_native_data():
+    payload = ole1_object("Word.Document.8", b"", linked=True)
+    found = rtf_module.objects(b"{\\rtf1{\\object\\objlink{\\*\\objdata "
+                               + payload.hex().encode() + b"}}}", 1 << 26, [])
+    assert found[0].describe()["format"] == "linked" and found[0].native == b""
+
+
+def test_a_package_label_that_climbs_out_is_staged_by_its_last_part(write):
+    report = analyse(write("a.rtf", build_rtf([_package("..\\..\\x.exe", build_pe())])))
+    assert report.children[0].filename == "x.exe"
+    assert "archive_path_traversal" not in {f["key"] for f in report.findings}
+
+
+def test_the_number_of_objects_is_bounded():
+    one = _package("a.txt")
+    problems = []
+    found = rtf_module.objects(build_rtf([one] * 70), 1 << 26, problems)
+    assert len(found) == rtf_module._MAX_OBJECTS
+    assert any("more than" in p for p in problems)
+
+
+def test_decoded_object_data_is_bounded():
+    problems = []
+    found = rtf_module.objects(build_rtf([_package("a.bin", b"\x00" * 50000)]), 4096, problems)
+    assert len(found[0].data) == 4096
+    assert any("past the limit" in p for p in problems)
+
+
+def test_nesting_is_bounded():
+    problems = []
+    rtf_module.objects(b"{\\rtf1" + b"{" * 5000 + b"}" * 5000 + b"}", 1 << 20, problems)
+    assert any("nested deeper" in p for p in problems)
+
+
+def test_a_header_that_is_not_rtf_is_not_rtf(write):
+    assert analyse(write("a.txt", b"{\\pard hello}")).data["filetype"]["family"] != "rtf"
+
+
+def test_every_truncation_and_mutation_of_an_rtf_is_read_without_raising():
+    whole = build_rtf([_package("invoice.pdf.exe", build_pe()), _equation()], wrap=60,
+                      junk=b"{\\*\\x}")
+    rng = random.Random(5)
+    started = time.perf_counter()
+    for end in range(0, len(whole), 97):
+        rtf_module.members(whole[:end], 1 << 24, [])
+    for _ in range(1500):
+        data = bytearray(whole)
+        for _ in range(rng.randint(1, 8)):
+            data[rng.randrange(len(data))] = rng.choice(b"{}\\0123456789abcdef \r\n*'")
+        found, payloads = rtf_module.members(bytes(data), 1 << 24, [])
+        list(payloads)
+    assert time.perf_counter() - started < 60
+
+
+def test_a_large_document_of_tiny_tokens_is_read_in_bounded_time():
+    doc = b"{\\rtf1" + b"\\par " * 400_000 + b"}"
+    started = time.perf_counter()
+    rtf_module.objects(doc, 1 << 20, [])
+    assert time.perf_counter() - started < 10
+
+
+def test_the_reader_agrees_with_rtfobj():
+    """oletools' rtfobj, where it is installed, on the obfuscations both
+    handle. Where they part, `{\\*\\x ...}` inside the hex, rtfobj reads
+    nothing and this reader skips the ignorable destination as Word does."""
+    rtfobj = pytest.importorskip("oletools.rtfobj")
+    for options in ({}, {"wrap": 64}, {"junk": b" \\par "}, {"junk": b"\\'20"},
+                    {"header": b"{\\rtxa"}, {"update": True, "rtf_class": False}):
+        doc = build_rtf([_package("invoice.pdf.exe", build_pe()), _equation()], **options)
+        mine = rtf_module.objects(doc, 1 << 26, [])
+        parser = rtfobj.RtfObjParser(doc)
+        parser.parse()
+        theirs = parser.objects
+        assert len(mine) == len(theirs) == 2
+        assert theirs[0].filename == mine[0].package_name
+        assert theirs[0].olepkgdata == mine[0].package_data
+        assert theirs[1].oledata == mine[1].native
+        assert theirs[1].class_name.decode() == mine[1].class_name
+
+
+def test_a_destination_group_inside_the_hex_is_skipped():
+    """`{\\pict ...}` is a picture wherever it sits; its digits are not the
+    object's."""
+    doc = build_rtf([_package("invoice.pdf.exe", build_pe())], junk=b"{\\pict 0123}")
+    assert rtf_module.objects(doc, 1 << 26, [])[0].package_name == "invoice.pdf.exe"
+
+
+def test_a_hex_pair_split_by_junk_is_joined():
+    payload = ole1_object("Package", package_native("a.exe", build_pe()))
+    digits = payload.hex().encode()
+    mangled = b" \\par ".join(digits[i:i + 3] for i in range(0, len(digits), 3))
+    found = rtf_module.objects(b"{\\rtf1{\\object{\\*\\objdata " + mangled + b"}}}", 1 << 26, [])
+    assert bytes(found[0].data) == payload
+
+
+def test_an_object_marked_as_a_link_is_a_link_without_its_data():
+    found = rtf_module.objects(b"{\\rtf1{\\object\\objautlink{\\*\\objclass Word.Document.8}}}",
+                               1 << 20, [])
+    assert found[0].describe()["format"] == "linked"
+
+
+def test_a_second_objdata_in_one_object_is_an_object_of_its_own():
+    one = ole1_object("Package", package_native("a.txt", b"x")).hex().encode()
+    two = ole1_object("Package", package_native("b.txt", b"y")).hex().encode()
+    doc = b"{\\rtf1{\\object{\\*\\objdata " + one + b"}{\\*\\objdata " + two + b"}}}"
+    assert [o.package_name for o in rtf_module.objects(doc, 1 << 20, [])] == ["a.txt", "b.txt"]
+
+
+def test_package_data_with_a_leading_size_is_read():
+    native = package_native("a.exe", build_pe())
+    payload = ole1_object("Package", struct.pack("<I", len(native)) + native)
+    found = rtf_module.objects(b"{\\rtf1{\\object{\\*\\objdata " + payload.hex().encode() + b"}}}",
+                               1 << 26, [])
+    assert found[0].package_name == "a.exe"
+
+
+def test_what_follows_a_linked_objects_header_is_not_native_data():
+    """A linked object's header goes on with a network name and update
+    options, not a native data size; read as one, it would be garbage."""
+    payload = ole1_object("Word.Document.8", b"", linked=True) + struct.pack("<I", 8) + b"\\\\srv\\x\x00"
+    found = rtf_module.objects(b"{\\rtf1{\\object\\objlink{\\*\\objdata "
+                               + payload.hex().encode() + b"}}}", 1 << 20, [])
+    assert found[0].native == b"" and found[0].problems == []

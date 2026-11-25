@@ -50,7 +50,9 @@ DEFAULT_CONFIG = {
         [0, "424d", "BMP image", "bmp"],
         # `<?xml`, which is a magic number in every way that matters here.
         [0, "3c3f786d6c", "XML document", "xml"],
-        [0, "7b5c727466", "RTF document", "rtf"],
+        # `{\rt`, not `{\rtf`: Word opens a document whose header is
+        # `{\rtxyz`, so that is how far a lure has to match.
+        [0, "7b5c7274", "RTF document", "rtf"],
         [0, "edabeedb", "RPM package", "rpm"],
         # A shortcut's header size and class identifier, which every one
         # starts with and nothing else does.
@@ -342,6 +344,10 @@ DEFAULT_CONFIG = {
     "script_max_bytes": 1048576,
     # A shortcut is a few kilobytes. Past this, only the size is counted.
     "lnk_max_bytes": 1048576,
+    # An RTF is read whole to find its objects, up to this; and the objects'
+    # decoded data, all together, up to the second.
+    "rtf_max_bytes": 67108864,
+    "rtf_max_object_bytes": 67108864,
     "archive_max_member_bytes": 67108864,
 
     # Wall-clock seconds for the recursion. The known gap `architecture.md`
@@ -639,6 +645,8 @@ def validate_config(config):
     check_int("ppt_max_total_bytes")
     check_int("script_max_bytes")
     check_int("lnk_max_bytes")
+    check_int("rtf_max_bytes")
+    check_int("rtf_max_object_bytes")
 
     check_int("header_bytes")
     check_int("read_chunk_bytes")

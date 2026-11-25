@@ -1017,6 +1017,53 @@ def build_ico(frames: list[bytes], trailing: bytes = b"") -> bytes:
     return header + b"".join(frames) + trailing
 
 
+# RTF
+
+def _lpstr(text: str) -> bytes:
+    raw = text.encode("cp1252") + b"\0"
+    return struct.pack("<I", len(raw)) + raw
+
+
+def ole1_object(class_name: str, native: bytes, linked: bool = False) -> bytes:
+    """An OLE1 object as RTF carries it in `\\objdata` (MS-OLEDS 2.2)."""
+    head = struct.pack("<II", 0x0501, 1 if linked else 2) + _lpstr(class_name)
+    head += _lpstr("") + _lpstr("")
+    if linked:
+        return head
+    return head + struct.pack("<I", len(native)) + native
+
+
+def package_native(label: str, data: bytes, path: str = "C:\\Users\\a\\Desktop\\") -> bytes:
+    """Packager's native data: a label, a source path, a temp path, the file."""
+    temp = (path + label).encode("cp1252") + b"\0"
+    return (struct.pack("<H", 2) + label.encode("cp1252") + b"\0"
+            + (path + label).encode("cp1252") + b"\0" + struct.pack("<HH", 0, 3)
+            + struct.pack("<I", len(temp)) + temp + struct.pack("<I", len(data)) + data)
+
+
+def build_rtf(objects: list[tuple[str, bytes]], header: bytes = b"{\\rtf1\\ansi",
+              update: bool = False, wrap: int = 0, junk: bytes = b"",
+              rtf_class: bool = True) -> bytes:
+    """An RTF document holding OLE1 objects, given as (class, OLE1 bytes).
+
+    `wrap` breaks the hex into lines that long; `junk` is put between every
+    pair of hex digits, the way lures do, to test that the reader skips
+    what Word skips.
+    """
+    body = header + b" Hello.\\par "
+    for class_name, data in objects:
+        digits = data.hex().encode()
+        pairs = [digits[i:i + 2] for i in range(0, len(digits), 2)]
+        text = junk.join(pairs) if junk else digits
+        if wrap:
+            text = b"\r\n".join(text[i:i + wrap] for i in range(0, len(text), wrap))
+        body += b"{\\object\\objemb" + (b"\\objupdate" if update else b"")
+        if rtf_class:
+            body += b"{\\*\\objclass " + class_name.encode() + b"}"
+        body += b"\\objw380\\objh260{\\*\\objdata " + text + b"}}"
+    return body + b"}"
+
+
 # Sample files
 #
 # Every fixture is synthetic. The whole test suite runs without a single

@@ -1,5 +1,89 @@
 # Changelog
 
+## Version 0.7.9 - objects in RTF
+
+### Why
+
+RTF has no macros, so an embedded object is the mechanism it has, and
+since 2017 that has meant three things above all: an Equation Editor
+object built to exploit it (CVE-2017-11882, CVE-2018-0802), an `OLE2Link`
+object that fetches a remote document when the file opens (CVE-2017-0199),
+and a Packager object holding a file someone will be asked to double-click.
+RTF was recognised by its signature and never opened.
+
+### What is read
+
+`rtf.py` finds every object and decodes its hex. Lures mangle that hex,
+because Word is forgiving and analysers were not, so the reader does what
+Word does with each trick:
+
+- a document starts `{\rt`, and Word opens `{\rtxa` as readily as
+  `{\rtf1`, so the signature is now `{\rt`;
+- whitespace, line breaks and stray characters inside the hex are skipped,
+  and a pair split across them is joined;
+- control words inside the hex are skipped, and `\binN` inserts N raw bytes
+  where it stands;
+- a nested group is part of the hex unless it is a destination (`{\*...}`
+  or a known one such as `{\pict ...}`), which is skipped;
+- an odd digit at the end is dropped;
+- `\objdata` is read wherever it is, inside an `\object` group or not, and
+  a second one in an object is an object of its own.
+
+The decoded data is an OLE1 object (MS-OLEDS 2.2): a class name, a format,
+and native data. For most classes the native data is an OLE2 compound
+file; for Packager it is a file and its name, read with or without the
+leading size some writers put first.
+
+### Objects are members
+
+Each object's payload is handed to the archive extractor and staged under
+the same budget as a ZIP's members: the compound file, or Packager's file
+under its own name. So an embedded Word document is read by the OLE reader,
+a packaged executable by the PE reader, a packaged shortcut by the shortcut
+reader, each as a child. A Packager label that climbs out of its directory
+(`..\..\x.exe`) is staged by its last part: it is the name the file is
+dropped under, not a path in a container.
+
+### What it says
+
+| key | severity | what it says |
+|---|---|---|
+| `rtf_equation_object` | medium | an Equation Editor object, by class name or by the compound file's class id |
+| `rtf_ole2link_object` | medium | an `OLE2Link` object |
+| `rtf_embedded_executable` | medium | a Packager file whose name Windows runs when it is opened |
+| `rtf_embedded_object` | low | any other object, by class |
+| `rtf_object_autoupdate` | low | an object marked `\objupdate`, which loads without a click |
+
+Equation Editor was removed from Office in January 2018, so an object of
+its class in a document today exists for the exploit. Lures rename the
+class in the RTF and in the OLE1 header; the compound file inside still
+carries the editor's class id, and that is checked too. An embedded chart
+or spreadsheet is what objects are for, and stays `low`.
+
+### How it was checked
+
+oletools' `rtfobj`, an independent reader, agrees on class names, the
+packaged file's name and bytes, and the native data, through line wrapping,
+`\par` and `\'20` between digits, the `{\rtxa` header and an object with no
+`\objclass`. Where they part, `{\*\x ...}` groups inside the hex, rtfobj
+reads nothing and this reader skips the ignorable destination, as Word does.
+
+Hostile input: every truncation and 1,500 mutations, seventy objects, a
+decoded size over the limit (said, not silent), nesting five thousand deep,
+and a document of 400,000 tiny control words read in bounded time.
+
+### Found on the way
+
+A mutation run was interrupted mid-mutant by a time limit and left one in
+the source: linked objects read as though they carried native data. The
+full suite then passed with it in place. A grep for the mutation's marker
+found it, and a test now feeds a linked object the header fields that
+follow it in a real file, which the mutant reads as garbage.
+
+### Tests
+
+1,112 pass. Every mutant of the reader and its findings was killed.
+
 ## Version 0.7.8 - what held Program Files at the gate
 
 ### The measurement

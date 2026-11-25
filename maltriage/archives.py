@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import gzip
 import html
+import io
 import re
 import struct
 import tarfile
@@ -53,13 +54,13 @@ from typing import Any
 from .base import RandomAccessExtractor
 from .config import config_bool, config_int, config_list
 from .models import mk_finding
-from . import disk, xlm
+from . import disk, rtf, xlm
 
 #: Families this extractor will open. RAR and 7z are recognised by the
 #: signature table and deliberately not opened: both need a third-party
 #: decompressor, and an optional dependency that unpacks hostile input is a
 #: larger decision than an optional dependency that parses it.
-ARCHIVE_FAMILIES = ("zip", "gzip", "tar", "iso", "fat")
+ARCHIVE_FAMILIES = ("zip", "gzip", "tar", "iso", "fat", "rtf")
 
 #: Recognised, not opened. Reported so the absence of member analysis has a
 #: reason attached rather than looking like an archive with nothing in it.
@@ -369,6 +370,8 @@ class ArchiveExtractor(RandomAccessExtractor):
                 self._zip(path, Path(staging) if staging else None, budget, data)
             elif family == "gzip":
                 self._gzip(path, Path(staging) if staging else None, budget, data)
+            elif family == "rtf":
+                self._rtf(path, Path(staging) if staging else None, budget, data, config)
             elif family in disk.READERS:
                 self._disk(path, family, Path(staging) if staging else None, budget, data)
             else:
@@ -567,6 +570,34 @@ class ArchiveExtractor(RandomAccessExtractor):
                 if data["truncated"]:
                     return
 
+    def _rtf(self, path: Path, staging: Path | None, budget: Budget,
+             data: dict[str, Any], config: dict[str, Any]) -> None:
+        """The objects embedded in an RTF, each payload staged as a member.
+
+        `rtf.py` decodes them; what it hands back is an OLE2 compound file,
+        or for a Packager object the packaged file under its own name, and
+        each is analysed as a child like any other member.
+        """
+        cap = config_int(config, "rtf_max_bytes", 67108864)
+        with path.open("rb") as handle:
+            body = handle.read(cap + 1)
+        if len(body) > cap:
+            data["parse_errors"].append(f"rtf: read the first {cap} bytes of a longer document")
+            body = body[:cap]
+        found, payloads = rtf.members(
+            body, config_int(config, "rtf_max_object_bytes", 67108864), data["parse_errors"])
+        data["rtf"] = {"objects": [obj.describe() for obj in found]}
+        for name, payload in payloads:
+            if budget.out_of_time() or not budget.take_listing():
+                data["truncated"] = True
+                return
+            data["member_count"] += 1
+            entry = {"name": _display(name), "declared_size": len(payload),
+                     "compressed_size": None, "encrypted": False}
+            self._stage(io.BytesIO(payload), name, entry, staging, budget, data)
+            if data["truncated"]:
+                return
+
     def _stage(self, handle, raw_name: str, entry: dict[str, Any],
                staging: Path | None, budget: Budget, data: dict[str, Any]) -> None:
         if not budget.take_entry():
@@ -741,6 +772,7 @@ class ArchiveExtractor(RandomAccessExtractor):
                 evidence=[{"name": "encrypted_members", "value": encrypted}]))
 
         out.extend(_disk_findings(self.name, data))
+        out.extend(_rtf_findings(self.name, data))
 
         ratio = _expansion_ratio(data)
         floor = config_int(config, "archive_ratio_floor_bytes", 1048576)
@@ -797,6 +829,66 @@ def _disk_findings(extractor: str, data: dict[str, Any]) -> list[dict[str, Any]]
             f"a disk image with {len(hidden)} hidden file(s), which Explorer "
             "does not show when it is mounted", "low",
             evidence=[{"name": "hidden_files", "value": len(hidden)}]))
+    return out
+
+
+#: What a Packager object's file must be called for opening it to run it.
+_RUNNABLE_EXTENSIONS = (".exe", ".scr", ".com", ".pif", ".cpl", ".dll", ".msi", ".bat",
+                        ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta",
+                        ".ps1", ".lnk", ".jar", ".chm", ".reg")
+
+
+def _rtf_findings(extractor: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    """What the objects in an RTF are, by class and by packaged name.
+
+    Three shapes reach the gate, each because an ordinary document has no
+    use for it: an Equation Editor object (Office removed the editor in
+    January 2018, and an object of its class today exists to exploit it),
+    an `OLE2Link` object (the CVE-2017-0199 shape: a document fetched from
+    a server when this one opens), and a Packager object holding a file
+    Windows runs when it is opened. Every other object is `low`: an
+    embedded chart or spreadsheet is what objects are for.
+    """
+    if data.get("format") != "rtf":
+        return []
+    objects = (data.get("rtf") or {}).get("objects") or []
+    out = []
+    equation = [o for o in objects if o.get("equation")]
+    link = [o for o in objects if o.get("ole2link")]
+    runnable = [o for o in objects
+                if str(o.get("package_name") or "").lower().endswith(_RUNNABLE_EXTENSIONS)]
+    if equation:
+        out.append(mk_finding(
+            extractor, "rtf_equation_object",
+            f"{len(equation)} Equation Editor object(s): the editor was removed from "
+            "Office in 2018, and an object of its class now exists to exploit it", "medium",
+            evidence=[{"name": "count", "value": len(equation)}]))
+    if link:
+        out.append(mk_finding(
+            extractor, "rtf_ole2link_object",
+            f"{len(link)} OLE2Link object(s), which fetch a document from wherever "
+            "they point when this one opens", "medium",
+            evidence=[{"name": "count", "value": len(link)}]))
+    if runnable:
+        names = ", ".join(str(o["package_name"]) for o in runnable[:4])
+        out.append(mk_finding(
+            extractor, "rtf_embedded_executable",
+            f"{len(runnable)} packaged file(s) Windows runs when opened: {names}", "medium",
+            evidence=[{"name": "count", "value": len(runnable)}]))
+    rest = [o for o in objects if o not in equation and o not in link and o not in runnable]
+    if rest:
+        classes = sorted({str(o.get("class") or "unnamed") for o in rest})
+        out.append(mk_finding(
+            extractor, "rtf_embedded_object",
+            f"{len(rest)} embedded object(s) of class {', '.join(classes[:6])}", "low",
+            evidence=[{"name": "count", "value": len(rest)}]))
+    updating = [o for o in objects if o.get("autoupdate")]
+    if updating:
+        out.append(mk_finding(
+            extractor, "rtf_object_autoupdate",
+            f"{len(updating)} object(s) marked to update when the document opens, so "
+            "they load without a click", "low",
+            evidence=[{"name": "count", "value": len(updating)}]))
     return out
 
 
